@@ -265,6 +265,164 @@ class AdversarialReview(_StrictModel):
     do_not_advance: bool = False
 
 
+# Step 11: the platform's fixed 18-category invalidation checklist. Every
+# `DevilsAdvocateReview` must assess every one of these for every trade —
+# `_validate_all_categories_present` below enforces that as a schema
+# invariant, not just a persona instruction the model might skip.
+RiskCategory = Literal[
+    "directional_risk",
+    "volatility_expansion",
+    "volatility_collapse",
+    "gap_risk",
+    "liquidity_deterioration",
+    "earnings",
+    "economic_events",
+    "interest_rates",
+    "sector_risk",
+    "correlation",
+    "portfolio_concentration",
+    "assignment_risk",
+    "early_exercise",
+    "dividend_risk",
+    "regime_misclassification",
+    "technical_breakdown",
+    "unexpected_news",
+    "execution_risk",
+]
+
+_ALL_RISK_CATEGORIES: frozenset[str] = frozenset(RiskCategory.__args__)  # type: ignore[attr-defined]
+
+ProbabilityCategory = Literal["low", "medium", "high"]
+SeverityCategory = Literal["low", "medium", "high", "severe"]
+PortfolioImpactCategory = Literal["negligible", "minor", "moderate", "major", "severe"]
+
+
+class RiskCategoryAssessment(_StrictModel):
+    """One line of the mandatory 18-category checklist: does this risk
+    apply to this specific trade, and why/why not. `applicable=False` is
+    a legitimate, expected answer for most categories on most trades —
+    the requirement is that every category was actually considered, not
+    that every category must be flagged."""
+
+    category: RiskCategory
+    applicable: bool
+    note: str = Field(min_length=1, max_length=500)
+
+
+class FailureScenario(_StrictModel):
+    """One concrete way this trade could lose money. `probability_category`
+    and `severity` are deliberately categorical, never a fabricated
+    numeric probability — this agent has no statistical model backing a
+    number like "23% chance," and a plausible-looking fake one would be
+    worse than an honest qualitative bucket. Where a real deterministic
+    probability exists (Python Quant's `probability_of_profit`), it comes
+    from `QuantitativeAnalysisContext` as read-only reference data, not
+    from a field on this model."""
+
+    scenario: str = Field(min_length=1, max_length=1000)
+    probability_category: ProbabilityCategory
+    severity: SeverityCategory
+    portfolio_impact_category: PortfolioImpactCategory
+    warning_indicators: list[str] = Field(min_length=1, max_length=10)
+    possible_mitigation: str = Field(min_length=1, max_length=500)
+
+    @field_validator("warning_indicators")
+    @classmethod
+    def _indicators_non_blank(cls, v: list[str]) -> list[str]:
+        if any(not s.strip() for s in v):
+            raise ValueError("warning_indicators entries must not be blank")
+        return v
+
+
+class FidelityExecutionRiskAssessment(_StrictModel):
+    """The gap between analysis time and a human actually entering the
+    order in Fidelity Trader+ (Step 11's MANUAL_EXECUTION concern).
+    Each field is this agent's qualitative read of that specific risk;
+    `reprice_required` is its opinion — `src.llm.devils_advocate`'s
+    orchestration layer independently recomputes staleness from the two
+    market snapshots it was given and can override this field to `True`
+    the same way Python Risk Engine overrides an LLM's sizing request,
+    never the reverse."""
+
+    underlying_movement_risk: str = Field(min_length=1, max_length=500)
+    spread_movement_risk: str = Field(min_length=1, max_length=500)
+    bid_ask_widening_risk: str = Field(min_length=1, max_length=500)
+    iv_change_risk: str = Field(min_length=1, max_length=500)
+    delta_change_risk: str = Field(min_length=1, max_length=500)
+    regime_change_risk: str = Field(min_length=1, max_length=500)
+    news_event_risk: str = Field(min_length=1, max_length=500)
+    reprice_required: bool
+
+
+DevilsAdvocateVerdict = Literal["PASS", "CAUTION", "REJECT", "REPRICE_REQUIRED"]
+
+
+class DevilsAdvocateReview(_StrictModel):
+    """devil_advocate agent output (Step 11): a structured attempt to
+    invalidate one `TradeProposal`, never to confirm it. Its job is not
+    to be agreeable — `why_not_thesis` must always be populated, even for
+    a trade this agent ultimately passes, because "why should we not
+    make this trade" is asked of every trade, not just weak ones.
+
+    There is no field anywhere on this schema, or on any of the models
+    it's built from, of numeric type — same structural guarantee as
+    `PortfolioDecision`, and for the same reason: `probability_category`/
+    `severity`/`portfolio_impact_category` are categorical precisely so
+    this agent cannot fabricate a numeric probability.
+
+    `verdict` can never be "approve" or "execute" — the Devil's Advocate
+    cannot approve execution; PASS is the strongest thing it can say, and
+    even PASS is not an approval, only "found no disqualifying issue.\""""
+
+    review_id: str = Field(min_length=1, max_length=64)
+    proposal_id: str = Field(min_length=1, max_length=64)
+    verdict: DevilsAdvocateVerdict
+    why_not_thesis: str = Field(min_length=1, max_length=2000)
+    risk_assessment: list[RiskCategoryAssessment] = Field(min_length=18, max_length=18)
+    failure_scenarios: list[FailureScenario] = Field(min_length=3, max_length=10)
+    fidelity_execution_risk: FidelityExecutionRiskAssessment
+    timestamp: datetime
+
+    @field_validator("timestamp")
+    @classmethod
+    def _require_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return v
+
+    @field_validator("risk_assessment")
+    @classmethod
+    def _all_18_categories_present_exactly_once(cls, v: list[RiskCategoryAssessment]) -> list[RiskCategoryAssessment]:
+        seen = [item.category for item in v]
+        if len(set(seen)) != len(seen):
+            raise ValueError("each risk category may appear at most once in risk_assessment")
+        if set(seen) != _ALL_RISK_CATEGORIES:
+            missing = _ALL_RISK_CATEGORIES - set(seen)
+            raise ValueError(f"risk_assessment is missing required categories: {sorted(missing)}")
+        return v
+
+    @model_validator(mode="after")
+    def _reprice_required_verdict_matches_fidelity_assessment(self) -> "DevilsAdvocateReview":
+        if self.fidelity_execution_risk.reprice_required and self.verdict not in ("REPRICE_REQUIRED", "REJECT"):
+            raise ValueError(
+                "fidelity_execution_risk.reprice_required=True is inconsistent with a PASS/CAUTION verdict — "
+                "if execution data is stale, the verdict must be REPRICE_REQUIRED (or REJECT, if the trade "
+                "should not proceed at all regardless of repricing)."
+            )
+        return self
+
+
+def ensure_devils_advocate_review(obj: object) -> DevilsAdvocateReview:
+    """Runtime boundary guard, same exact-type pattern as
+    `ensure_trade_proposal`/`ensure_portfolio_decision`."""
+    if type(obj) is not DevilsAdvocateReview:
+        raise TypeError(
+            f"Expected a validated DevilsAdvocateReview instance, got {type(obj).__name__!r}. "
+            "Only src.llm.schemas.DevilsAdvocateReview may be treated as a Devil's Advocate verdict."
+        )
+    return obj
+
+
 class RiskReviewNote(_StrictModel):
     """risk_reviewer agent output: an independent qualitative second
     opinion, distinct from and subordinate to Python Risk Engine, which

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from src.llm.context import PortfolioStateContext, QuantitativeAnalysisContext, RiskEngineContext
+from src.llm.context import MarketSnapshotContext, PortfolioStateContext, QuantitativeAnalysisContext, RiskEngineContext
 from src.llm.schemas import (
     AdversarialReview,
     Conviction,
@@ -15,6 +15,7 @@ from src.llm.schemas import (
     StrategyType,
     TradeDirection,
     TradeProposal,
+    _ALL_RISK_CATEGORIES,
 )
 
 NOW = datetime(2026, 9, 20, 14, 0, tzinfo=timezone.utc)
@@ -93,6 +94,82 @@ def make_risk_engine_result(**overrides) -> RiskEngineContext:
     base = dict(decision="resize", reason_codes=["resized_position_risk"], approved_contracts=2, message="resized to 2 contracts")
     base.update(overrides)
     return RiskEngineContext(**base)
+
+
+def make_market_snapshot(**overrides) -> MarketSnapshotContext:
+    base = dict(as_of=DATA_TS, underlying_price=628.5, bid=0.70, ask=0.80, iv=0.18, delta=-0.30)
+    base.update(overrides)
+    return MarketSnapshotContext(**base)
+
+
+def valid_risk_assessment(**category_overrides: dict) -> list[dict]:
+    """All 18 categories, each `applicable=False` by default; pass e.g.
+    `earnings={"applicable": True, "note": "..."}` to override one."""
+    out = []
+    for category in sorted(_ALL_RISK_CATEGORIES):
+        entry = {"category": category, "applicable": False, "note": "not a material concern for this trade"}
+        entry.update(category_overrides.get(category, {}))
+        out.append(entry)
+    return out
+
+
+def valid_failure_scenarios() -> list[dict]:
+    return [
+        {
+            "scenario": "Gap down through the short strike overnight on macro news",
+            "probability_category": "low",
+            "severity": "high",
+            "portfolio_impact_category": "moderate",
+            "warning_indicators": ["VIX spike", "pre-market gap beyond 1%"],
+            "possible_mitigation": "avoid holding through major scheduled macro releases",
+        },
+        {
+            "scenario": "Implied volatility expands, working against the short premium before theta catches up",
+            "probability_category": "medium",
+            "severity": "medium",
+            "portfolio_impact_category": "minor",
+            "warning_indicators": ["VIX term structure inverting"],
+            "possible_mitigation": "size down ahead of known volatility catalysts",
+        },
+        {
+            "scenario": "Early assignment on the short leg near an ex-dividend date",
+            "probability_category": "low",
+            "severity": "low",
+            "portfolio_impact_category": "negligible",
+            "warning_indicators": ["dividend date falls before expiration"],
+            "possible_mitigation": "close or roll before the ex-dividend date",
+        },
+    ]
+
+
+def valid_fidelity_execution_risk(**overrides) -> dict:
+    base = dict(
+        underlying_movement_risk="low, tight intraday range so far",
+        spread_movement_risk="stable, no signs of widening",
+        bid_ask_widening_risk="tight two-sided market",
+        iv_change_risk="low, no scheduled vol catalysts before likely entry",
+        delta_change_risk="low, underlying not near the strike",
+        regime_change_risk="no scheduled regime-moving events before likely entry",
+        news_event_risk="none scheduled",
+        reprice_required=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def valid_devils_advocate_review_input(**overrides) -> dict:
+    base = dict(
+        review_id="rev-1",
+        proposal_id="prop-1",
+        verdict="PASS",
+        why_not_thesis="A fast reversal through the short strike before expiration still loses money despite the defined-risk structure.",
+        risk_assessment=valid_risk_assessment(),
+        failure_scenarios=valid_failure_scenarios(),
+        fidelity_execution_risk=valid_fidelity_execution_risk(),
+        timestamp=NOW.isoformat(),
+    )
+    base.update(overrides)
+    return base
 
 
 def valid_portfolio_decision_input(**overrides) -> dict:

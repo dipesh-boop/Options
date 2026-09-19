@@ -88,6 +88,25 @@ class RiskEngineContext:
 
 
 @dataclass(frozen=True)
+class MarketSnapshotContext:
+    """A point-in-time options quote snapshot — mirrors the relevant
+    fields of `src.data.option_chain.OptionContract` as a plain
+    dataclass, for the same decoupling reason as
+    `QuantitativeAnalysisContext`. `src.llm.devils_advocate` uses two of
+    these (one from proposal/analysis time, one current) to deterministically
+    compute how much conditions have moved between analysis and a human
+    actually entering the order in Fidelity Trader+ — the comparison
+    itself is Python arithmetic, never left to the model to estimate."""
+
+    as_of: datetime
+    underlying_price: float
+    bid: float
+    ask: float
+    iv: float | None
+    delta: float | None
+
+
+@dataclass(frozen=True)
 class MarketContext:
     """Qualitative/reference market context (index levels, known
     upcoming events). Never a source of new numeric truth for pricing —

@@ -1001,6 +1001,126 @@ don't rewrite history.
   `ensure_trade_proposal`, `build_agent_context`, the
   `InMemoryIdempotencyStore` pattern) rather than new mechanism.
 
+## 2026-09-19 (cont'd) — Independent Devil's Advocate Agent implemented (Step 11)
+
+- **Read first**: confirmed `CLAUDE.md` still doesn't exist; re-read the
+  Step 10 "Next up" entry (which already named the Devil's Advocate as
+  one of the untouched pipeline stages) and the existing
+  `.claude/agents/devil_advocate.md`/`AdversarialReview` schema from the
+  original orchestration step before writing anything new.
+- **Same pattern as Step 10's `PortfolioDecision`**: found an existing,
+  lighter-weight `AdversarialReview` (`proposal_id`, `critique`,
+  `risk_flags`, `do_not_advance`) already in the codebase. Step 11 asks
+  for something more rigorous — an 18-category mandatory checklist, 3+
+  structured failure scenarios, a Fidelity-staleness check, and a closed
+  PASS/CAUTION/REJECT/REPRICE_REQUIRED verdict. Added `DevilsAdvocateReview`
+  **alongside** `AdversarialReview` (kept unchanged, still passing)
+  rather than replacing it, for the same "different job, not a
+  duplicate" reasoning as Step 10.
+- **`DevilsAdvocateReview` and its sub-models** (`src/llm/schemas.py`):
+  - `RiskCategory`: the exact 18-value `Literal` the spec names
+    (directional risk through execution risk). `risk_assessment:
+    list[RiskCategoryAssessment]` is constrained to exactly 18 entries,
+    and a validator additionally rejects a duplicate or missing
+    category by set comparison — "analyze all 18 for every trade" is a
+    schema invariant, not a persona instruction the model could skip a
+    few of.
+  - `FailureScenario`: `probability_category`/`severity`/
+    `portfolio_impact_category` are all closed categorical `Literal`s —
+    structurally impossible to fabricate a number like "23% chance"
+    into, satisfying "do not fabricate numerical probabilities"
+    the same way `PortfolioDecision` structurally can't carry a price.
+    `failure_scenarios` requires a minimum of 3.
+  - `FidelityExecutionRiskAssessment`: the model's own read on the seven
+    named execution-staleness checks, plus its own `reprice_required`
+    opinion — explicitly documented as advisory, overridable by Python
+    (see below), never the reverse.
+  - `DevilsAdvocateVerdict = Literal["PASS", "CAUTION", "REJECT",
+    "REPRICE_REQUIRED"]` — no "approve"/"execute" value exists at all,
+    so "the Devil's Advocate cannot approve execution" is enforced by
+    the type itself, not by convention. A `model_validator` additionally
+    rejects `fidelity_execution_risk.reprice_required=True` paired with
+    a PASS/CAUTION verdict as self-contradictory.
+  - `ensure_devils_advocate_review` — the same exact-type boundary guard
+    pattern as `ensure_trade_proposal`/`ensure_portfolio_decision`.
+- **`src/llm/context.py` addition**: `MarketSnapshotContext` (a
+  point-in-time quote snapshot: underlying price, bid, ask, IV, delta,
+  as_of) — same plain-dataclass decoupling pattern as
+  `QuantitativeAnalysisContext`/`RiskEngineContext` from Step 10, not an
+  import of `src.data.option_chain.OptionContract`.
+- **`src/llm/devils_advocate.py`** — the orchestration layer:
+  - `DevilsAdvocateInputs`: proposal, quant analysis, portfolio state,
+    market regime, and **two** market snapshots (`analysis_snapshot`,
+    `current_snapshot`) — deliberately two, not one, so the
+    staleness-between-analysis-and-human-entry check the spec asks for
+    is real Python arithmetic on two real data points, not the model
+    guessing at how much time might have passed. `earnings_in_window` is
+    a plain caller-resolved boolean (never "unknown").
+  - `validate_inputs_complete` / `MissingInputError` — identical "may
+    not invent missing data" mechanism as
+    `src.llm.portfolio_manager.validate_inputs_complete`, extended with
+    the same `ensure_trade_proposal` defense-in-depth call.
+  - `compute_staleness` — the deterministic comparison: underlying move
+    %, bid/ask spread widening %, IV change, delta change, and snapshot
+    age, each checked against a named module-level threshold (0.5%
+    underlying move, 50% spread widening, 3 vol points, 0.05 delta, 15
+    minutes — advisory-agent thresholds, not a Risk Engine limit, so
+    plain constants rather than a new YAML config).
+  - `evaluate_trade_risk` — calls the model, validates through
+    `ensure_devils_advocate_review`, cross-checks `proposal_id`, and
+    then applies the one deterministic override this agent has:
+    **if `compute_staleness` says stale and the model's verdict isn't
+    already REPRICE_REQUIRED or REJECT, Python force-overrides the
+    verdict to REPRICE_REQUIRED** — the same "Python overrides an
+    LLM-requested number, never the reverse" relationship
+    `src.risk.trade_risk.size_trade` has with
+    `TradeProposal.contracts_requested`. A model that already said
+    REJECT is left alone (REJECT is a stronger conclusion than
+    REPRICE_REQUIRED — the override never *weakens* a verdict).
+- **Independence, built structurally, not by convention**: this module
+  has zero import of `src.llm.portfolio_manager`, no field on
+  `DevilsAdvocateInputs` that could carry a `PortfolioDecision`, and no
+  parameter on `evaluate_trade_risk`/`build_devils_advocate_context`
+  through which one could be passed — confirmed by a dedicated test file
+  (`test_devils_advocate_independence.py`) that source-scans for any
+  code-level (not docstring-prose) reference to `PortfolioDecision`,
+  inspects both functions' signatures for anything decision-shaped, and
+  checks the verdict vocabulary itself contains no approval-shaped
+  value. "Avoid having the system grade its own conclusion" — there is
+  no conclusion from the Portfolio Manager in scope for this agent to
+  see in the first place.
+- **`.claude/agents/devil_advocate.md` rewritten** around "assume the
+  trade could lose money, find realistic reasons why" — the full
+  18-category checklist, the 3+ failure-scenario requirement with an
+  explicit no-fabricated-probabilities instruction, the Fidelity
+  staleness checklist with an explicit "never recommend chasing a trade
+  simply because the original opportunity disappeared" line, the closed
+  four-value verdict vocabulary, and an explicit Independence section
+  telling the agent it will never see the Portfolio Manager's decision
+  because it doesn't exist yet when the Devil's Advocate runs.
+- **Full repo test suite: 1027 passing, 4 skipped** (same pre-existing
+  IBKR skips). New tests (67 in three new files): schema-level (18-
+  category completeness/duplicate/unrecognized-category rejection,
+  minimum-3-scenarios, no-fabricated-probability via non-categorical
+  values, REPRICE_REQUIRED/REJECT-vs-PASS/CAUTION consistency, no-
+  numeric-fields structural proof, forbidden-extra-field smuggling,
+  boundary guard); orchestration (every scenario Step 11 names by
+  name — obviously dangerous trades, earnings risk, concentration, high
+  correlation, poor liquidity, three separate stale-quote triggers proving
+  the deterministic override in each direction including the
+  REJECT-not-weakened case, good-quality trades, all six required
+  inputs' missing-data cases, cross-check rejection, hallucinated/
+  malformed output); and independence (import-graph scan, signature
+  inspection, verdict-vocabulary check).
+- **No bugs found this step** — one test-authoring mistake caught before
+  it became a false "pass": the first draft of the independence test
+  searched the whole module source for the literal string
+  "PortfolioDecision" and failed on its own docstring (which discusses
+  the guarantee in prose) — fixed by narrowing the scan to actual code
+  usage (imports, type annotations, constructor calls) rather than any
+  mention of the name at all, the same import-statement-vs-prose
+  distinction Step 7's architecture-boundary test had to learn.
+
 ## Open decisions carried forward (updated again)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker) —
@@ -1072,29 +1192,51 @@ don't rewrite history.
       orchestration call should ask for — likely "shortlist first, then
       one PortfolioDecision per shortlisted candidate," but that
       sequencing isn't implemented or even written down anywhere yet
+- [ ] **New from Step 11**: `src.llm.devils_advocate.evaluate_trade_risk`
+      has the same no-real-caller gap Step 10 flagged for
+      `evaluate_proposal` — nothing yet builds real
+      `DevilsAdvocateInputs` (in particular two real
+      `MarketSnapshotContext`s) from live market data and invokes it
+      outside tests
+- [ ] **New from Step 11**: `earnings_in_window` on `DevilsAdvocateInputs`
+      is caller-resolved by design, but nothing yet calls
+      `src.data.earnings.is_within_earnings_window` to actually resolve
+      it from a real earnings calendar — same "isolated but tested"
+      pattern as everything else pre-Phase-0
+- [ ] **New from Step 11**: `AdversarialReview` (the original,
+      lighter-weight critique) and `DevilsAdvocateReview` (the new,
+      18-category structured verdict) now both exist as Devil's Advocate
+      outputs, mirroring the `PortfolioManagerReview`/`PortfolioDecision`
+      duality from Step 10 and carrying the same open question: which
+      one a real orchestration call should actually ask for, and whether
+      both are needed going forward
 
 ## Next up
 
-- Eight standalone pieces now exist — `src/llm/` (now including the
-  Portfolio Manager's decision/audit layer), `src/quant/`, `src/data/`,
-  `src/brokers/` (IBKR paper trading + Fidelity manual tickets, now with
-  a 12th `REPRICE_REQUIRED` ticket state), and `src/risk/` (the
-  deterministic portfolio Risk Engine) — each internally tested but
-  still not wired into one live, end-to-end pipeline. Step 10 built the
-  first piece of the Multi-Agent Layer that actually calls into the
-  boundary-guard machinery for real (`ensure_trade_proposal`,
-  `ensure_portfolio_decision`) rather than only being tested against it,
-  but nothing yet drives the full loop: Market Regime → Opportunity
-  Scanner → Strategy Analyst → Devil's Advocate → Portfolio Manager →
-  Python Risk Engine → (for Fidelity) a real ticket a human enters. Every
-  individual stage of that loop now exists and is tested in isolation;
-  none of them have ever been run back-to-back against one shared,
-  realistic scenario. That end-to-end wiring — or the Phase 0
-  foundations (DB, config, CI) needed to run it for real — is the
-  natural next step. Also still open: the `app/` prototype disposition,
-  the accumulating layout/config-duplication/untested-real-adapter
-  questions above, the four Step 9 gaps (price-history wiring,
-  multi-ticker stress data, real `Portfolio` assembly, real
-  `QuantitativeAnalysis` production), and the three new Step 10 gaps
-  (no real caller for the Portfolio Manager, in-memory-only audit log,
-  undecided shortlist-vs-per-decision sequencing) above.
+- Nine standalone pieces now exist — `src/llm/` (now including both the
+  Portfolio Manager's decision/audit layer and the Devil's Advocate's
+  independent review layer), `src/quant/`, `src/data/`, `src/brokers/`
+  (IBKR paper trading + Fidelity manual tickets, now with a 12th
+  `REPRICE_REQUIRED` ticket state), and `src/risk/` (the deterministic
+  portfolio Risk Engine) — each internally tested but still not wired
+  into one live, end-to-end pipeline. Steps 10 and 11 both built pieces
+  of the Multi-Agent Layer that call into real boundary-guard machinery
+  (`ensure_trade_proposal`, `ensure_portfolio_decision`,
+  `ensure_devils_advocate_review`) and, for Step 11, real deterministic
+  Python arithmetic (`compute_staleness`) rather than only being tested
+  against it — but nothing yet drives the full loop: Market Regime →
+  Opportunity Scanner → Strategy Analyst → Devil's Advocate → Portfolio
+  Manager → Python Risk Engine → (for Fidelity) a real ticket a human
+  enters. Every individual stage of that loop now exists and is tested
+  in isolation; none of them have ever been run back-to-back against one
+  shared, realistic scenario — and Step 11's explicit independence
+  requirement (Devil's Advocate must run, and be fully resolved, before
+  the Portfolio Manager ever sees its verdict) means that first
+  end-to-end wiring attempt needs to get the *ordering* right, not just
+  connect the pieces. That wiring — or the Phase 0 foundations (DB,
+  config, CI) needed to run it for real — is the natural next step.
+  Also still open: the `app/` prototype disposition, the accumulating
+  layout/config-duplication/untested-real-adapter questions above, the
+  four Step 9 gaps, the three Step 10 gaps, and the three new Step 11
+  gaps (no real caller, unresolved `earnings_in_window` wiring, the
+  `AdversarialReview`/`DevilsAdvocateReview` duality) above.
