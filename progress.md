@@ -145,30 +145,9 @@ don't rewrite history.
   wiring — all blocked on Phase 0/1 not existing yet).
 - Still true: no broker code, no DB, no quant/risk engine, no screener.
   This slice is self-contained and network-free in its tests by design.
-
-## Open decisions carried forward (see ARCHITECTURE.md §10, §12)
-
-- [ ] Historical options data vendor for backtesting (Phase 2 blocker)
-- [ ] Schwab paper-trading / sandbox capability (Phase 4 blocker) — needs
-      research against current Schwab developer docs, not assumed
-- [ ] Sector/classification data source for correlation/concentration checks
-- [ ] Final ~50-name equity universe list + liquidity criteria
-- [ ] What happens to the pre-existing `app/` prototype (port vs. delete)
-- [ ] Fold `src/llm/` under `src/options_platform/`, or keep `src/` flat
-      with multiple top-level packages (see IMPLEMENTATION_PLAN.md §6)
-- [ ] Model tier per non-Portfolio-Manager agent role (cost vs. quality,
-      to be tuned empirically — ARCHITECTURE.md §12 open question 5)
-
-## Next up
-
-- LLM layer is implemented but not wired to anything live — it has no DB,
-  no real tool implementations, and no orchestration pipeline to plug
-  into yet. Awaiting direction: continue building the LLM-adjacent pieces
-  (audit log persistence, real read-only tool implementations), or start
-  Phase 0 foundations (repo scaffolding, DB schema, CI) so the rest of
-  the pipeline exists to wire this into. Also still open: the `app/`
-  prototype disposition and the `src/llm/` vs `src/options_platform/`
-  reconciliation above.
+  (Status tracking — open decisions, next up — moved to the end of this
+  file as of the last entry, rather than duplicated at each checkpoint;
+  see there for current state.)
 
 ## 2026-09-19 (cont'd) — TradeProposal redefined to the specified field set
 
@@ -253,3 +232,134 @@ don't rewrite history.
   named forbidden concepts folded into its adversarial-payload
   parametrization, plus new stale/missing-market-data pipeline tests).
   Full suite: **193 tests passing** (`python3 -m pytest tests/ -q`).
+
+## 2026-09-19 (cont'd) — Deterministic quant engine implemented
+
+- Explicit request for the deterministic quantitative engine at
+  `src/quant/`: `black_scholes.py`, `greeks.py`, `volatility.py`,
+  `probability.py`, `expected_value.py`, `monte_carlo.py`,
+  `position_sizing.py`, `correlations.py`. Independently calculates
+  delta/gamma/theta/vega, implied vol, max profit/loss, breakeven,
+  probability ITM, probability of profit, ROC/annualized ROC, expected
+  value; Monte Carlo stress testing at the six required spot shocks
+  (-20/-10/-5/+5/+10/+20%) plus a vol-shock grid. Explicit instruction:
+  the LLM must consume these calculations, never replace them with its
+  own arithmetic; no execution implemented.
+- Design decisions:
+  - `black_scholes.py` owns the shared `OptionRight`/`Side`/`Leg` types
+    every other quant module builds on — kept minimal (right, strike,
+    side, entry_price, quantity), no dependency on `src.llm.schemas`.
+    Every quant function takes plain numeric parameters, never a
+    `TradeProposal` — this is what makes the one-way LLM-consumes-Quant
+    dependency a structural fact rather than a convention: verified by a
+    new `tests/unit/quant/test_architecture_boundary.py` that scans
+    every module's source for an import of `src.llm` and fails the
+    parametrized test if found.
+  - `expected_value.py`'s per-strategy functions (`csp_max_profit`,
+    `covered_call_breakeven`, `put_credit_spread_max_loss`, etc.) take
+    explicit float parameters (strike, credit, cost_basis, width) rather
+    than a shared position object — deliberately, so each is trivially
+    checkable against the textbook formula written directly in a test.
+  - `monte_carlo.py` groups two distinct tools under one roof: true
+    Monte Carlo (`simulate_terminal_prices`, `monte_carlo_pop_and_ev`,
+    risk-neutral GBM, seeded for reproducibility) as an independent
+    cross-check of the closed-form EV in `expected_value.py` (which uses
+    a binary max-profit/max-loss approximation, documented as such); and
+    a deterministic `stress_test` grid (exact Black-Scholes repricing at
+    fixed spot/vol shocks, no randomness) — the practical tool for
+    "stress underlying at -20%/…/+20%". `STANDARD_SPOT_SHOCKS` is
+    exactly the six required values.
+  - `position_sizing.py` lives under `src/quant/` per this request,
+    slightly ahead of ARCHITECTURE.md §7's original quant/risk split (it
+    had put sizing in the risk/ package). Kept as pure calculation only —
+    `fixed_fractional_size` computes a maximum from risk parameters,
+    `cap_requested_contracts` bounds a request by that maximum — no
+    portfolio-state awareness or limit enforcement, which is still
+    Python Risk Engine's job (not implemented).
+  - Net position greeks (`greeks.net_greeks`) needed a real design
+    decision, not just a data plumbing exercise: option-leg greeks are
+    naturally per-share (Black-Scholes convention), but need converting
+    to per-contract/100-share-equivalent units before they're additive
+    with a raw `underlying_shares` count for a covered call's net delta.
+    Caught by a test expecting the standard "position deltas" convention
+    (`100 - 100*call_delta`), which failed against the first
+    implementation (missing the 100x contract multiplier) — fixed in
+    `net_greeks`, not in the test.
+  - `volatility.py`'s arbitrage-floor check had a real bug the round-trip
+    tests caught: it validated `market_price` against naive intrinsic
+    value (`max(K-S,0)`), but that's the *American* exercise-value bound.
+    A European option's correct no-arbitrage floor is the *discounted*
+    intrinsic value (`max(K*e^{-rT}-S, 0)` for puts), and a deep-ITM
+    European put can legitimately price below naive intrinsic when
+    discounting dominates — not a violation, since early exercise isn't
+    available to compare against. Fixed to use the discounted bound.
+- Tests emphasize independent verifiability per the instruction, not just
+  "does it run":
+  - `test_black_scholes.py`: an `N(x)` implementation via `math.erf`
+    (deliberately not `scipy.stats.norm`, a genuinely different code
+    path) cross-checks call/put prices across 6 parameter sets x 2
+    rights; put-call parity (`C - P = S - K*e^{-rT}`, an exact
+    no-arbitrage identity) checked across the same sets; Hull's textbook
+    reference value (S=42,K=40,r=10%,σ=20%,T=0.5 → call≈4.76).
+  - `test_greeks.py`: every greek (delta, gamma, theta, vega)
+    cross-checked against a central finite-difference derivative of
+    `black_scholes.price` itself — an independent numerical method, not
+    a hardcoded number — plus call/put delta identities and bounds.
+  - `test_volatility.py`: round-trip (price at a known sigma → solve IV →
+    recover that exact sigma) across 7 parameter sets x 2 rights x
+    ATM/ITM/OTM/short-dated/long-dated/high-vol combinations.
+  - `test_monte_carlo.py`: Monte Carlo EV converges to the closed-form
+    Black-Scholes price within a statistically principled tolerance (a
+    multiple of the simulation's own standard error, derived from the
+    CLT, not an arbitrary epsilon); payoff boundary checks at S_T=0 and
+    S_T→∞ against the hand-derivable max loss/max profit; stress grid
+    P&L checked against direct Black-Scholes repricing.
+  - `test_expected_value.py`: every expected value asserted against a
+    direct textbook-formula expression written in the test itself (e.g.
+    `(strike - credit) * 100`), not a number copied from production
+    output; EV composition cross-checked against
+    `probability.probability_of_profit` called independently.
+  - `test_correlations.py`: exact constructed cases (identical series →
+    correlation exactly 1; an exact linear inverse → exactly -1) rather
+    than approximate real-data correlations.
+  - Full repo suite: **390 tests passing**
+    (`python3 -m pytest tests/ -q`; 197 in `tests/unit/quant/`, 193 in
+    `tests/unit/llm/`).
+- `requirements.txt` already had `scipy`/`numpy` pinned from the original
+  `app/` prototype scaffold — no dependency changes needed.
+- **`app/` prototype is now fully redundant, not just partially**:
+  `app/analytics/greeks.py`'s entire job is now covered, with
+  independent verification it never had, by `src/quant/black_scholes.py`
+  + `greeks.py` + `volatility.py`. Recommend resolving the port-vs-delete
+  question (open since the very first commit) before Phase 0 rather than
+  carrying it further — flagged again in `IMPLEMENTATION_PLAN.md` §7.
+
+## Open decisions carried forward (updated)
+
+- [ ] Historical options data vendor for backtesting (Phase 2 blocker)
+- [ ] Schwab paper-trading / sandbox capability (Phase 4 blocker)
+- [ ] Sector/classification data source for correlation/concentration checks
+- [ ] Final ~50-name equity universe list + liquidity criteria
+- [ ] **`app/` prototype disposition — now fully redundant, recommend
+      resolving before Phase 0 (see IMPLEMENTATION_PLAN.md §7)**
+- [ ] Fold `src/llm/` + `src/quant/` under `src/options_platform/`, or
+      keep `src/` flat with multiple top-level packages
+- [ ] Model tier per non-Portfolio-Manager agent role
+- [ ] MAX_MARKET_DATA_AGE (15 min, in `src/llm/schemas.py`) is a
+      placeholder pending real config, same as risk-per-trade-pct and
+      other numeric policy constants used in quant tests/examples
+
+## Next up
+
+- `src/llm/` (agent plumbing) and `src/quant/` (deterministic
+  calculations) both exist and are each internally tested, but nothing
+  connects them yet — no DB, no Strategy Screener, no Python Risk Engine
+  (portfolio-state-aware limits, RiskGate, circuit breaker), no
+  broker/backtest data feeding real numbers into either layer. Awaiting
+  direction: keep building deterministic/LLM-adjacent pieces in isolation
+  (e.g. Python Risk Engine next, since Quant now has numbers for it to
+  gate), or start Phase 0 foundations (repo scaffolding, DB schema, CI)
+  so there's a real pipeline to wire both into. Also still open: the
+  `app/` prototype disposition (now fully redundant — see above) and the
+  `src/llm/` + `src/quant/` vs `src/options_platform/` layout
+  reconciliation.

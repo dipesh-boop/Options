@@ -169,16 +169,28 @@ not scheduled.
 - Decision + action on the existing `app/` prototype (§3).
 
 ### Phase 1 — Deterministic core (no broker, no LLM)
-- Python Quant: Greeks, P&L, max loss, expected value — pure per-trade
-  calculation, no portfolio state.
-- Python Risk Engine: position sizing, exposure, correlation, drawdown
-  monitor, RiskGate, circuit breaker — portfolio policy, built on top of
-  Quant's numbers.
-- Strategy screeners: CSP, covered call, put credit spread, universe +
-  liquidity filtering (min OI/volume, max spread%, DTE window, no
-  earnings-week entries).
-- Mock market data provider (synthetic but internally consistent chains)
-  so everything above is testable without any external dependency.
+- **Python Quant implemented ahead of phase order** (see §6): Black-Scholes
+  pricing (`src/quant/black_scholes.py`), independent closed-form Greeks
+  plus a position-level `net_greeks` aggregator (`greeks.py`), an implied
+  volatility solver (`volatility.py`), risk-neutral probability ITM /
+  probability of profit (`probability.py`), per-strategy max
+  profit/loss/breakeven/ROC/annualized ROC/expected value for all three
+  initial strategies (`expected_value.py`), Monte Carlo terminal-price
+  simulation plus a deterministic stress grid at the required
+  -20/-10/-5/+5/+10/+20% spot shocks and a vol-shock grid
+  (`monte_carlo.py`), fixed-fractional position sizing
+  (`position_sizing.py`), and return-correlation analysis
+  (`correlations.py`). 197 tests, several using finite-difference and
+  put-call-parity cross-checks against the pricing function itself
+  rather than hardcoded reference numbers.
+- **Not yet implemented:** Python Risk Engine (position sizing exists as
+  a pure calculation, but portfolio-state-aware exposure, correlation
+  limits, drawdown monitoring, the RiskGate, and the circuit breaker do
+  not), Strategy Screener, and any market data provider (mock or real) —
+  every quant function above takes plain numeric parameters (spot,
+  strike, sigma, …), not data pulled from a screener or DB, so nothing in
+  Phase 1 is blocked on those yet, but nothing is wired to real data
+  either.
 - Heavy unit + property-based test coverage — this phase is the trust
   foundation for everything after it.
 
@@ -273,3 +285,30 @@ internal contract (malformed/execution-shaped output can't validate, and
 even a validated non-`TradeProposal` object can't pass the
 `ensure_trade_proposal` boundary guard) but cannot yet prove anything
 about a live pipeline, because there isn't one to plug into.
+
+## 7. Deviation from §1: where the Quant layer actually landed
+
+Same pattern as §6: the deterministic quant engine was implemented at
+`src/quant/` directly (not `src/options_platform/quant/`), continuing
+rather than resolving the layout question — `src/` now has two top-level
+packages (`llm/`, `quant/`) instead of one `options_platform/` package.
+Still not decided here; still flagged for Phase 0.
+
+Unlike the LLM layer, `src/quant/` has a verified one-way dependency
+boundary: `tests/unit/quant/test_architecture_boundary.py` scans every
+module in the package for an `import`/`from` statement referencing
+`src.llm` and fails if one is found. Python Quant can be used completely
+independently of the Multi-Agent Layer (every function takes plain
+numeric parameters — spot, strike, sigma, legs — never a
+`TradeProposal`), which is what makes "the LLM must consume these
+calculations, never replace them" enforceable rather than aspirational:
+there is no import cycle available even if someone tried to create one
+the wrong way round.
+
+**This makes the pre-existing `app/` prototype's `app/analytics/greeks.py`
+fully redundant**, not just partially as before (`src/quant/black_scholes.py`
++ `greeks.py` + `volatility.py` now cover the same ground with
+independent verification the prototype never had — finite-difference
+Greek cross-checks, put-call parity, Monte Carlo convergence). The `app/`
+disposition question from §3/progress.md is now higher-stakes to leave
+open; recommend resolving it before Phase 0 rather than during it.
