@@ -1,0 +1,29 @@
+# Per-broker execution capabilities the Risk Engine must consult before
+# ever constructing an ApprovedOrder / FidelityTradeTicket. A broker
+# missing from this file, or a strategy missing from its
+# allowed_strategies list, is REJECT_ACCOUNT_CAPABILITY — the Risk
+# Engine never infers a broker's options approval level or supported
+# strategy set from anything else.
+#
+# execution_mode must be one of the modes src/brokers actually
+# implements: MANUAL (a human enters the order, e.g. Fidelity) or
+# AUTOMATED (a Broker implementation can place_order() directly, e.g.
+# IBKR paper trading). There is no LIVE mode anywhere in this platform.
+
+fidelity:
+  execution_mode: MANUAL
+  account_alias: OPTIONS_ACCOUNT
+  options_enabled: true
+  allowed_strategies:
+    - CASH_SECURED_PUT
+    - COVERED_CALL
+    - PUT_CREDIT_SPREAD
+
+ibkr_paper:
+  execution_mode: AUTOMATED
+  account_alias: IBKR_PAPER
+  options_enabled: true
+  allowed_strategies:
+    - CASH_SECURED_PUT
+    - COVERED_CALL
+    - PUT_CREDIT_SPREAD

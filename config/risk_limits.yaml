@@ -1,0 +1,81 @@
+# Deterministic portfolio risk limits for src/risk/engine.py.
+#
+# Application code must never hard-code one of these numbers — every
+# check reads it from here (with an optional environment variable
+# override for ops-time changes without a deploy), the same pattern
+# config/llm.yaml established for model routing. When policy changes,
+# edit this file (or set the override env var) — never edit
+# src/risk/*.py to change a limit.
+
+position_risk:
+  # Sized so a single trade's worst-case loss stays a small fraction of
+  # net asset value, and can never exceed the absolute ceiling below.
+  target_risk_per_trade_pct: 0.01
+  target_risk_per_trade_pct_env: OPTIONS_AGENT_RISK_TARGET_RISK_PER_TRADE_PCT
+  absolute_max_risk_per_trade_pct: 0.02
+  absolute_max_risk_per_trade_pct_env: OPTIONS_AGENT_RISK_ABSOLUTE_MAX_RISK_PER_TRADE_PCT
+
+concentration:
+  max_underlying_exposure_pct: 0.10
+  max_underlying_exposure_pct_env: OPTIONS_AGENT_RISK_MAX_UNDERLYING_EXPOSURE_PCT
+  max_sector_exposure_pct: 0.25
+  max_sector_exposure_pct_env: OPTIONS_AGENT_RISK_MAX_SECTOR_EXPOSURE_PCT
+
+capital:
+  min_cash_reserve_pct: 0.20
+  min_cash_reserve_pct_env: OPTIONS_AGENT_RISK_MIN_CASH_RESERVE_PCT
+  normal_max_capital_deployed_pct: 0.60
+  normal_max_capital_deployed_pct_env: OPTIONS_AGENT_RISK_NORMAL_MAX_CAPITAL_DEPLOYED_PCT
+  absolute_max_capital_deployed_pct: 0.70
+  absolute_max_capital_deployed_pct_env: OPTIONS_AGENT_RISK_ABSOLUTE_MAX_CAPITAL_DEPLOYED_PCT
+
+drawdown:
+  warning_pct: 0.08
+  warning_pct_env: OPTIONS_AGENT_RISK_DRAWDOWN_WARNING_PCT
+  risk_reduction_pct: 0.10
+  risk_reduction_pct_env: OPTIONS_AGENT_RISK_DRAWDOWN_RISK_REDUCTION_PCT
+  halt_pct: 0.15
+  halt_pct_env: OPTIONS_AGENT_RISK_DRAWDOWN_HALT_PCT
+
+# In the risk-reduction drawdown zone (>= risk_reduction_pct, < halt_pct)
+# new-risk trades are additionally capped by this fraction of the normal
+# target risk per trade, on top of every other limit.
+risk_reduction_sizing_multiplier: 0.5
+risk_reduction_sizing_multiplier_env: OPTIONS_AGENT_RISK_REDUCTION_SIZING_MULTIPLIER
+
+liquidity:
+  min_open_interest: 100
+  min_open_interest_env: OPTIONS_AGENT_RISK_MIN_OPEN_INTEREST
+  min_volume: 10
+  min_volume_env: OPTIONS_AGENT_RISK_MIN_VOLUME
+  max_bid_ask_spread_pct: 0.15
+  max_bid_ask_spread_pct_env: OPTIONS_AGENT_RISK_MAX_BID_ASK_SPREAD_PCT
+
+correlation:
+  high_correlation_threshold: 0.70
+  high_correlation_threshold_env: OPTIONS_AGENT_RISK_HIGH_CORRELATION_THRESHOLD
+
+data_freshness:
+  max_market_data_age_minutes: 15
+  max_market_data_age_minutes_env: OPTIONS_AGENT_RISK_MAX_MARKET_DATA_AGE_MINUTES
+
+pricing:
+  # Risk-free rate used only for the Risk Engine's own independent
+  # repricing/stress-testing (src.quant.expected_value / monte_carlo) —
+  # neither TradeProposal nor CurrentMarketData carries one.
+  risk_free_rate: 0.04
+  risk_free_rate_env: OPTIONS_AGENT_RISK_FREE_RATE
+
+# Tolerance for cross-checking the Risk Engine's own independently
+# recomputed StrategyEconomics against the QuantitativeAnalysis supplied
+# as input. A mismatch beyond this is treated as unknown/untrusted risk,
+# not silently averaged or trusted from whichever source looks bigger.
+quant_cross_check_tolerance_pct: 0.02
+quant_cross_check_tolerance_pct_env: OPTIONS_AGENT_RISK_QUANT_CROSS_CHECK_TOLERANCE_PCT
+
+stress_testing:
+  # Worst-case stressed portfolio loss (including the proposed trade)
+  # may not exceed this fraction of NAV, or the trade is rejected
+  # regardless of how it looks under every other check.
+  max_stress_loss_pct_of_nav: 0.30
+  max_stress_loss_pct_of_nav_env: OPTIONS_AGENT_RISK_MAX_STRESS_LOSS_PCT_OF_NAV
