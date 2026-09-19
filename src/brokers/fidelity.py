@@ -78,6 +78,12 @@ class TicketStatus(str, Enum):
     CANCELLED = "cancelled"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    # The market moved enough, before a human finished entering the
+    # order (or before Fidelity accepted it), that the ticket's
+    # limit/minimum-acceptable price is no longer valid and must be
+    # regenerated from fresh market data before anyone re-attempts
+    # manual entry — never silently resubmitted at the stale price.
+    REPRICE_REQUIRED = "reprice_required"
 
 
 _TERMINAL_STATUSES = frozenset(
@@ -96,9 +102,19 @@ _ALLOWED_TRANSITIONS: dict[TicketStatus, frozenset[TicketStatus]] = {
     TicketStatus.QUANT_APPROVED: frozenset({TicketStatus.LLM_REVIEWED, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
     TicketStatus.LLM_REVIEWED: frozenset({TicketStatus.RISK_APPROVED, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
     TicketStatus.RISK_APPROVED: frozenset({TicketStatus.AWAITING_HUMAN, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
-    TicketStatus.AWAITING_HUMAN: frozenset({TicketStatus.ORDER_ENTERED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}),
-    TicketStatus.ORDER_ENTERED: frozenset({TicketStatus.CANCELLED, TicketStatus.EXPIRED}),  # FILLED/PARTIALLY_FILLED: confirm_fill() only
+    TicketStatus.AWAITING_HUMAN: frozenset(
+        {TicketStatus.ORDER_ENTERED, TicketStatus.REPRICE_REQUIRED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+    ),
+    TicketStatus.ORDER_ENTERED: frozenset(
+        {TicketStatus.REPRICE_REQUIRED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+    ),  # FILLED/PARTIALLY_FILLED: confirm_fill() only
     TicketStatus.PARTIALLY_FILLED: frozenset({TicketStatus.CANCELLED, TicketStatus.EXPIRED}),  # FILLED: confirm_fill() only
+    # A repriced ticket must be regenerated (a fresh generate_trade_ticket
+    # call from current market data) before a human re-attempts entry —
+    # it goes back to AWAITING_HUMAN, never straight to ORDER_ENTERED.
+    TicketStatus.REPRICE_REQUIRED: frozenset(
+        {TicketStatus.AWAITING_HUMAN, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+    ),
     TicketStatus.FILLED: frozenset(),
     TicketStatus.CANCELLED: frozenset(),
     TicketStatus.REJECTED: frozenset(),

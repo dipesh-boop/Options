@@ -305,6 +305,88 @@ class PortfolioManagerReview(_StrictModel):
     summary: str = Field(min_length=1, max_length=2000)
 
 
+# What the Portfolio Manager may conclude about one already-proposed
+# trade (Step 10). Deliberately not "approve" — this agent has no
+# approval authority at all; "propose_advance" names what it actually
+# does, which is recommend the proposal continue toward Python Risk
+# Engine, the only component that can ever approve anything.
+PortfolioDecisionType = Literal["propose_advance", "reject", "hold_cash"]
+
+
+class PortfolioDecision(_StrictModel):
+    """portfolio_manager agent output (Step 10): the CIO-level verdict on
+    one specific `TradeProposal`, reached by explicitly working through
+    the platform's 13-question decision process. Every field here is
+    qualitative narrative, a category, or a plain boolean/list of
+    strings — there is no field of numeric type anywhere in this schema.
+    That is deliberate, not an oversight: this agent must never originate
+    a price, a Greek, a probability, an account balance, or a risk
+    figure, and a schema with no numeric slot to put one in is a
+    stronger guarantee of that than a comment asking nicely. Every
+    quantitative fact this agent's rationale refers to must already have
+    come from Python Quant / Python Risk Engine and be referenced by
+    proposal_id / decision_id, not restated as a fresh number here.
+
+    This decision is advisory input to the rest of the pipeline, same as
+    `AdversarialReview`/`RiskReviewNote` — it carries no authority to
+    override `src.risk.engine.evaluate_trade_proposal`, resize a
+    position, or change a risk limit, and there is no field on this
+    schema through which it could even try."""
+
+    decision_id: str = Field(min_length=1, max_length=64)
+    proposal_id: str = Field(min_length=1, max_length=64)
+    decision: PortfolioDecisionType
+    confidence: Conviction
+    market_regime: MarketRegimeLabel
+    thesis_summary: str = Field(min_length=1, max_length=2000)
+    bear_case: str = Field(min_length=1, max_length=2000)
+    portfolio_fit: str = Field(min_length=1, max_length=1000)
+    correlation_assessment: str = Field(min_length=1, max_length=1000)
+    capital_efficiency: str = Field(min_length=1, max_length=1000)
+    alternative_considered: str = Field(min_length=1, max_length=1000)
+    cash_preferred: bool
+    invalidation_conditions: list[str] = Field(min_length=1, max_length=10)
+    required_follow_up: list[str] = Field(default_factory=list, max_length=10)
+    timestamp: datetime
+
+    @field_validator("timestamp")
+    @classmethod
+    def _require_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return v
+
+    @field_validator("invalidation_conditions", "required_follow_up")
+    @classmethod
+    def _entries_non_blank(cls, v: list[str]) -> list[str]:
+        if any(not s.strip() for s in v):
+            raise ValueError("entries must not be blank")
+        return v
+
+    @model_validator(mode="after")
+    def _cash_preferred_matches_decision(self) -> "PortfolioDecision":
+        if (self.decision == "hold_cash") != self.cash_preferred:
+            raise ValueError(
+                "cash_preferred must be True if and only if decision is 'hold_cash' — a decision "
+                "to advance or reject while also claiming cash was preferred is a contradiction "
+                "this schema refuses to carry silently."
+            )
+        return self
+
+
+def ensure_portfolio_decision(obj: object) -> PortfolioDecision:
+    """Runtime boundary guard, same exact-type pattern as
+    `ensure_trade_proposal` below. Accepts nothing but a genuine,
+    already-validated `PortfolioDecision` instance — no dict, no
+    subclass, no other schema in this module."""
+    if type(obj) is not PortfolioDecision:
+        raise TypeError(
+            f"Expected a validated PortfolioDecision instance, got {type(obj).__name__!r}. "
+            "Only src.llm.schemas.PortfolioDecision may be treated as a Portfolio Manager decision."
+        )
+    return obj
+
+
 def ensure_trade_proposal(obj: object) -> TradeProposal:
     """Runtime boundary guard. Every point where agent output could flow
     toward Python Quant / Python Risk Engine (not implemented yet) must

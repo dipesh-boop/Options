@@ -69,6 +69,7 @@ def _ticket_at(status: TicketStatus):
         TicketStatus.AWAITING_HUMAN: [],
         TicketStatus.ORDER_ENTERED: [TicketStatus.ORDER_ENTERED],
         TicketStatus.CANCELLED: [TicketStatus.ORDER_ENTERED, TicketStatus.CANCELLED],
+        TicketStatus.REPRICE_REQUIRED: [TicketStatus.REPRICE_REQUIRED],
     }[status]
     for step in path:
         ticket = transition(ticket, step, at=NOW)
@@ -206,3 +207,49 @@ class TestConfirmFillRequiresExplicitEvidence:
         assert TicketStatus.RISK_APPROVED not in _FILL_CONFIRMABLE_FROM
         assert TicketStatus.PROPOSED not in _FILL_CONFIRMABLE_FROM
         assert TicketStatus.AWAITING_HUMAN not in _FILL_CONFIRMABLE_FROM
+
+
+class TestRepriceRequired:
+    """REPRICE_REQUIRED (Step 10): the market moved enough, before a
+    human finished entering the order, that the ticket's price is stale
+    and must be regenerated — never resubmitted as-is."""
+
+    def test_awaiting_human_can_reach_reprice_required(self):
+        ticket = _ticket_at(TicketStatus.AWAITING_HUMAN)
+        updated = transition(ticket, TicketStatus.REPRICE_REQUIRED, at=LATER)
+        assert updated.status == TicketStatus.REPRICE_REQUIRED
+
+    def test_order_entered_can_reach_reprice_required(self):
+        ticket = _ticket_at(TicketStatus.ORDER_ENTERED)
+        updated = transition(ticket, TicketStatus.REPRICE_REQUIRED, at=LATER)
+        assert updated.status == TicketStatus.REPRICE_REQUIRED
+
+    def test_reprice_required_can_return_to_awaiting_human(self):
+        ticket = _ticket_at(TicketStatus.REPRICE_REQUIRED)
+        updated = transition(ticket, TicketStatus.AWAITING_HUMAN, at=LATER)
+        assert updated.status == TicketStatus.AWAITING_HUMAN
+
+    def test_reprice_required_can_be_cancelled_or_expire(self):
+        ticket = _ticket_at(TicketStatus.REPRICE_REQUIRED)
+        cancelled = transition(ticket, TicketStatus.CANCELLED, at=LATER)
+        assert cancelled.status == TicketStatus.CANCELLED
+
+    def test_reprice_required_cannot_reach_order_entered_directly(self):
+        ticket = _ticket_at(TicketStatus.REPRICE_REQUIRED)
+        with pytest.raises(InvalidTransitionError):
+            transition(ticket, TicketStatus.ORDER_ENTERED, at=LATER)
+
+    def test_reprice_required_cannot_reach_filled_via_transition(self):
+        ticket = _ticket_at(TicketStatus.REPRICE_REQUIRED)
+        with pytest.raises(InvalidTransitionError, match="confirm_fill"):
+            transition(ticket, TicketStatus.FILLED, at=LATER)
+
+    def test_reprice_required_is_not_fill_confirmable(self):
+        from src.brokers.fidelity import _FILL_CONFIRMABLE_FROM
+
+        assert TicketStatus.REPRICE_REQUIRED not in _FILL_CONFIRMABLE_FROM
+
+    def test_reprice_required_is_not_terminal(self):
+        from src.brokers.fidelity import _TERMINAL_STATUSES
+
+        assert TicketStatus.REPRICE_REQUIRED not in _TERMINAL_STATUSES

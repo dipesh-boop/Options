@@ -238,10 +238,14 @@ class TestFidelityTradeTicket:
         with pytest.raises(ValidationError):
             FidelityTradeTicket.model_validate(payload)
 
-    def test_all_11_named_states_are_valid_enum_members(self):
+    def test_all_12_named_states_are_valid_enum_members(self):
+        # 11 original states (Step 8) plus REPRICE_REQUIRED (Step 10):
+        # a ticket whose price went stale before a human finished
+        # entering it, and must be regenerated before re-attempting.
         expected = {
             "proposed", "quant_approved", "llm_reviewed", "risk_approved", "awaiting_human",
             "order_entered", "partially_filled", "filled", "cancelled", "rejected", "expired",
+            "reprice_required",
         }
         assert {s.value for s in TicketStatus} == expected
 

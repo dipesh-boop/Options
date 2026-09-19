@@ -50,6 +50,44 @@ class PortfolioStateContext:
 
 
 @dataclass(frozen=True)
+class QuantitativeAnalysisContext:
+    """Python Quant's computed economics for one proposed structure —
+    mirrors `src.quant.expected_value.StrategyEconomics` field for field,
+    as a plain dataclass rather than an import, so `src.llm` stays fully
+    decoupled from `src.quant` (same reason `CandidateContext` doesn't
+    import `src.data.option_chain.OptionContract`). Every field here was
+    computed by Python; the Portfolio Manager may read and reference
+    these numbers in its narrative but must never restate a different
+    one — see `PortfolioDecision`'s module docstring."""
+
+    max_profit: float
+    max_loss: float
+    breakeven: float
+    capital_required: float
+    return_on_capital: float
+    annualized_roc: float
+    probability_of_profit: float
+    expected_value: float
+
+
+@dataclass(frozen=True)
+class RiskEngineContext:
+    """Python Risk Engine's already-reached decision on one proposal —
+    mirrors `src.risk.engine.RiskDecisionResult`'s key fields as a plain
+    dataclass, for the same decoupling reason as
+    `QuantitativeAnalysisContext` above. The Portfolio Manager sees this
+    as a fact to narrate around, never a recommendation it can revise:
+    it has no authority to override what this record says, and no field
+    anywhere in its output schema (`PortfolioDecision`) through which it
+    could even try."""
+
+    decision: str  # RiskDecision.value: "approve" | "resize" | "reject" | "halt"
+    reason_codes: list[str]
+    approved_contracts: int | None
+    message: str
+
+
+@dataclass(frozen=True)
 class MarketContext:
     """Qualitative/reference market context (index levels, known
     upcoming events). Never a source of new numeric truth for pricing —
