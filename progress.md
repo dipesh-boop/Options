@@ -1121,6 +1121,188 @@ don't rewrite history.
   mention of the name at all, the same import-statement-vs-prose
   distinction Step 7's architecture-boundary test had to learn.
 
+## 2026-09-19 (cont'd) — Internal PaperBroker and the first real end-to-end pipeline (Step 12)
+
+- **Read first**: confirmed `CLAUDE.md` still doesn't exist; re-read Step
+  11's "Next up" (which already named end-to-end wiring, ordering-aware,
+  as the natural next step); re-read `src.brokers.base`'s full `Broker`
+  ABC, `Order`/`Position`/`Account`/`Fill` schemas, and
+  `IdempotencyStore` pattern before writing `paper.py`, to implement
+  against the interface already established by `src.brokers.ibkr`
+  rather than inventing a parallel one.
+- **`src/brokers/paper.py`** — `PaperBroker(Broker)`, fully in-memory,
+  no network client of any kind:
+  - `FillModel`: `BID`/`ASK` (every leg fills at its own bid/ask —
+    conservative/optimistic for a net-credit opening order, the
+    platform's only kind, and the reverse for a net-debit closing one),
+    `MID`, `MID_WITH_SLIPPAGE`, `LIQUIDITY_ADJUSTED` (the default —
+    "use conservative assumptions by default" from the spec). Slippage
+    is the larger of a bps-of-mid floor and a fraction of each leg's
+    actual bid/ask spread, so a wide-spread market simulates worse than
+    a tight one with the same mid — a bps-of-mid-only model would have
+    made those two indistinguishable, which a test caught (see below).
+    `LIQUIDITY_ADJUSTED` additionally multiplies slippage when
+    volume/open interest fall below configured thresholds, and fill
+    quantity itself is capped by a fraction of the thinnest leg's
+    volume (the mechanism behind partial fills) — a resting order that
+    doesn't fully fill stays open and can be re-attempted later via
+    `attempt_fill` once the market moves or the caller feeds fresh data.
+  - Cash, buying power, and collateral: a put credit spread's collateral
+    nets against its long leg (strike-width x 100 x qty), never the full
+    cash-secured amount a naked short put would need — this matters a
+    lot in practice (a $100k account can comfortably hold a handful of
+    $5-wide spreads but could never cash-secure the equivalent naked
+    puts) and is recomputed by grouping the *whole current position
+    book* by (underlying, expiration), not tracked incrementally per
+    order, specifically so a spread whose two legs were opened in
+    separate orders still nets correctly.
+  - Expiration settlement (`settle_expiration`) is cash- and
+    share-settled by intrinsic value: a short ITM option is assigned
+    (buys/sells real simulated shares at strike), a long ITM option is
+    exercised (the mirror image), an OTM option expires worthless with
+    no further cash impact. A covered call's assignment correctly
+    reduces the share position acquired from an earlier cash-secured-put
+    assignment — proven end to end in one test that chains a CSP
+    assignment into a covered call assignment on the resulting shares.
+  - Idempotency reuses `src.brokers.base.IdempotencyStore` exactly as
+    IBKR does: the same `client_order_id` returns the existing `Order`
+    rather than resubmitting.
+- **`src/brokers/order_validator.py`** — the Order Validator stage
+  between Python Risk Engine and `PaperBroker`: turns a Risk-Engine-
+  approved `ApprovedOrder` into a `PlaceOrderRequest`, refusing
+  (`OrderValidationError`) a non-APPROVE/RESIZE decision, a missing or
+  non-`AUTOMATED` broker capability, a contracts-requested mismatch, or
+  an already-submitted `client_order_id`. `build_occ_symbol` derives the
+  OCC-style option symbol (`ApprovedOrder`'s legs carry no symbol field
+  of their own) matching the exact format this codebase's fixtures
+  already use.
+- **`config/brokers.yaml`**: added an `internal_paper` entry
+  (`execution_mode: AUTOMATED`) — `PaperBroker` needed a broker
+  capability of its own, distinct from `ibkr_paper` (a different real
+  connection) and `fidelity` (`MANUAL`).
+- **`src/risk/engine.py` extended, not duplicated**: `ApprovedOrder`
+  construction was previously gated on `execution_mode == "MANUAL"`
+  (Fidelity-only, since that was Step 9's whole scope). `ApprovedOrder`
+  is broker-agnostic data, so it's now built for *any* approved OPEN
+  action regardless of execution mode; only the human-readable
+  `FidelityTradeTicket` stays `MANUAL`-specific. No existing Step 9 test
+  assumed the narrower behavior (all of them used the `fidelity`
+  fixture, still `MANUAL`), so this widened cleanly — confirmed by the
+  full `tests/unit/risk/` suite passing unmodified.
+- **A genuine, Step 10-established interface needed to change**: Step
+  10 made `PortfolioManagerInputs.risk_engine_result` a *required*
+  field, on the reading that the Portfolio Manager narrates around an
+  already-known Risk Engine result. Step 12's own required pipeline
+  order — Devil's Advocate -> **Portfolio Manager -> Risk Engine** —
+  makes that reading impossible: the Risk Engine hasn't run yet when
+  the Portfolio Manager does. Rather than route around this,
+  `risk_engine_result` is now `RiskEngineContext | None = None`,
+  documented in place as changed *because of* Step 12, with the other
+  six fields staying required exactly as before. Two Step 10 tests that
+  assumed the field was mandatory were updated (not deleted) to instead
+  assert the opposite — that a `None` here does not raise, unlike every
+  other required field.
+- **`src/orchestration/` — new package, the pipeline itself**:
+  - `pipeline.py`: `run_order_pipeline(request, stages)` walks the exact
+    8 stages named (Quant Engine, Devil's Advocate, Portfolio Manager,
+    Risk Engine, Order Validator, PaperBroker, Portfolio, Database) as
+    explicit, individually-injectable dependencies on `PipelineStages` —
+    checked for presence *before* any of them run; a `None` on any one
+    rejects immediately, naming exactly which stage was missing
+    (`PipelineOutcome.rejected_stage`), never silently skipped. This is
+    the first module in the codebase that calls
+    `src.llm.devils_advocate`, `src.llm.portfolio_manager`, and
+    `src.risk.engine` back-to-back against one shared scenario — every
+    prior step built and tested these in isolation.
+    `default_quant_stage` reuses `src.risk.trade_risk`'s own
+    `resolve_leg_contracts`/`compute_trade_economics`/
+    `compute_trade_greeks` (never a second implementation of the same
+    math); `_adversarial_review_from` bridges Step 11's richer
+    `DevilsAdvocateReview` into the `AdversarialReview` shape
+    `PortfolioManagerInputs` still expects, as a small adapter rather
+    than changing that established interface a second time.
+  - **The Fidelity ticket is generated "at the same time"** exactly as
+    Step 12 asks, by running the *same* Risk Engine stage a second time
+    against a `MANUAL` broker capability right after the `AUTOMATED`
+    (PaperBroker) call approves — never hand-built, always the Risk
+    Engine's own independently computed artifact; a failure generating
+    it is non-fatal to the paper-execution path (a companion ticket, not
+    a precondition for one).
+  - `refresh.py`: the pre-execution refresh — refreshes quote/legs by
+    rerunning the Quant Engine and Risk Engine stages against fresh
+    market data, then compares the *newly generated ticket's own
+    figures* (target credit, max loss) against the original ticket's;
+    a move beyond a configurable materiality threshold (10% default on
+    either) returns `REPRICE_REQUIRED` and withholds the new ticket as
+    final, rather than silently handing a human updated numbers under
+    the same "AWAITING_HUMAN" framing.
+  - `execution_audit.py`: `ExecutionQualityRecord` stores exactly the
+    six things asked for (theoretical midpoint, paper fill, Fidelity
+    target limit, minimum acceptable credit, market timestamp,
+    subsequent price) — `theoretical_midpoint`/`fidelity_target_limit`/
+    `fidelity_minimum_acceptable_credit` are read directly off the
+    `FidelityTradeTicket`'s own fields (`net_mid`, `limit_price`,
+    `minimum_acceptable_price`), never recomputed. `subsequent_price`
+    is deliberately not a field filled in later on the same record
+    (this log is append-only, same as every other audit log in this
+    codebase) — a later observation is its own follow-up record,
+    `follow_up_of` pointing back at the original.
+- **Bugs found and fixed while building/testing, before they could ship**:
+  - `price_satisfies_limit`'s debit-order branch had the comparison
+    backwards (`net_price <= -limit_price` instead of
+    `net_price >= -limit_price`), which would have rejected every
+    closing (buy-to-close) trade that actually satisfied its limit and
+    accepted ones that didn't — caught by manual smoke-testing a
+    round-trip open-then-close scenario before any pytest was written,
+    not by a test that happened to already exist.
+  - The first `_required_collateral` implementation charged every short
+    leg its full naked cash-secured amount, ignoring a same-order long
+    leg entirely — a $5-wide put credit spread would have needed the
+    same six-figure collateral as a naked short put. Fixed by pairing
+    same-right, same-quantity short/long legs within a netting group and
+    charging only the strike width; `_recompute_collateral` reconstructs
+    that pairing from the *whole position book*, grouped by
+    (underlying, expiration), rather than tracking collateral
+    incrementally per order — the incremental version couldn't net a
+    spread whose two legs were opened in separate orders.
+  - `compute_fill`'s slippage was originally a pure function of the net
+    mid's magnitude and liquidity thresholds, with no dependency on the
+    actual bid/ask spread width at all — a "wide spreads" test (two
+    otherwise-identical markets, one tight, one wide, same mid) came
+    back with identical simulated fills, which is exactly the
+    unrealistic behavior "realistic fills" was supposed to prevent.
+    Fixed by taking slippage as the larger of the bps-of-mid floor and a
+    fraction of the actual average leg spread.
+  - The pipeline's Order Validator call originally defaulted
+    `client_order_id` to `ApprovedOrder.risk_approval_id`, which
+    `src.risk.engine` generates fresh (`uuid.uuid4()`) on every call —
+    running the *same* `TradeProposal` through the pipeline twice
+    produced two different `client_order_id`s, defeating the whole
+    "duplicate orders" idempotency test. Fixed by pinning
+    `client_order_id` to `TradeProposal.proposal_id` itself, the one
+    stable identifier that's actually the same across repeated runs of
+    "the same" intended trade.
+  - A test-helper bug (not a production bug): an early `_full_stages`
+    test fixture popped `paper_broker` from overrides and treated an
+    explicit `paper_broker=None` the same as "not specified," silently
+    injecting a real broker back in — masking what should have been a
+    missing-stage rejection test. Fixed by checking key presence
+    (`"paper_broker" not in overrides`) instead of truthiness.
+- **Full repo test suite: 1104 passing, 4 skipped** (same pre-existing
+  IBKR skips). New: 27 `PaperBroker` tests (all five fill models, no
+  fill, partial fill with a later completing re-attempt, stale data,
+  missing quotes, wide spreads, duplicate/idempotent orders, cancel,
+  insufficient cash, defined-risk-vs-naked collateral, position closing,
+  OTM expiration, ITM assignment, chained CSP-assignment-into-covered-
+  call-assignment, broker lifecycle); 15 Order Validator tests; 33
+  orchestration tests (8 missing-stage-rejection cases, Devil's Advocate
+  reject and reprice-required propagation, Portfolio Manager reject and
+  hold-cash propagation, Risk Engine reject/halt propagation, duplicate
+  orders at the pipeline level, insufficient cash, the full happy path
+  producing both a paper fill and a Fidelity ticket together, refresh
+  OK/REPRICE_REQUIRED/REJECTED paths, execution-audit record shape and
+  append-only follow-up behavior).
+
 ## Open decisions carried forward (updated again)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker) —
@@ -1210,33 +1392,65 @@ don't rewrite history.
       duality from Step 10 and carrying the same open question: which
       one a real orchestration call should actually ask for, and whether
       both are needed going forward
+- [x] ~~Nothing drives the full loop end to end~~ — resolved by Step 12:
+      `src.orchestration.pipeline.run_order_pipeline` now runs Quant ->
+      Devil's Advocate -> Portfolio Manager -> Risk Engine -> Order
+      Validator -> PaperBroker -> Portfolio -> Database back-to-back
+      against one shared scenario, in the ordering Step 11's
+      independence requirement demands
+- [ ] **New from Step 12**: `InMemoryDatabase`
+      (`src.orchestration.pipeline`) is, like every other in-memory
+      store in this codebase, process-local and lost on restart — a real
+      persisted database is still the same Phase 0 item it's always been
+- [ ] **New from Step 12**: `default_portfolio_update_stage` folds a
+      fill into a *new* `Portfolio`, but nothing yet persists that
+      updated `Portfolio` anywhere or feeds it back in as the starting
+      point of the *next* pipeline run — each call to
+      `run_order_pipeline` still starts from whatever `Portfolio` its
+      caller happens to pass in
+- [ ] **New from Step 12**: `PaperBroker`'s expiration/assignment/
+      exercise settlement (`settle_expiration`) must be called
+      explicitly — there is no clock-driven scheduler that notices an
+      option expired and settles it automatically
+- [ ] **New from Step 12**: the pipeline calls Python Risk Engine twice
+      per run (once for the `AUTOMATED` PaperBroker target, once for the
+      `MANUAL` Fidelity target, to get the companion ticket "at the same
+      time") — both calls independently recompute the same quant
+      economics, which is correct but means the Fidelity ticket's own
+      freshness is only as good as whatever `fresh_market_data` the
+      *second* call happened to receive; nothing yet forces the two
+      calls to share a single, atomic market-data snapshot
+- [ ] **New from Step 12**: `ExecutionQualityRecord.subsequent_price`
+      has no automated capture path — something still needs to actually
+      look up a later price and call `record_subsequent_price`; nothing
+      does that today
 
 ## Next up
 
-- Nine standalone pieces now exist — `src/llm/` (now including both the
-  Portfolio Manager's decision/audit layer and the Devil's Advocate's
-  independent review layer), `src/quant/`, `src/data/`, `src/brokers/`
-  (IBKR paper trading + Fidelity manual tickets, now with a 12th
-  `REPRICE_REQUIRED` ticket state), and `src/risk/` (the deterministic
-  portfolio Risk Engine) — each internally tested but still not wired
-  into one live, end-to-end pipeline. Steps 10 and 11 both built pieces
-  of the Multi-Agent Layer that call into real boundary-guard machinery
-  (`ensure_trade_proposal`, `ensure_portfolio_decision`,
-  `ensure_devils_advocate_review`) and, for Step 11, real deterministic
-  Python arithmetic (`compute_staleness`) rather than only being tested
-  against it — but nothing yet drives the full loop: Market Regime →
-  Opportunity Scanner → Strategy Analyst → Devil's Advocate → Portfolio
-  Manager → Python Risk Engine → (for Fidelity) a real ticket a human
-  enters. Every individual stage of that loop now exists and is tested
-  in isolation; none of them have ever been run back-to-back against one
-  shared, realistic scenario — and Step 11's explicit independence
-  requirement (Devil's Advocate must run, and be fully resolved, before
-  the Portfolio Manager ever sees its verdict) means that first
-  end-to-end wiring attempt needs to get the *ordering* right, not just
-  connect the pieces. That wiring — or the Phase 0 foundations (DB,
-  config, CI) needed to run it for real — is the natural next step.
-  Also still open: the `app/` prototype disposition, the accumulating
-  layout/config-duplication/untested-real-adapter questions above, the
-  four Step 9 gaps, the three Step 10 gaps, and the three new Step 11
-  gaps (no real caller, unresolved `earnings_in_window` wiring, the
-  `AdversarialReview`/`DevilsAdvocateReview` duality) above.
+- Ten standalone pieces now exist, and — for the first time — one of
+  them actually *connects* the rest: `src/orchestration/` runs the full
+  required pipeline (Quant Engine, Devil's Advocate, Portfolio Manager,
+  Python Risk Engine, Order Validator, `PaperBroker`, Portfolio,
+  Database) back-to-back against a single shared scenario, in the exact
+  ordering Step 11's independence requirement and Step 12's flow diagram
+  both demand, with a missing stage rejecting the order outright rather
+  than silently degrading. `PaperBroker` gives this platform its first
+  broker that can actually be run in a loop without a real account
+  behind it — simulating fills, partial fills, collateral, expiration,
+  assignment, and exercise well enough to paper-trade the platform's
+  three strategies end to end. What's still missing to make this a real,
+  continuously-running system rather than a single `run_order_pipeline`
+  call a test drives by hand: Phase 0 foundations (a real database in
+  place of every `InMemory*` placeholder accumulated across Steps 8-12,
+  config, CI), a scheduler to drive market data updates and expiration
+  settlement on a clock instead of by explicit test calls, something
+  that persists and re-loads `Portfolio` between pipeline runs instead
+  of each call starting fresh, and a real caller that builds
+  `PipelineRequest` from live market data instead of hand-constructed
+  fixtures. Also still open: the `app/` prototype disposition, the
+  accumulating layout/config-duplication/untested-real-adapter questions
+  above, the four Step 9 gaps, the three Step 10 gaps, the two remaining
+  Step 11 gaps, and the five new Step 12 gaps (in-memory database,
+  Portfolio not persisted between runs, no expiration scheduler, the two
+  Risk Engine calls not sharing one atomic market snapshot, no automated
+  subsequent-price capture) above.

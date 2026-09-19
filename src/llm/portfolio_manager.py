@@ -55,11 +55,19 @@ class PortfolioManagerCrossCheckError(ValueError):
 
 @dataclass(frozen=True)
 class PortfolioManagerInputs:
-    """Every input Step 10 names, bundled for one evaluation cycle. All
-    seven are required; `opportunity_highlight` is the one legitimately
-    optional field (a proposal that reached this stage without ever
-    being separately highlighted by the Opportunity Scanner is still
-    evaluable — the highlight is supplementary color, not load-bearing)."""
+    """Every input Step 10 names, bundled for one evaluation cycle.
+
+    `risk_engine_result` is **optional as of Step 12**: Step 12's
+    required order-pipeline flow (TradeProposal -> Quant -> Devil's
+    Advocate -> Portfolio Manager -> Risk Engine -> ...) places the
+    Portfolio Manager *before* Python Risk Engine ever runs, so it
+    cannot be a hard requirement here without making that pipeline
+    ordering impossible. When it is supplied (e.g. a later re-review
+    cycle that already has a Risk Engine result to narrate around),
+    the Portfolio Manager still treats it exactly as before — read-only
+    reference data it narrates around, never overrides. The other six
+    fields remain required; `opportunity_highlight` is, as originally,
+    the one field that was always legitimately optional."""
 
     proposal: TradeProposal
     market_regime: MarketRegimeAssessment
@@ -67,7 +75,7 @@ class PortfolioManagerInputs:
     devil_advocate_review: AdversarialReview
     risk_reviewer_note: RiskReviewNote
     portfolio_state: PortfolioStateContext
-    risk_engine_result: RiskEngineContext
+    risk_engine_result: RiskEngineContext | None = None
     opportunity_highlight: CandidateHighlight | None = None
 
 
@@ -78,7 +86,6 @@ _REQUIRED_FIELDS = (
     "devil_advocate_review",
     "risk_reviewer_note",
     "portfolio_state",
-    "risk_engine_result",
 )
 
 
@@ -122,7 +129,7 @@ def build_portfolio_manager_context(inputs: PortfolioManagerInputs) -> str:
             "concurs_with_quant_review": inputs.risk_reviewer_note.concurs_with_quant_review,
             "note": inputs.risk_reviewer_note.note,
         },
-        "risk_engine_result": vars(inputs.risk_engine_result),
+        "risk_engine_result": vars(inputs.risk_engine_result) if inputs.risk_engine_result is not None else None,
         "opportunity_highlight": vars(inputs.opportunity_highlight) if inputs.opportunity_highlight else None,
     }
     return build_agent_context(portfolio=inputs.portfolio_state, extra=extra)

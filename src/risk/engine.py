@@ -330,13 +330,19 @@ def _evaluate(
     decision = RiskDecision.APPROVE if sized.capped_by == "requested" else RiskDecision.RESIZE
     reason_codes = [ReasonCode.APPROVED if decision == RiskDecision.APPROVE else ReasonCode.RESIZED_POSITION_RISK]
 
+    # ApprovedOrder is broker-agnostic data (Step 12's Order Validator /
+    # PaperBroker path needs one for an AUTOMATED broker exactly as much
+    # as Fidelity's manual path does) — built for any approved OPEN
+    # action, regardless of execution_mode. Only the human-readable
+    # Fidelity ticket is MANUAL-specific.
     approved_order: ApprovedOrder | None = None
     fidelity_ticket: FidelityTradeTicket | None = None
-    if broker_capabilities.execution_mode == "MANUAL" and proposal.action == TradeAction.OPEN:
+    if proposal.action == TradeAction.OPEN:
         approved_order = _build_approved_order(
             proposal, contracts, sized.contracts, final_economics, broker_capabilities, as_of
         )
-        fidelity_ticket = FidelityManualProvider().generate_trade_ticket(approved_order)
+        if broker_capabilities.execution_mode == "MANUAL":
+            fidelity_ticket = FidelityManualProvider().generate_trade_ticket(approved_order)
 
     return RiskDecisionResult(
         decision=decision,

@@ -56,7 +56,7 @@ def _fake_client(response_input: dict) -> LLMClient:
 class TestMissingData:
     @pytest.mark.parametrize(
         "field_name",
-        ["proposal", "market_regime", "quant_analysis", "devil_advocate_review", "risk_reviewer_note", "portfolio_state", "risk_engine_result"],
+        ["proposal", "market_regime", "quant_analysis", "devil_advocate_review", "risk_reviewer_note", "portfolio_state"],
     )
     def test_each_required_input_missing_raises(self, field_name: str):
         inputs = _full_inputs(**{field_name: None})
@@ -69,7 +69,7 @@ class TestMissingData:
             build_portfolio_manager_context(inputs)
 
     def test_evaluate_proposal_never_calls_the_model_when_input_is_missing(self):
-        inputs = _full_inputs(risk_engine_result=None)
+        inputs = _full_inputs(market_regime=None)
         calls = []
 
         def _create(**kwargs):
@@ -80,6 +80,16 @@ class TestMissingData:
         with pytest.raises(MissingInputError):
             evaluate_proposal(inputs, client=client, system_prompt="You are the Portfolio Manager.")
         assert calls == []
+
+    def test_risk_engine_result_is_legitimately_optional_since_step_12(self):
+        # Step 12's required pipeline order runs the Portfolio Manager
+        # BEFORE Python Risk Engine, so this input can't be hard-required
+        # any more — a None here must not raise, unlike every other
+        # field above.
+        inputs = _full_inputs(risk_engine_result=None)
+        validate_inputs_complete(inputs)  # does not raise
+        context = build_portfolio_manager_context(inputs)
+        assert '"risk_engine_result": null' in context
 
 
 class TestMalformedTradeProposal:

@@ -27,3 +27,14 @@ ibkr_paper:
     - CASH_SECURED_PUT
     - COVERED_CALL
     - PUT_CREDIT_SPREAD
+
+# src.brokers.paper.PaperBroker — the internal simulator (Step 12), not
+# a connection to any real brokerage, paper or otherwise.
+internal_paper:
+  execution_mode: AUTOMATED
+  account_alias: INTERNAL_PAPER
+  options_enabled: true
+  allowed_strategies:
+    - CASH_SECURED_PUT
+    - COVERED_CALL
+    - PUT_CREDIT_SPREAD
