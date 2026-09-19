@@ -32,10 +32,50 @@ don't rewrite history.
   merged into the new plan — left as-is pending a decision (see
   `IMPLEMENTATION_PLAN.md` §3). The Greeks/IV-solver code in
   `app/analytics/greeks.py` is a reasonable seed for
-  `src/options_platform/risk/greeks.py` and is worth porting rather than
+  `src/options_platform/quant/greeks.py` and is worth porting rather than
   rewriting when Phase 0/1 starts.
-- Nothing has been committed to git yet this session; working tree has the
-  three planning docs plus the untouched `app/` prototype.
+- Committed and pushed to `claude/options-trading-agent-2b4yi8`: the three
+  planning docs (`a8dfa0d`) and the `app/` prototype as-is, clearly labeled
+  as not part of the plan (`6be729c`).
+
+## 2026-09-19 (cont'd) — Multi-Agent Layer refinement
+
+- User supplied a specific orchestration design for the LLM layer: a
+  Claude Opus-tier **Portfolio Manager** coordinating three sub-agents
+  (**Market Agent**, **Strategy Analyst**, **Adversarial Reviewer**),
+  feeding a two-stage Python verification (**Python Quant** → **Python
+  Risk Engine**) before **Paper Broker**.
+- Folded this into `ARCHITECTURE.md`:
+  - New §5 "Multi-Agent Layer" defines all four roles, their inputs,
+    outputs, and tools — every role still bound by the same read-only /
+    no-trusted-numbers constraints from §2.
+  - Split the former single "Risk Engine" section into §6 "Python Quant"
+    (pure per-trade calculation: Greeks, P&L, max loss, EV — no portfolio
+    state, no policy) and §7 "Python Risk Engine" (portfolio policy and
+    gating: sizing, exposure, correlation, drawdown, RiskGate, circuit
+    breaker) to match the two-box separation in the supplied diagram.
+  - Redrew the §3 component map top-to-bottom through the new pipeline:
+    Scheduler → Market Data → Strategy Screener → Multi-Agent Layer →
+    Python Quant → Python Risk Engine → trading-mode gate → Broker
+    Abstraction Layer.
+  - Updated §9 data flow to match (screener output feeds the agent layer;
+    agent proposals are non-numeric intent objects; Quant reprices from
+    the live snapshot; Risk Engine gates before the mode gate).
+  - Added a "multi-agent groupthink" failure mode to §11 (the Adversarial
+    Reviewer's prompt is deliberately adversarial rather than
+    collaborative; either way, Python Risk Engine is the actual backstop,
+    not agent consensus).
+  - Added open question 5 (§12): model tier per role — Opus-tier
+    recommended for the Portfolio Manager, sub-agent tiers configurable.
+- Updated `IMPLEMENTATION_PLAN.md`: split the `risk/` package into
+  `quant/` (greeks, pnl, max_loss, expected_value) and `risk/` (sizing,
+  exposure, correlation, drawdown, limits, circuit_breaker); expanded
+  `agent/` into per-role modules (`portfolio_manager.py`,
+  `market_agent.py`, `strategy_analyst.py`, `adversarial_reviewer.py`)
+  plus the shared `schemas.py`/`tools.py`/`audit.py`; updated Phase 1 and
+  renamed Phase 5 to "Multi-Agent Layer" with the four-role breakdown.
+- Still design-only — no `src/options_platform/` code exists yet; this was
+  a documentation refinement, not a Phase 0 start.
 
 ## Open decisions carried forward (see ARCHITECTURE.md §10)
 

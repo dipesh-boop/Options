@@ -45,9 +45,12 @@ Options/
 │       │   ├── schwab_broker.py
 │       │   ├── paper_broker.py     # simulated fills for brokers without a paper sandbox
 │       │   └── backtest_broker.py  # no network code path, by construction
-│       ├── risk/                   # the trusted kernel — highest test bar in the repo
+│       ├── quant/                  # per-trade calculation, no policy — pure functions
 │       │   ├── greeks.py
 │       │   ├── pnl.py
+│       │   ├── max_loss.py
+│       │   └── expected_value.py
+│       ├── risk/                   # portfolio policy & gating — the trusted kernel
 │       │   ├── position_sizing.py
 │       │   ├── exposure.py
 │       │   ├── correlation.py
@@ -60,18 +63,22 @@ Options/
 │       │   ├── covered_call.py
 │       │   ├── put_credit_spread.py
 │       │   └── screener.py         # universe + liquidity + criteria filtering
-│       ├── agent/
+│       ├── agent/                  # Multi-Agent Layer — see ARCHITECTURE.md §5
 │       │   ├── client.py           # Anthropic API wrapper
-│       │   ├── schemas.py          # strict typed input/output contracts (no numeric-risk fields)
-│       │   ├── tools.py            # read-only tool definitions only
+│       │   ├── schemas.py          # strict typed I/O contracts (no numeric-risk fields), incl. TradeProposal
+│       │   ├── tools.py            # read-only tool definitions only, shared by all four roles
+│       │   ├── portfolio_manager.py    # orchestrates the three roles below; Opus-tier recommended
+│       │   ├── market_agent.py         # read-only research/context
+│       │   ├── strategy_analyst.py     # proposes structures within the eligible candidate set
+│       │   ├── adversarial_reviewer.py # red-teams each proposal; advisory only
 │       │   ├── prompts/
-│       │   └── audit.py            # persist every agent call, append-only
+│       │   └── audit.py            # persist every agent call, all four roles, append-only
 │       ├── backtest/
 │       │   ├── engine.py
 │       │   ├── fills.py            # slippage/commission model
 │       │   └── metrics.py          # CAGR, Sharpe, Sortino, max DD, win rate
 │       ├── orchestration/
-│       │   ├── pipeline.py         # data -> screen -> risk-gate -> agent -> mode-gated execute -> log
+│       │   ├── pipeline.py         # data -> screen -> agent layer -> quant -> risk-gate -> mode-gated execute -> log
 │       │   ├── scheduler.py
 │       │   └── modes.py            # TradingMode enum + hard LIVE-not-implemented guard
 │       ├── api/
@@ -88,9 +95,14 @@ Options/
 
 Rationale for a `src/` layout with a single installable package
 (`options_platform`): keeps the broker/LLM/DB adapters cleanly separated
-from the domain core (hexagonal-style — `risk/` and `strategies/` depend on
-nothing external and are the easiest to test exhaustively), and avoids
-accidental imports of test code or scripts into the package.
+from the domain core (hexagonal-style — `quant/`, `risk/`, and
+`strategies/` depend on nothing external and are the easiest to test
+exhaustively), and avoids accidental imports of test code or scripts into
+the package. `quant/` (per-trade math, no portfolio state) and `risk/`
+(portfolio policy/gating, the RiskGate) are deliberately separate packages
+— see `ARCHITECTURE.md` §6–§7 — so "what are the numbers" and "is this
+allowed" stay independently testable and neither can silently absorb the
+other's responsibility.
 
 ## 2. Proposed dependencies
 
@@ -134,7 +146,7 @@ much-narrower "options analysis dashboard" scope. It is **not part of
 this architecture** (wrong package layout, no DB, no risk gate, no
 strategy/broker/agent separation) but the Black-Scholes/IV-solver math in
 `app/analytics/greeks.py` is directly reusable as the seed for
-`src/options_platform/risk/greeks.py` in Phase 0/1 rather than being
+`src/options_platform/quant/greeks.py` in Phase 0/1 rather than being
 rewritten from scratch. Recommend deciding in the next session whether to
 port-then-delete `app/`, or delete it outright and rewrite — flagged here
 rather than acted on, since this phase is design-only.
@@ -155,8 +167,11 @@ not scheduled.
 - Decision + action on the existing `app/` prototype (§3).
 
 ### Phase 1 — Deterministic core (no broker, no LLM)
-- Risk Engine: Greeks, P&L, max loss, EV, position sizing, exposure,
-  correlation, drawdown monitor, RiskGate, circuit breaker.
+- Python Quant: Greeks, P&L, max loss, expected value — pure per-trade
+  calculation, no portfolio state.
+- Python Risk Engine: position sizing, exposure, correlation, drawdown
+  monitor, RiskGate, circuit breaker — portfolio policy, built on top of
+  Quant's numbers.
 - Strategy screeners: CSP, covered call, put credit spread, universe +
   liquidity filtering (min OI/volume, max spread%, DTE window, no
   earnings-week entries).
@@ -190,12 +205,19 @@ not scheduled.
 - `SchwabBroker` implementation to whatever extent the sandbox allows;
   `PaperBroker` simulated-fill fallback for anything it doesn't.
 
-### Phase 5 — LLM agent layer
+### Phase 5 — Multi-Agent Layer
 - Anthropic API client wrapper, strict Pydantic I/O schemas (no numeric
-  risk fields — see `ARCHITECTURE.md` §2), read-only tool definitions
-  only, append-only audit logging.
+  risk fields, incl. the `TradeProposal` intent object — see
+  `ARCHITECTURE.md` §2, §5), read-only tool definitions only (shared
+  across all four roles), append-only audit logging.
+- Implement the four roles: Market Agent, Strategy Analyst, Adversarial
+  Reviewer, and the orchestrating Portfolio Manager (Opus-tier
+  recommended; sub-agent tier configurable — open question 5 in
+  `ARCHITECTURE.md` §12).
 - Wire into the orchestration pipeline strictly downstream of the
-  RiskGate, with the second RiskGate pass before any order.
+  Strategy Screener and strictly upstream of Python Quant and Python Risk
+  Engine, which reprice and gate every proposal before it can become an
+  order in any mode (`ARCHITECTURE.md` §9).
 
 ### Phase 6 — PAPER trading end-to-end
 - Scheduler + orchestrator running the full cycle in `PAPER` mode.
