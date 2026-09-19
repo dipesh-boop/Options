@@ -27,6 +27,16 @@ means to do any of these things — see
 `tests/unit/brokers/test_fidelity_no_execution.py` for the proof,
 including a runtime check that generating a ticket never opens a
 network socket.
+
+Every quantitative field on `ApprovedOrder`/`FidelityTradeTicket` is
+data this module trusts and displays; it computes none of it (no
+dependency on `src.quant`) and has no dependency on `src.llm` at all —
+there is no code path by which an LLM's text could reach or alter a
+numeric field here. `copy_fidelity_order_text` produces the exact text
+a future dashboard's "COPY FIDELITY ORDER" button would copy to the
+clipboard; clipboard access itself is a frontend concern
+(`navigator.clipboard.writeText` in the browser), not something this
+backend function attempts.
 """
 from __future__ import annotations
 
@@ -121,6 +131,57 @@ class FidelityOrderLeg(StrictModel):
     contracts: int = Field(gt=0)
 
 
+# ----------------------------------------------------------------------
+# Shared validation logic for ApprovedOrder and FidelityTradeTicket.
+# The two models intentionally duplicate almost all of their fields
+# (ApprovedOrder is what the Risk Engine hands over; FidelityTradeTicket
+# is the tracked, stateful artifact with a status/execution_confirmation
+# on top) — these module-level functions keep the *validation logic*
+# itself in one place rather than duplicating the logic too.
+# ----------------------------------------------------------------------
+
+
+def _check_timezone_aware(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+
+def _check_market_data_not_stale(market_data_timestamp: datetime, timestamp: datetime) -> None:
+    if market_data_timestamp > timestamp:
+        raise ValueError("market_data_timestamp cannot be after timestamp")
+    age = timestamp - market_data_timestamp
+    if age > MAX_MARKET_DATA_AGE:
+        raise ValueError(
+            f"market data is stale: {age} old, exceeds max allowed age of {MAX_MARKET_DATA_AGE}. "
+            "A ticket must never be generated from stale market data."
+        )
+
+
+def _check_net_bid_ask(net_bid: float, net_ask: float) -> None:
+    if net_bid > net_ask:
+        raise ValueError(f"net_bid ({net_bid}) cannot exceed net_ask ({net_ask})")
+
+
+def _check_minimum_acceptable_price(minimum_acceptable_price: float, limit_price: float, estimated_credit_debit: float) -> None:
+    if estimated_credit_debit >= 0:
+        if minimum_acceptable_price > limit_price:
+            raise ValueError("minimum_acceptable_price cannot exceed the target limit_price for a net-credit order")
+    else:
+        if minimum_acceptable_price < limit_price:
+            raise ValueError("minimum_acceptable_price cannot be below the target limit_price for a net-debit order")
+
+
+def _check_capital_at_risk(capital_at_risk: float, max_loss: float) -> None:
+    if capital_at_risk < max_loss:
+        raise ValueError(f"capital_at_risk ({capital_at_risk}) cannot be less than max_loss ({max_loss})")
+
+
+def _check_management_dte(management_dte: int, expiration: date, timestamp: datetime) -> None:
+    total_dte = (expiration - timestamp.date()).days
+    if management_dte > total_dte:
+        raise ValueError(f"management_dte ({management_dte}) cannot exceed the structure's total DTE ({total_dte})")
+
+
 class ApprovedOrder(StrictModel):
     """What the (not yet implemented) Risk Engine hands to this module.
     Every numeric field here is data this module trusts and displays —
@@ -128,6 +189,7 @@ class ApprovedOrder(StrictModel):
     `src.quant`; whatever approved this order already did that math."""
 
     risk_approval_id: str = Field(min_length=1, max_length=64)
+    account_alias: str = Field(min_length=1, max_length=100)
     ticker: str = Field(min_length=1, max_length=10)
     strategy: str = Field(min_length=1, max_length=100)
     underlying_price: float = Field(gt=0)
@@ -135,35 +197,32 @@ class ApprovedOrder(StrictModel):
     legs: list[FidelityOrderLeg] = Field(min_length=1, max_length=4)
     quantity: int = Field(gt=0)
     limit_price: float = Field(gt=0)
+    minimum_acceptable_price: float = Field(gt=0)
+    time_in_force: str = Field(default="DAY", min_length=1, max_length=16)
     estimated_credit_debit: float
+    net_bid: float
+    net_ask: float
     max_profit: float = Field(gt=0)
     max_loss: float = Field(gt=0)
     breakeven: float = Field(gt=0)
+    capital_at_risk: float = Field(gt=0)
     return_on_capital: float
     profit_target: float = Field(gt=0)
     loss_management_rule: str = Field(min_length=1, max_length=500)
     DTE_management_rule: str = Field(min_length=1, max_length=500)
+    management_dte: int = Field(ge=0, le=365)
     timestamp: datetime
     market_data_timestamp: datetime
 
     @model_validator(mode="after")
-    def _require_timezone_aware(self) -> "ApprovedOrder":
-        if self.timestamp.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
-        if self.market_data_timestamp.tzinfo is None:
-            raise ValueError("market_data_timestamp must be timezone-aware")
-        return self
-
-    @model_validator(mode="after")
-    def _market_data_not_stale(self) -> "ApprovedOrder":
-        if self.market_data_timestamp > self.timestamp:
-            raise ValueError("market_data_timestamp cannot be after timestamp")
-        age = self.timestamp - self.market_data_timestamp
-        if age > MAX_MARKET_DATA_AGE:
-            raise ValueError(
-                f"market data is stale: {age} old, exceeds max allowed age of {MAX_MARKET_DATA_AGE}. "
-                "A ticket must never be generated from stale market data."
-            )
+    def _validate(self) -> "ApprovedOrder":
+        _check_timezone_aware(self.timestamp, "timestamp")
+        _check_timezone_aware(self.market_data_timestamp, "market_data_timestamp")
+        _check_market_data_not_stale(self.market_data_timestamp, self.timestamp)
+        _check_net_bid_ask(self.net_bid, self.net_ask)
+        _check_minimum_acceptable_price(self.minimum_acceptable_price, self.limit_price, self.estimated_credit_debit)
+        _check_capital_at_risk(self.capital_at_risk, self.max_loss)
+        _check_management_dte(self.management_dte, self.expiration, self.timestamp)
         return self
 
 
@@ -179,9 +238,8 @@ class ExecutionConfirmation(StrictModel):
     confirmed_at: datetime
 
     @model_validator(mode="after")
-    def _require_timezone_aware(self) -> "ExecutionConfirmation":
-        if self.confirmed_at.tzinfo is None:
-            raise ValueError("confirmed_at must be timezone-aware")
+    def _validate(self) -> "ExecutionConfirmation":
+        _check_timezone_aware(self.confirmed_at, "confirmed_at")
         return self
 
 
@@ -191,6 +249,7 @@ class FidelityTradeTicket(TimestampedModel):
     `"fidelity_manual"` — there is no other kind of Fidelity ticket."""
 
     trade_id: str = Field(min_length=1, max_length=64)
+    account_alias: str = Field(min_length=1, max_length=100)
     ticker: str = Field(min_length=1, max_length=10)
     strategy: str = Field(min_length=1, max_length=100)
     underlying_price: float = Field(gt=0)
@@ -198,14 +257,20 @@ class FidelityTradeTicket(TimestampedModel):
     legs: list[FidelityOrderLeg] = Field(min_length=1, max_length=4)
     quantity: int = Field(gt=0)
     limit_price: float = Field(gt=0)
+    minimum_acceptable_price: float = Field(gt=0)
+    time_in_force: str = Field(default="DAY", min_length=1, max_length=16)
     estimated_credit_debit: float
+    net_bid: float
+    net_ask: float
     max_profit: float = Field(gt=0)
     max_loss: float = Field(gt=0)
     breakeven: float = Field(gt=0)
+    capital_at_risk: float = Field(gt=0)
     return_on_capital: float
     profit_target: float = Field(gt=0)
     loss_management_rule: str = Field(min_length=1, max_length=500)
     DTE_management_rule: str = Field(min_length=1, max_length=500)
+    management_dte: int = Field(ge=0, le=365)
     market_data_timestamp: datetime
     risk_approval_id: str = Field(min_length=1, max_length=64)
 
@@ -213,16 +278,17 @@ class FidelityTradeTicket(TimestampedModel):
     status_updated_at: datetime
     execution_confirmation: ExecutionConfirmation | None = None
 
+    @property
+    def net_mid(self) -> float:
+        return round((self.net_bid + self.net_ask) / 2, 4)
+
     @model_validator(mode="after")
-    def _market_data_not_stale(self) -> "FidelityTradeTicket":
-        if self.market_data_timestamp > self.timestamp:
-            raise ValueError("market_data_timestamp cannot be after timestamp")
-        age = self.timestamp - self.market_data_timestamp
-        if age > MAX_MARKET_DATA_AGE:
-            raise ValueError(
-                f"market data is stale: {age} old, exceeds max allowed age of {MAX_MARKET_DATA_AGE}. "
-                "A ticket must never be generated from stale market data."
-            )
+    def _validate(self) -> "FidelityTradeTicket":
+        _check_market_data_not_stale(self.market_data_timestamp, self.timestamp)
+        _check_net_bid_ask(self.net_bid, self.net_ask)
+        _check_minimum_acceptable_price(self.minimum_acceptable_price, self.limit_price, self.estimated_credit_debit)
+        _check_capital_at_risk(self.capital_at_risk, self.max_loss)
+        _check_management_dte(self.management_dte, self.expiration, self.timestamp)
         return self
 
     @model_validator(mode="after")
@@ -299,6 +365,7 @@ class FidelityManualProvider:
         now = generated_at or approved.timestamp
         return FidelityTradeTicket(
             trade_id=trade_id or str(uuid.uuid4()),
+            account_alias=approved.account_alias,
             ticker=approved.ticker,
             strategy=approved.strategy,
             underlying_price=approved.underlying_price,
@@ -306,14 +373,20 @@ class FidelityManualProvider:
             legs=approved.legs,
             quantity=approved.quantity,
             limit_price=approved.limit_price,
+            minimum_acceptable_price=approved.minimum_acceptable_price,
+            time_in_force=approved.time_in_force,
             estimated_credit_debit=approved.estimated_credit_debit,
+            net_bid=approved.net_bid,
+            net_ask=approved.net_ask,
             max_profit=approved.max_profit,
             max_loss=approved.max_loss,
             breakeven=approved.breakeven,
+            capital_at_risk=approved.capital_at_risk,
             return_on_capital=approved.return_on_capital,
             profit_target=approved.profit_target,
             loss_management_rule=approved.loss_management_rule,
             DTE_management_rule=approved.DTE_management_rule,
+            management_dte=approved.management_dte,
             market_data_timestamp=approved.market_data_timestamp,
             risk_approval_id=approved.risk_approval_id,
             status=TicketStatus.AWAITING_HUMAN,
@@ -332,54 +405,97 @@ _ACTION_LABELS = {
 
 
 def render_ticket_text(ticket: FidelityTradeTicket) -> str:
-    """Formats a ticket as plain text for a human to read before typing
-    the order into Fidelity Trader+ themselves — this function returns a
-    string; it does not print, send, or transmit anything."""
+    """Formats a ticket to closely match what Fidelity Trader+'s order
+    entry screen asks for, so a human can transcribe it field by field.
+    Returns a string; it does not print, send, transmit, or copy
+    anything to any clipboard — see `copy_fidelity_order_text`."""
+    net_label = "CREDIT" if ticket.estimated_credit_debit >= 0 else "DEBIT"
+
     lines = [
-        "FIDELITY TRADE TICKET",
+        "ACCOUNT:",
+        ticket.account_alias,
         "",
-        f"{ticket.ticker} {ticket.strategy}",
+        "UNDERLYING:",
+        ticket.ticker,
         "",
-        "Expiration:",
+        "STRATEGY:",
+        ticket.strategy,
+        "",
+        "EXPIRATION:",
         ticket.expiration.strftime("%m/%d/%Y"),
         "",
     ]
-    for leg in ticket.legs:
-        put_call = "PUT" if leg.put_call == OptionRight.PUT else "CALL"
-        lines.append(f"{_ACTION_LABELS[leg.action]}:")
-        lines.append(f"{leg.contracts} {ticket.ticker} {leg.strike:g} {put_call}")
-        lines.append("")
 
-    net = "CREDIT" if ticket.estimated_credit_debit >= 0 else "DEBIT"
+    for i, leg in enumerate(ticket.legs, start=1):
+        put_call = "PUT" if leg.put_call == OptionRight.PUT else "CALL"
+        lines += [
+            f"LEG {i}:",
+            _ACTION_LABELS[leg.action],
+            ticket.ticker,
+            f"{leg.strike:g} {put_call}",
+            f"{leg.contracts} contracts",
+            "",
+        ]
+
     lines += [
-        "ORDER TYPE:",
-        f"NET {net} LIMIT",
+        "ORDER:",
+        f"NET {net_label}",
         "",
-        f"TARGET {net}:",
+        "TARGET LIMIT:",
         f"${abs(ticket.limit_price):.2f}",
         "",
-        "MAXIMUM PROFIT:",
+        "MINIMUM ACCEPTABLE:",
+        f"${abs(ticket.minimum_acceptable_price):.2f}",
+        "",
+        "TIME IN FORCE:",
+        ticket.time_in_force,
+        "",
+        "CURRENT NET BID:",
+        f"${ticket.net_bid:.2f}",
+        "",
+        "CURRENT NET ASK:",
+        f"${ticket.net_ask:.2f}",
+        "",
+        "CURRENT MID:",
+        f"${ticket.net_mid:.2f}",
+        "",
+        "QUOTE TIME:",
+        ticket.market_data_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "",
+        "MAX PROFIT:",
         f"${ticket.max_profit:.0f}",
         "",
-        "MAXIMUM LOSS:",
+        "MAX LOSS:",
         f"${ticket.max_loss:.0f}",
         "",
         "BREAKEVEN:",
         f"${ticket.breakeven:.2f}",
         "",
+        "CAPITAL AT RISK:",
+        f"${ticket.capital_at_risk:.0f}",
+        "",
+        "RETURN ON CAPITAL:",
+        f"{ticket.return_on_capital * 100:.1f}%",
+        "",
         "PROFIT TARGET:",
         f"${ticket.profit_target:.2f}",
         "",
-        "LOSS MANAGEMENT:",
-        ticket.loss_management_rule,
-        "",
-        "DTE MANAGEMENT:",
-        ticket.DTE_management_rule,
+        "MANAGEMENT DTE:",
+        str(ticket.management_dte),
         "",
         "STATUS:",
         _status_display(ticket.status),
     ]
     return "\n".join(lines)
+
+
+def copy_fidelity_order_text(ticket: FidelityTradeTicket) -> str:
+    """The exact text a future dashboard's "COPY FIDELITY ORDER" button
+    puts on the clipboard. Actual clipboard access is a frontend concern
+    (the browser's `navigator.clipboard.writeText`, called with the
+    string this function returns) — this function has no side effects
+    and does not touch any clipboard, OS, or display itself."""
+    return render_ticket_text(ticket)
 
 
 def _status_display(status: TicketStatus) -> str:

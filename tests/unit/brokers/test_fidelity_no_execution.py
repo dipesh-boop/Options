@@ -42,6 +42,7 @@ def _valid_approved_order(**overrides) -> ApprovedOrder:
     md = datetime(2026, 9, 20, 13, 55, tzinfo=timezone.utc)
     base = dict(
         risk_approval_id="risk-approval-123",
+        account_alias="Individual Brokerage - Options",
         ticker="SPY",
         strategy="PUT CREDIT SPREAD",
         underlying_price=628.50,
@@ -52,14 +53,20 @@ def _valid_approved_order(**overrides) -> ApprovedOrder:
         ],
         quantity=2,
         limit_price=1.35,
+        minimum_acceptable_price=1.25,
+        time_in_force="DAY",
         estimated_credit_debit=1.35,
+        net_bid=1.30,
+        net_ask=1.40,
         max_profit=270.0,
         max_loss=730.0,
         breakeven=618.65,
+        capital_at_risk=730.0,
         return_on_capital=270 / 730,
         profit_target=0.68,
         loss_management_rule="Close or roll if loss reaches 2x credit received.",
         DTE_management_rule="Review/close/roll according to strategy rules at 21 DTE.",
+        management_dte=21,
         timestamp=now,
         market_data_timestamp=md,
     )
@@ -215,7 +222,7 @@ class TestNoNetworkActivityAtRuntime:
         provider = FidelityManualProvider()
         ticket = provider.generate_trade_ticket(_valid_approved_order())
         text = render_ticket_text(ticket)
-        assert "FIDELITY TRADE TICKET" in text
+        assert "ACCOUNT:" in text
 
     def test_full_lifecycle_never_opens_a_socket(self, monkeypatch: pytest.MonkeyPatch):
         from src.brokers.fidelity import ExecutionConfirmation, confirm_fill, transition
@@ -235,3 +242,16 @@ class TestNoNetworkActivityAtRuntime:
         )
         ticket = confirm_fill(ticket, confirmation)
         assert ticket.status == TicketStatus.FILLED
+
+    def test_copy_fidelity_order_text_never_opens_a_socket(self, monkeypatch: pytest.MonkeyPatch):
+        from src.brokers.fidelity import copy_fidelity_order_text
+
+        def _raise_if_socket_constructed(*args, **kwargs):
+            raise AssertionError("copy_fidelity_order_text attempted to open a network socket")
+
+        monkeypatch.setattr(socket, "socket", _raise_if_socket_constructed)
+
+        provider = FidelityManualProvider()
+        ticket = provider.generate_trade_ticket(_valid_approved_order())
+        text = copy_fidelity_order_text(ticket)
+        assert "ACCOUNT:" in text

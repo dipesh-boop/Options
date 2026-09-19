@@ -29,6 +29,7 @@ def _approved_order() -> ApprovedOrder:
     md = datetime(2026, 9, 20, 13, 55, tzinfo=timezone.utc)
     return ApprovedOrder(
         risk_approval_id="risk-approval-123",
+        account_alias="Individual Brokerage - Options",
         ticker="SPY",
         strategy="PUT CREDIT SPREAD",
         underlying_price=628.50,
@@ -39,14 +40,20 @@ def _approved_order() -> ApprovedOrder:
         ],
         quantity=2,
         limit_price=1.35,
+        minimum_acceptable_price=1.25,
+        time_in_force="DAY",
         estimated_credit_debit=1.35,
+        net_bid=1.30,
+        net_ask=1.40,
         max_profit=270.0,
         max_loss=730.0,
         breakeven=618.65,
+        capital_at_risk=730.0,
         return_on_capital=270 / 730,
         profit_target=0.68,
         loss_management_rule="Close or roll if loss reaches 2x credit received.",
         DTE_management_rule="Review/close/roll according to strategy rules at 21 DTE.",
+        management_dte=21,
         timestamp=NOW,
         market_data_timestamp=md,
     )

@@ -559,9 +559,132 @@ don't rewrite history.
   session, which this environment doesn't have) for account/position/
   market-data/order operations — this is the first piece of the
   platform that could touch a real (paper) external system rather than
-  only ever running against mocks. Awaiting direction: keep building
-  isolated pieces, or start Phase 0 foundations (repo scaffolding, DB
-  schema, CI, and the `src/options_platform` layout decision this keeps
-  deferring) so there's a real pipeline connecting all of this. Also
+  only ever running against mocks. Also
   still open: the `app/` prototype disposition and the accumulating
   layout/config-duplication/untested-real-adapter questions above.
+
+## 2026-09-19 (cont'd) — Fidelity manual-execution provider (Steps 8, 8A)
+
+- **Step 8**: `src/brokers/fidelity.py` — Fidelity has no supported
+  automated retail execution API; explicit instruction to build a
+  MANUAL_EXECUTION-only provider, not to reverse-engineer/scrape/
+  automate Trader+ or Fidelity.com, not to store credentials, bypass
+  MFA, or use session cookies. `FidelityManualProvider` deliberately
+  does **not** implement `src.brokers.base.Broker` — that interface
+  describes something that actually submits orders, and implementing it
+  here (even as a stub) would misrepresent this class's capability. It
+  has exactly one public method, `generate_trade_ticket()`.
+  - Status state machine (PROPOSED → … → RISK_APPROVED → AWAITING_HUMAN
+    → ORDER_ENTERED → …): FILLED/PARTIALLY_FILLED are reachable *only*
+    through `confirm_fill()` with a real `ExecutionConfirmation` (no
+    default — can't be called without one), and only from
+    `ORDER_ENTERED`/`PARTIALLY_FILLED`. `transition()` explicitly
+    rejects any attempt to reach a fill status. A Pydantic validator on
+    `FidelityTradeTicket` independently enforces `execution_confirmation`
+    present iff status is a fill status, so a contradictory ticket can't
+    be constructed even by hand. "Risk-approved does not mean executed"
+    is structural, not a comment.
+  - 90 tests (`tests/unit/brokers/test_fidelity_*.py`) proving no
+    automated submission capability via four independent lines of
+    evidence: static import scan (no requests/httpx/selenium/playwright/
+    subprocess/etc.), capability scan (doesn't subclass `Broker`, no
+    order-submission-shaped method name, exactly one public method),
+    credential scan (no password/username/cookie/mfa_bypass-shaped field
+    or identifier anywhere), and — the strongest proof — a runtime check
+    with `socket.socket` patched to raise if constructed at all, across
+    ticket generation, rendering, and the full lifecycle.
+  - Worked example (the exact SPY 620/615 put credit spread from the
+    task) cross-checked against `src.quant.expected_value`'s
+    `put_credit_spread_*` formulas — independently reproducing $270 max
+    profit / $730 max loss / $618.65 breakeven, not just internally
+    consistent with itself.
+  - Committed separately (`fd39865`) after an explicit "stop and show me
+    the implementation and tests" — presented for review before
+    committing, per that instruction; committed once a stop-hook
+    required a clean working tree.
+- **Step 8A**: extended the ticket to match Fidelity Trader+'s actual
+  order-entry fields. Six new required fields on `ApprovedOrder`/
+  `FidelityTradeTicket`: `account_alias`, `net_bid`/`net_ask` (with a
+  computed `net_mid` property, same pattern as `OptionContract.mid`),
+  `minimum_acceptable_price`, `capital_at_risk`, `management_dte`
+  (`time_in_force` also added, defaulted to `"DAY"`). All quantitative,
+  all Python-supplied — no LLM dependency exists in this module to alter
+  them, same as before.
+  - New cross-field validators (extracted as shared module-level
+    functions called from both models, to avoid duplicating the *logic*
+    even though the two models still duplicate the *fields*):
+    `net_bid <= net_ask`; `minimum_acceptable_price` can't be better
+    than `limit_price` in either credit or debit direction;
+    `capital_at_risk >= max_loss` (a real, useful distinction — for a
+    cash-secured put, capital_at_risk/collateral posted is strike×100,
+    strictly more than max_loss, which nets out the premium received;
+    they're only equal for a put credit spread by construction);
+    `management_dte` can't exceed the structure's total DTE (same
+    pattern as the original `src.llm.schemas.TradeProposal`).
+  - `render_ticket_text()` rewritten to the exact requested section
+    order/labels (ACCOUNT → UNDERLYING → STRATEGY → EXPIRATION → LEG 1
+    → LEG 2 → ORDER → TARGET LIMIT → MINIMUM ACCEPTABLE → TIME IN FORCE
+    → CURRENT NET BID/ASK/MID → QUOTE TIME → MAX PROFIT → MAX LOSS →
+    BREAKEVEN → CAPITAL AT RISK → RETURN ON CAPITAL → PROFIT TARGET →
+    MANAGEMENT DTE → STATUS), verified against the task's own worked
+    example output.
+  - `copy_fidelity_order_text()` added for the future dashboard's "COPY
+    FIDELITY ORDER" button — returns the exact clipboard text; actual
+    clipboard access is left to the frontend
+    (`navigator.clipboard.writeText`), since that's a browser concern a
+    backend Python function has no business attempting.
+  - Updated all 4 existing Fidelity test files' fixtures for the new
+    required fields, plus ~30 new tests for the new validators/fields/
+    render format/copy function. Full repo suite: **708 tests passing**.
+- Both Fidelity commits keep `fidelity.py` fully covered by the existing
+  `tests/unit/brokers/test_architecture_boundary.py` (globs
+  `src/brokers/*.py`) with zero changes needed — confirms no `src.llm`
+  import, automatically, for every file added to this package going
+  forward.
+
+## Open decisions carried forward (updated again)
+
+- [ ] Historical options data vendor for backtesting (Phase 2 blocker)
+- [ ] Schwab paper-trading / sandbox capability (Phase 4 blocker)
+- [ ] Sector/classification data source for correlation/concentration checks
+- [ ] Final ~50-name equity universe list + liquidity criteria
+- [ ] **`app/` prototype disposition — now fully redundant, recommend
+      resolving before Phase 0**
+- [ ] Fold `src/llm/` + `src/quant/` + `src/data/` + `src/brokers/` under
+      `src/options_platform/`, or keep `src/` flat with multiple
+      top-level packages — deferred five times now
+- [ ] Model tier per non-Portfolio-Manager agent role
+- [ ] Three independently-declared 15-minute freshness placeholders now
+      (`src.llm.schemas.MAX_MARKET_DATA_AGE`,
+      `src.data.provider.DEFAULT_MAX_QUOTE_AGE`,
+      `src.brokers.fidelity.MAX_MARKET_DATA_AGE`) — should become one
+      config value in Phase 0
+- [ ] No concrete *market data* provider exists yet for `src.data`'s
+      `MarketDataProvider` interface (mock or real)
+- [ ] Duplicated small enums across layers (`OptionRight` x3,
+      `OrderAction`/`Side`, `FidelityLegAction` vs. `OrderAction`) —
+      candidate for a shared `src/core/` primitives module
+- [ ] `_RealIBAdapter` (IBKR's actual `ib_insync` glue) is untested by
+      the automated suite — needs a manual smoke test against a real
+      paper TWS/Gateway session before being trusted
+- [ ] `InMemoryIdempotencyStore` is process-local only, lost on restart
+- [ ] Nothing yet actually produces an `ApprovedOrder` — Python Risk
+      Engine (which would compute/assemble it) doesn't exist yet, so
+      `FidelityManualProvider` is fully tested but not wired to a real
+      upstream approval source
+
+## Next up
+
+- Six standalone pieces now exist — `src/llm/`, `src/quant/`,
+  `src/data/`, `src/brokers/` (IBKR paper trading + Fidelity manual
+  tickets) — each internally tested but not connected to each other or
+  to anything live. No DB, no Strategy Screener, no Python Risk Engine.
+  Both broker paths (IBKR automated-paper and Fidelity manual-ticket)
+  now exist side by side, exercising the platform's two different
+  execution philosophies (automated-but-paper-only vs. never-automated)
+  — a good point to decide whether to keep building isolated pieces or
+  start Phase 0 foundations so there's a real pipeline (Risk Engine
+  producing real `ApprovedOrder`/`PlaceOrderRequest` objects) connecting
+  all of this. Also still open: the `app/` prototype disposition and the
+  accumulating layout/config-duplication/untested-real-adapter questions
+  above.
