@@ -183,13 +183,29 @@ not scheduled.
   (`correlations.py`). 197 tests, several using finite-difference and
   put-call-parity cross-checks against the pricing function itself
   rather than hardcoded reference numbers.
+- **Market Data Layer also implemented ahead of phase order** (see §6):
+  canonical schemas every provider must convert into (`src/data/`) —
+  `OptionContract` (delta/gamma/theta/vega/IV as provider-reported
+  reference values, not independently computed — src/data has no
+  dependency on src/quant, same one-way-boundary pattern as src/llm),
+  `OptionChain`, `UnderlyingQuote`, `HistoricalBar`, `EarningsEvent` —
+  plus the abstract `MarketDataProvider` / `HistoricalDataProvider` /
+  `EarningsCalendarProvider` interfaces, freshness enforcement
+  (`assert_tradable` raises `StaleDataError` on stale data — "prohibit
+  trade approval" is an exception, not a status flag), a no-lookahead
+  guard for backtesting (`assert_no_lookahead`), and an
+  `ensure_canonical` boundary guard so a raw provider response can never
+  reach the LLM layer. 94 tests. **No concrete provider exists yet** —
+  no mock, no IBKR, no Schwab — only the canonical shapes and the
+  abstract contracts a concrete adapter must satisfy.
 - **Not yet implemented:** Python Risk Engine (position sizing exists as
   a pure calculation, but portfolio-state-aware exposure, correlation
   limits, drawdown monitoring, the RiskGate, and the circuit breaker do
-  not), Strategy Screener, and any market data provider (mock or real) —
-  every quant function above takes plain numeric parameters (spot,
-  strike, sigma, …), not data pulled from a screener or DB, so nothing in
-  Phase 1 is blocked on those yet, but nothing is wired to real data
+  not), Strategy Screener, and any concrete market data provider (mock or
+  real) — every quant function takes plain numeric parameters (spot,
+  strike, sigma, …) and every data-layer type is constructed directly in
+  tests, not pulled from a screener, DB, or live connection, so nothing
+  in Phase 1 is blocked on those yet, but nothing is wired end-to-end
   either.
 - Heavy unit + property-based test coverage — this phase is the trust
   foundation for everything after it.
@@ -312,3 +328,33 @@ independent verification the prototype never had — finite-difference
 Greek cross-checks, put-call parity, Monte Carlo convergence). The `app/`
 disposition question from §3/progress.md is now higher-stakes to leave
 open; recommend resolving it before Phase 0 rather than during it.
+
+## 8. Deviation from §1: where the Market Data Layer actually landed
+
+Same pattern again: `src/data/` (not `src/options_platform/data/` or
+`src/options_platform/market_data/`). `src/` now has three top-level
+packages (`llm/`, `quant/`, `data/`). Still not decided here.
+
+`src/data` holds the same verified one-way boundary as `src/quant`
+(`tests/unit/data/test_architecture_boundary.py`), and additionally has
+**no dependency on `src/quant` either** — a deliberate choice, not an
+oversight. `OptionContract.iv/delta/gamma/theta/vega` are provider-
+reported reference values (what a broker's own model said), not
+Python Quant's independently computed ones; keeping the layers
+decoupled keeps that distinction structurally visible rather than
+implicit. One consequence worth naming: `src/data`, `src/quant`, and
+`src/llm` each now define their own tiny `OptionRight`/`Right` enum —
+three copies of the same two-value type. A shared `src/core/`
+primitives module is the obvious Phase 0 cleanup for this and the
+`src/llm` vs `src/options_platform` layout question together, rather
+than fixing one without the other.
+
+This is also the third time in a row that a request for one piece of
+the platform has been implemented standalone, ahead of Phase 0/1 order,
+each with its own placeholder policy constant
+(`src.llm.schemas.MAX_MARKET_DATA_AGE`, now also
+`src.data.provider.DEFAULT_MAX_QUOTE_AGE` — same 15-minute value,
+same "TODO(Phase 0): move to config" note, declared independently
+twice). Worth deciding soon whether to keep building sideways like this
+or consolidate into Phase 0 foundations before a fourth constant shows
+up — flagged, not decided here.

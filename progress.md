@@ -334,6 +334,85 @@ don't rewrite history.
   question (open since the very first commit) before Phase 0 rather than
   carrying it further — flagged again in `IMPLEMENTATION_PLAN.md` §7.
 
+## 2026-09-19 (cont'd) — Normalized market data layer implemented
+
+- Explicit request for `src/data/`: `provider.py`, `quotes.py`,
+  `option_chain.py`, `historical.py`, `earnings.py`. One canonical
+  `OptionContract` schema every broker/provider must convert its raw
+  response into; never expose a raw broker response to an LLM; freshness
+  validation that marks stale data STALE and prohibits trade approval.
+- `provider.py` holds the shared plumbing every other file builds on:
+  `StrictModel` (`extra="forbid"`, `frozen=True`) and `TimestampedModel`
+  (adds a timezone-aware `timestamp` + `source`, plus `.age()`,
+  `.freshness_status()`, `.require_fresh()`); `FreshnessStatus`
+  (FRESH/STALE) and `StaleDataError`; `ensure_canonical()` — an exact-
+  type boundary guard, same pattern as
+  `src.llm.schemas.ensure_trade_proposal`; the abstract
+  `MarketDataProvider` interface.
+- `option_chain.py`'s `OptionContract` has all 18 requested fields
+  (underlying, option_symbol, expiration, strike, right, bid, ask, mid
+  [computed], last, volume, open_interest, iv, delta, gamma, theta,
+  vega, underlying_price, timestamp, source) plus a `bid <= ask`
+  cross-field validator. `assert_tradable()` is the concrete "prohibit
+  trade approval" mechanism: it calls `.require_fresh()` and *raises*
+  `StaleDataError` on stale data — deliberately not a status flag a
+  future caller could check and ignore.
+- **"Never expose raw broker responses to an LLM" is enforced
+  structurally, not just documented**: every canonical type has
+  `extra="forbid"`, so a raw provider dict (broker-specific ids, a
+  nested greeks blob, an exchange code — anything the canonical schema
+  doesn't define) fails validation outright rather than being silently
+  accepted as if already normalized — proven by
+  `TestRawBrokerResponseNeverPassesAsCanonical` in
+  `tests/unit/data/test_option_chain.py`. `ensure_canonical()` is the
+  second, independent check at the actual consumption boundary.
+- Design decisions:
+  - **`iv`/`delta`/`gamma`/`theta`/`vega` on `OptionContract` are
+    provider-reported reference values, not independently computed** —
+    `src/data` has no dependency on `src/quant`. Python Quant recomputes
+    when a number actually needs to be trusted for a risk decision; it
+    never trusts a provider's stated greeks any more than an LLM's.
+    Verified structurally the same way as the `src.llm` boundary: a new
+    `tests/unit/data/test_architecture_boundary.py` scans `src/data/*.py`
+    for a `src.llm` import and fails if found. (`src/data` also doesn't
+    import `src/quant` — not tested for, since nothing prevents that
+    direction, just not needed yet.)
+  - `HistoricalBar` deliberately does NOT inherit `TimestampedModel` /
+    get live-data freshness — a bar's validity is point-in-time
+    (`bar_date`), not "how long ago was this fetched." Its integrity
+    check is `assert_no_lookahead()`, a concrete no-lookahead guard for
+    the future backtest engine (ARCHITECTURE.md §9/§11's "strict
+    point-in-time data discipline"), not freshness.
+  - Historical *options chain* data is explicitly out of scope here —
+    ARCHITECTURE.md §12 still hasn't picked a vendor. `historical.py`
+    only covers underlying OHLCV bars, which are vendor-agnostic enough
+    to build now.
+  - `earnings.py`'s `is_within_earnings_window()` is symmetric (checks
+    both before and after the earnings date) and directly implements the
+    platform's "no earnings-window entries" universe rule for a future
+    Strategy Screener to call.
+  - Three tiny `OptionRight` enums now exist (`src.llm.schemas`,
+    `src.quant.black_scholes`, `src.data.option_chain`) — a deliberate
+    duplication to keep each layer independently importable without
+    cross-layer coupling, flagged (with the `src/core/` primitives
+    module as the eventual fix) in `IMPLEMENTATION_PLAN.md` §8.
+  - `DEFAULT_MAX_QUOTE_AGE` (15 min, in `src/data/provider.py`) is the
+    same placeholder-policy pattern as
+    `src.llm.schemas.MAX_MARKET_DATA_AGE` — same value, declared
+    independently a second time. Flagged, not unified, in
+    `IMPLEMENTATION_PLAN.md` §8.
+- Tests: `tests/unit/data/` — 94 tests covering valid construction for
+  every canonical type, rejection of invalid/out-of-range/extra fields,
+  the `bid <= ask` and OHLC-consistency cross-field validators,
+  freshness at/past/well-past the boundary (including the exact-boundary
+  inclusive case), `assert_tradable`'s stale-data rejection, the
+  no-lookahead guard, the earnings-window check's before/after/boundary
+  cases, and each abstract provider's contract (via a minimal concrete
+  subclass defined in the test file — no mock implementation was added
+  to `src/data` itself, since only the 5 requested files were in scope).
+  Added `pytest-asyncio` to `requirements-dev.txt` for the async
+  provider-contract tests. Full repo suite: **484 tests passing**.
+
 ## Open decisions carried forward (updated)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker)
@@ -342,24 +421,31 @@ don't rewrite history.
 - [ ] Final ~50-name equity universe list + liquidity criteria
 - [ ] **`app/` prototype disposition — now fully redundant, recommend
       resolving before Phase 0 (see IMPLEMENTATION_PLAN.md §7)**
-- [ ] Fold `src/llm/` + `src/quant/` under `src/options_platform/`, or
-      keep `src/` flat with multiple top-level packages
+- [ ] Fold `src/llm/` + `src/quant/` + `src/data/` under
+      `src/options_platform/`, or keep `src/` flat with multiple
+      top-level packages (IMPLEMENTATION_PLAN.md §6-§8)
 - [ ] Model tier per non-Portfolio-Manager agent role
-- [ ] MAX_MARKET_DATA_AGE (15 min, in `src/llm/schemas.py`) is a
-      placeholder pending real config, same as risk-per-trade-pct and
-      other numeric policy constants used in quant tests/examples
+- [ ] Two independently-declared 15-minute freshness placeholders
+      (`src.llm.schemas.MAX_MARKET_DATA_AGE`,
+      `src.data.provider.DEFAULT_MAX_QUOTE_AGE`) should become one
+      config value in Phase 0
+- [ ] No concrete market data provider exists yet (mock, IBKR, or
+      Schwab) — only canonical schemas + abstract interfaces
+- [ ] Three duplicated `OptionRight` enums (`src.llm`, `src.quant`,
+      `src.data`) — candidate for a shared `src/core/` primitives module
 
 ## Next up
 
-- `src/llm/` (agent plumbing) and `src/quant/` (deterministic
-  calculations) both exist and are each internally tested, but nothing
-  connects them yet — no DB, no Strategy Screener, no Python Risk Engine
-  (portfolio-state-aware limits, RiskGate, circuit breaker), no
-  broker/backtest data feeding real numbers into either layer. Awaiting
-  direction: keep building deterministic/LLM-adjacent pieces in isolation
-  (e.g. Python Risk Engine next, since Quant now has numbers for it to
-  gate), or start Phase 0 foundations (repo scaffolding, DB schema, CI)
-  so there's a real pipeline to wire both into. Also still open: the
-  `app/` prototype disposition (now fully redundant — see above) and the
-  `src/llm/` + `src/quant/` vs `src/options_platform/` layout
-  reconciliation.
+- Four standalone pieces now exist — `src/llm/` (agent plumbing),
+  `src/quant/` (deterministic calculations), `src/data/` (canonical
+  market data schemas + freshness) — each internally tested but not
+  connected to each other or to anything live. No DB, no Strategy
+  Screener, no Python Risk Engine, no concrete data provider, no broker.
+  Awaiting direction: keep building isolated pieces (Strategy Screener
+  would now have real inputs to work with — screened `OptionContract`s
+  from a mock provider, priced/gated by the existing Quant functions),
+  or start Phase 0 foundations (repo scaffolding, DB schema, CI, and the
+  `src/options_platform` layout decision this keeps deferring) so
+  there's a real pipeline to wire all of this into. Also still open: the
+  `app/` prototype disposition and the accumulating layout/config-
+  duplication questions above.
