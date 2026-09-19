@@ -1,0 +1,41 @@
+# Model routing configuration for the LLM orchestration layer
+# (src/llm/router.py). Application code must never hard-code a model
+# name — it only ever reads this file, with an optional per-tier
+# environment variable override for ops-time changes without a deploy.
+#
+# When Anthropic ships a new model, update the `model:` values below (or
+# set the override env var) — never edit src/llm/*.py to change models.
+
+tiers:
+  # High-reasoning tier: used for tasks where the stronger-reasoning
+  # model's judgment is worth the cost (see task_routing below).
+  high_reasoning:
+    model: claude-opus-5
+    model_env_override: OPTIONS_AGENT_LLM_HIGH_REASONING_MODEL
+    max_tokens: 4096
+    temperature: 0.2
+
+  # Routine tier: used for mechanical/lower-stakes tasks where a
+  # faster, cheaper model is sufficient.
+  routine:
+    model: claude-haiku-4-5-20251001
+    model_env_override: OPTIONS_AGENT_LLM_ROUTINE_MODEL
+    max_tokens: 1024
+    temperature: 0.1
+
+# task_type -> tier. Every LLM call site passes a task_type (see
+# src/llm/router.py::TaskType) and gets routed here — never by agent
+# name, so the same agent role can use different tiers for different
+# kinds of work (e.g. performance_auditor uses `journal_analysis`
+# routinely but `weekly_portfolio_review` for its deeper weekly pass).
+task_routing:
+  portfolio_manager: high_reasoning
+  strategy_analysis: high_reasoning
+  adversarial_trade_review: high_reasoning
+  weekly_portfolio_review: high_reasoning
+  strategy_research: high_reasoning
+
+  summarization: routine
+  candidate_formatting: routine
+  basic_classification: routine
+  journal_analysis: routine

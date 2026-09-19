@@ -1,8 +1,10 @@
 # Implementation Plan — Systematic Options Research & Paper-Trading Platform
 
 Companion to `ARCHITECTURE.md`. This document covers folder structure,
-dependencies, and phased delivery. **No implementation has started under
-this plan yet** — see `progress.md` for live status.
+dependencies, and phased delivery. **The LLM orchestration layer
+(`src/llm/`, `.claude/agents/`, `config/llm.yaml`) has been implemented,
+ahead of the phase order below, at explicit request — see §6 and
+`progress.md` for what exists and what doesn't yet.**
 
 ## 1. Proposed folder structure
 
@@ -206,18 +208,26 @@ not scheduled.
   `PaperBroker` simulated-fill fallback for anything it doesn't.
 
 ### Phase 5 — Multi-Agent Layer
-- Anthropic API client wrapper, strict Pydantic I/O schemas (no numeric
-  risk fields, incl. the `TradeProposal` intent object — see
-  `ARCHITECTURE.md` §2, §5), read-only tool definitions only (shared
-  across all four roles), append-only audit logging.
-- Implement the four roles: Market Agent, Strategy Analyst, Adversarial
-  Reviewer, and the orchestrating Portfolio Manager (Opus-tier
-  recommended; sub-agent tier configurable — open question 5 in
-  `ARCHITECTURE.md` §12).
-- Wire into the orchestration pipeline strictly downstream of the
-  Strategy Screener and strictly upstream of Python Quant and Python Risk
-  Engine, which reprice and gate every proposal before it can become an
-  order in any mode (`ARCHITECTURE.md` §9).
+- **LLM plumbing implemented ahead of phase order** (see §6): Anthropic
+  API client wrapper with forced tool-use structured output
+  (`src/llm/client.py`), strict Pydantic I/O schemas where
+  `TradeProposal` is the only order-adjacent type (`src/llm/schemas.py`),
+  a configurable task_type → tier → model router reading
+  `config/llm.yaml` (`src/llm/router.py`), read-only context builders
+  (`src/llm/context.py`), and `.claude/agents/*.md` persona definitions +
+  prompt assembly (`src/llm/prompts.py`) for all eight roles: Portfolio
+  Manager, Market Regime, Opportunity Scanner, Strategy Analyst, Devil's
+  Advocate, Risk Reviewer, Trade Manager, Performance Auditor.
+- **Not yet implemented:** the audit-log persistence table (needs
+  Phase 0's DB schema), the read-only tool *implementations* the agent
+  definitions reference (they need real screener/quant/risk-engine/
+  position data to read from, none of which exists yet), and wiring any
+  of this into the orchestration pipeline.
+- When Phase 0–1 exist, wire the Multi-Agent Layer into the pipeline
+  strictly downstream of the Strategy Screener and strictly upstream of
+  Python Quant and Python Risk Engine, which reprice and gate every
+  `TradeProposal` before it can become an order in any mode
+  (`ARCHITECTURE.md` §9).
 
 ### Phase 6 — PAPER trading end-to-end
 - Scheduler + orchestrator running the full cycle in `PAPER` mode.
@@ -241,3 +251,25 @@ being written in this phase. This plan intentionally does not: pick the
 final ~50-name universe, choose the historical data vendor, or write any
 `src/options_platform/` code. Those are first work items *inside* Phases
 0–2, not decided here.
+
+## 6. Deviation from §1: where the LLM layer actually landed
+
+The LLM orchestration layer was implemented at explicit, later request
+using the exact paths specified at that time: `src/llm/` (not nested
+under `src/options_platform/`), `config/llm.yaml` (top-level `config/`,
+not under `src/options_platform/`), and `.claude/agents/*.md` for the
+eight agent personas. This is a real deviation from the `src/` layout in
+§1, not a typo — recorded here rather than silently reconciled. It works
+standalone today (its tests mock the Anthropic API and never touch a
+DB), but Phase 0 needs to decide: fold `src/llm/` under
+`src/options_platform/` for a single installable package, or keep `src/`
+flat with multiple top-level packages (`llm/`, and later `quant/`,
+`risk/`, etc.) as siblings. Not decided here — flagged for that phase.
+
+Also implemented ahead of order: no trading-system code exists yet (no
+DB, no broker, no quant/risk engine, no screener), consistent with "do
+not implement broker execution yet." The LLM layer's tests prove its own
+internal contract (malformed/execution-shaped output can't validate, and
+even a validated non-`TradeProposal` object can't pass the
+`ensure_trade_proposal` boundary guard) but cannot yet prove anything
+about a live pipeline, because there isn't one to plug into.

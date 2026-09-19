@@ -4,7 +4,8 @@ Living status tracker for the systematic options research & paper-trading
 platform. Update this file at the end of every work session — append,
 don't rewrite history.
 
-## Status: Phase 0 — design deliverables complete, foundations not started
+## Status: LLM orchestration layer (Phase 5 plumbing) implemented ahead of
+## order; Phase 0 foundations (DB, config, CI) still not started
 
 ## 2026-09-19
 
@@ -77,7 +78,75 @@ don't rewrite history.
 - Still design-only — no `src/options_platform/` code exists yet; this was
   a documentation refinement, not a Phase 0 start.
 
-## Open decisions carried forward (see ARCHITECTURE.md §10)
+## 2026-09-19 (cont'd) — LLM orchestration layer implemented
+
+- Explicit request to implement the LLM orchestration architecture
+  (design-only phase lifted for this slice specifically): Anthropic API,
+  configurable model router, Pydantic structured output, 8 specialized
+  agents, tests proving malformed output can't reach execution. Broker
+  execution explicitly out of scope for this change.
+- Built, all under real (not mocked) file paths as specified:
+  - `config/llm.yaml` — tier definitions (`high_reasoning`, `routine`)
+    and `task_type → tier` routing table. No model identifier appears
+    anywhere in `src/llm/*.py` — enforced by an automated test
+    (`test_router.py::TestNoHardcodedModelNames`) that scans the source
+    of `router.py`/`client.py` for `claude-`/`opus-`/`sonnet-`/`haiku-`
+    substrings and fails if any is found.
+  - `src/llm/router.py` — `ModelRouter`, `TaskType` (9 task types matching
+    the 5 high-reasoning + 4 routine tasks specified), env-var override
+    per tier.
+  - `src/llm/schemas.py` — all schemas use `extra="forbid"` + `frozen=True`.
+    `TradeProposal` (with a `StructureIntent` — declarative only, no
+    trusted numeric field) is the only schema that may ever reach an
+    order; every other role (Market Regime, Opportunity Scanner, Devil's
+    Advocate, Risk Reviewer, Performance Auditor) gets its own
+    analysis-only schema. `ensure_trade_proposal()` is an exact-type
+    runtime boundary guard (rejects dicts, other schema instances, and
+    even `TradeProposal` subclasses).
+  - `src/llm/context.py` — read-only, JSON-serializable context builders
+    (`CandidateContext`, `PortfolioStateContext`, `MarketContext`); never
+    originates a number, only serializes what it's given.
+  - `src/llm/prompts.py` — parses `.claude/agents/<role>.md` frontmatter +
+    body, appends a fixed schema-discipline instruction to every prompt.
+  - `src/llm/client.py` — `LLMClient.complete_structured()` forces
+    tool-use (`tool_choice` pinned to one tool built from the target
+    Pydantic schema's `model_json_schema()`), then
+    `validate_tool_response()` requires exactly one correctly-named
+    tool_use block whose `input` passes `model_validate()` — free text,
+    wrong tool name, duplicate tool calls, and non-dict input are all
+    rejected before validation is even attempted.
+  - `.claude/agents/*.md` — all 8 personas (portfolio_manager,
+    market_regime, opportunity_scanner, strategy_analyst, devil_advocate,
+    risk_reviewer, trade_manager, performance_auditor), each with YAML
+    frontmatter (name/description/default_task_type/tools — read-only
+    tools only, no `place_order`/`execute`-shaped tool anywhere) and a
+    body reiterating the no-numeric-authority / no-execution constraints
+    from `ARCHITECTURE.md` §2 in role-specific terms.
+  - `tests/unit/llm/` — 100 tests, all passing
+    (`python3 -m pytest tests/unit/llm -q`). `test_execution_safety.py` is
+    the direct proof requested: runs a full `raw API response →
+    validate_tool_response → ensure_trade_proposal` pipeline against a
+    valid control plus adversarial payloads (smuggled `execute`/
+    `order_id`/`broker`/`bypass_risk_gate` fields, out-of-scope strategy
+    types like `naked_call`, free-text instead of a tool call, duplicate
+    tool_use blocks, forged objects with matching attributes but the
+    wrong type) and asserts every adversarial case is blocked while the
+    valid one survives.
+- Added `anthropic==0.39.0` and `PyYAML==6.0.2` to `requirements.txt`;
+  installed locally and used to run the suite (no real API key needed —
+  all tests inject a fake Anthropic client).
+- Updated `IMPLEMENTATION_PLAN.md`: new §6 documents that this landed at
+  `src/llm/` / `config/llm.yaml` / `.claude/agents/` directly, not nested
+  under `src/options_platform/` as §1 originally proposed — flagged as an
+  open reconciliation for Phase 0, not silently resolved. Phase 5's
+  description updated from the earlier 4-role sketch to the actual 8
+  roles implemented, and now states plainly what's built vs. still
+  missing (audit-log persistence, real tool implementations, pipeline
+  wiring — all blocked on Phase 0/1 not existing yet).
+- Still true: no broker code, no DB, no quant/risk engine, no screener.
+  This slice is self-contained and network-free in its tests by design.
+
+## Open decisions carried forward (see ARCHITECTURE.md §10, §12)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker)
 - [ ] Schwab paper-trading / sandbox capability (Phase 4 blocker) — needs
@@ -85,9 +154,18 @@ don't rewrite history.
 - [ ] Sector/classification data source for correlation/concentration checks
 - [ ] Final ~50-name equity universe list + liquidity criteria
 - [ ] What happens to the pre-existing `app/` prototype (port vs. delete)
+- [ ] Fold `src/llm/` under `src/options_platform/`, or keep `src/` flat
+      with multiple top-level packages (see IMPLEMENTATION_PLAN.md §6)
+- [ ] Model tier per non-Portfolio-Manager agent role (cost vs. quality,
+      to be tuned empirically — ARCHITECTURE.md §12 open question 5)
 
 ## Next up
 
-- Awaiting review/approval of `ARCHITECTURE.md` and `IMPLEMENTATION_PLAN.md`
-  before starting Phase 0 (repo scaffolding, DB schema, CI, and a decision
-  on the `app/` prototype).
+- LLM layer is implemented but not wired to anything live — it has no DB,
+  no real tool implementations, and no orchestration pipeline to plug
+  into yet. Awaiting direction: continue building the LLM-adjacent pieces
+  (audit log persistence, real read-only tool implementations), or start
+  Phase 0 foundations (repo scaffolding, DB schema, CI) so the rest of
+  the pipeline exists to wire this into. Also still open: the `app/`
+  prototype disposition and the `src/llm/` vs `src/options_platform/`
+  reconciliation above.
