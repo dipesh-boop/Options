@@ -564,3 +564,110 @@ def ensure_trade_proposal(obj: object) -> TradeProposal:
             "Only src.llm.schemas.TradeProposal may reach the execution boundary."
         )
     return obj
+
+
+# The 12 dimensions Step 14 names for performance analysis. Mirrored
+# (not imported) from `src.research.performance_breakdown.AnalysisDimension`
+# for the same decoupling reason `QuantitativeAnalysisContext` doesn't
+# import `src.quant` — kept in sync by
+# `tests/unit/llm/test_strategy_research_review_schema.py`'s literal-drift
+# check rather than by a shared import.
+AnalysisDimension = Literal[
+    "strategy",
+    "delta",
+    "dte",
+    "iv_percentile",
+    "market_regime",
+    "underlying",
+    "sector",
+    "entry_day",
+    "entry_time",
+    "holding_period",
+    "profit_target",
+    "management_dte",
+]
+
+# What the Strategy Research Agent may recommend as the *next* step in
+# the Observation -> ... -> Human Review pipeline — never a promotion,
+# which has no representation anywhere in this schema at all.
+ResearchRecommendation = Literal[
+    "proceed_to_backtest",
+    "proceed_to_out_of_sample",
+    "reject_hypothesis",
+    "escalate_for_human_review",
+]
+
+# Mirrors `src.research.fidelity_practicality.FidelityPracticalityRating`.
+FidelityPracticalityRatingLiteral = Literal["LOW", "MEDIUM", "HIGH", "INCOMPATIBLE"]
+
+
+class StrategyResearchReview(_StrictModel):
+    """strategy_research agent output (Step 14): a structured hypothesis
+    write-up plus a recommended next step. Like `PortfolioDecision` and
+    `DevilsAdvocateReview`, there is no field of numeric type anywhere in
+    this schema — every performance figure this agent's rationale might
+    reference already came from Python
+    (`src.research.performance_breakdown`, `src.research.overfitting_guards`,
+    `src.research.fidelity_practicality`) and must be referenced by
+    `hypothesis_id`, never restated as a fresh number here.
+
+    This agent has no authority to promote a strategy to production and
+    no field anywhere on this schema through which it could even try —
+    promotion is exclusively `src.research.promotion.promote_strategy`,
+    gated on `human_approved`, a field this schema does not have and
+    `src.llm.strategy_research` never sets."""
+
+    review_id: str = Field(min_length=1, max_length=64)
+    hypothesis_id: str = Field(min_length=1, max_length=64)
+    hypothesis_statement: str = Field(min_length=1, max_length=1000)
+    supporting_dimensions: list[AnalysisDimension] = Field(min_length=1, max_length=12)
+    observation_summary: str = Field(min_length=1, max_length=2000)
+    overfitting_concerns: list[str] = Field(default_factory=list, max_length=10)
+    fidelity_practicality_rating: FidelityPracticalityRatingLiteral
+    fidelity_practicality_commentary: str = Field(min_length=1, max_length=1000)
+    recommendation: ResearchRecommendation
+    rationale: str = Field(min_length=1, max_length=2000)
+    risks_identified: list[str] = Field(min_length=1, max_length=10)
+    timestamp: datetime
+
+    @field_validator("timestamp")
+    @classmethod
+    def _require_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return v
+
+    @field_validator("supporting_dimensions")
+    @classmethod
+    def _dimensions_unique(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("supporting_dimensions entries must be unique")
+        return v
+
+    @field_validator("overfitting_concerns", "risks_identified")
+    @classmethod
+    def _entries_non_blank(cls, v: list[str]) -> list[str]:
+        if any(not s.strip() for s in v):
+            raise ValueError("entries must not be blank")
+        return v
+
+    @model_validator(mode="after")
+    def _reject_hypothesis_precludes_further_progress_recommendations(self) -> "StrategyResearchReview":
+        if self.fidelity_practicality_rating == "INCOMPATIBLE" and self.recommendation not in ("reject_hypothesis", "escalate_for_human_review"):
+            raise ValueError(
+                "fidelity_practicality_rating=INCOMPATIBLE is inconsistent with recommending further "
+                "testing — an operationally incompatible strategy must be rejected or escalated, not "
+                "advanced toward a backtest or out-of-sample run"
+            )
+        return self
+
+
+def ensure_strategy_research_review(obj: object) -> StrategyResearchReview:
+    """Runtime boundary guard, same exact-type pattern as
+    `ensure_devils_advocate_review`/`ensure_portfolio_decision`."""
+    if type(obj) is not StrategyResearchReview:
+        raise TypeError(
+            f"Expected a validated StrategyResearchReview instance, got {type(obj).__name__!r}. "
+            "Only src.llm.schemas.StrategyResearchReview may be treated as a Strategy Research verdict."
+        )
+    return obj

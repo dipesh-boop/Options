@@ -117,6 +117,50 @@ class MarketContext:
     notable_events: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PerformanceBreakdownContext:
+    """One dimension's worth of bucketed backtest performance — mirrors
+    `src.research.performance_breakdown.PerformanceBreakdownReport`
+    field for field, as a plain dataclass, for the same decoupling
+    reason `QuantitativeAnalysisContext` doesn't import `src.quant`.
+    Every figure here was computed by Python from already-closed
+    backtest trades; the Strategy Research Agent may narrate around
+    these numbers but must never restate a different one."""
+
+    dimension: str
+    buckets: list[dict[str, Any]]
+    total_trades: int
+
+
+@dataclass(frozen=True)
+class OverfittingGuardContext:
+    """Mirrors `src.research.overfitting_guards.OverfittingGuardResult`.
+    `warnings` always includes the standing survivorship-bias caution —
+    this agent may discuss these warnings but cannot silence, edit, or
+    add to the list Python computed."""
+
+    hypotheses_tested: int
+    hypotheses_rejected: int
+    surviving_validation: int
+    surviving_out_of_sample: int
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class FidelityPracticalityContext:
+    """Mirrors `src.research.fidelity_practicality.FidelityPracticalityResult`.
+    `rating` is Python's own classification — `src.llm.strategy_research`
+    overwrites the model's own `StrategyResearchReview.fidelity_practicality_rating`
+    with this value if the two ever disagree, the same "Python overrides
+    the LLM, never the reverse" relationship every other classification
+    in this codebase has with its agent layer."""
+
+    rating: str
+    burden_score: int
+    reasons: list[str]
+    hard_rejected: bool
+
+
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, (date, datetime)):
         return obj.isoformat()

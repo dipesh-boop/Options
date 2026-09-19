@@ -3,7 +3,15 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from src.llm.context import MarketSnapshotContext, PortfolioStateContext, QuantitativeAnalysisContext, RiskEngineContext
+from src.llm.context import (
+    FidelityPracticalityContext,
+    MarketSnapshotContext,
+    OverfittingGuardContext,
+    PerformanceBreakdownContext,
+    PortfolioStateContext,
+    QuantitativeAnalysisContext,
+    RiskEngineContext,
+)
 from src.llm.schemas import (
     AdversarialReview,
     Conviction,
@@ -166,6 +174,56 @@ def valid_devils_advocate_review_input(**overrides) -> dict:
         risk_assessment=valid_risk_assessment(),
         failure_scenarios=valid_failure_scenarios(),
         fidelity_execution_risk=valid_fidelity_execution_risk(),
+        timestamp=NOW.isoformat(),
+    )
+    base.update(overrides)
+    return base
+
+
+def make_performance_breakdown_context(**overrides) -> PerformanceBreakdownContext:
+    base = dict(
+        dimension="delta",
+        buckets=[
+            {"bucket": "15-20", "trade_count": 40, "win_rate": 0.7, "total_pnl": 1200.0, "average_pnl": 30.0, "best_pnl": 90.0, "worst_pnl": -60.0},
+            {"bucket": "25-30", "trade_count": 35, "win_rate": 0.6, "total_pnl": 800.0, "average_pnl": 22.9, "best_pnl": 85.0, "worst_pnl": -70.0},
+        ],
+        total_trades=75,
+    )
+    base.update(overrides)
+    return PerformanceBreakdownContext(**base)
+
+
+def make_overfitting_guard_context(**overrides) -> OverfittingGuardContext:
+    base = dict(
+        hypotheses_tested=3,
+        hypotheses_rejected=1,
+        surviving_validation=2,
+        surviving_out_of_sample=1,
+        warnings=["survivorship bias: no confirmed survivorship-bias-free historical data vendor is wired up yet"],
+    )
+    base.update(overrides)
+    return OverfittingGuardContext(**base)
+
+
+def make_fidelity_practicality_context(**overrides) -> FidelityPracticalityContext:
+    base = dict(rating="LOW", burden_score=1, reasons=["burden score 1"], hard_rejected=False)
+    base.update(overrides)
+    return FidelityPracticalityContext(**base)
+
+
+def valid_strategy_research_review_input(**overrides) -> dict:
+    base = dict(
+        review_id="research-1",
+        hypothesis_id="hyp-1",
+        hypothesis_statement="15-20 delta put credit spreads outperform 25-30 delta spreads during high-IV regimes.",
+        supporting_dimensions=["delta", "iv_percentile"],
+        observation_summary="The 15-20 delta bucket shows a higher win rate and higher average P&L than the 25-30 delta bucket across the sampled trades.",
+        overfitting_concerns=[],
+        fidelity_practicality_rating="LOW",
+        fidelity_practicality_commentary="Two-leg spread, low adjustment frequency, workable for manual Fidelity entry.",
+        recommendation="proceed_to_out_of_sample",
+        rationale="Validation-period results are consistent with the observation and the sample size clears the significance threshold.",
+        risks_identified=["Result may be regime-dependent; confirm out-of-sample across a lower-IV period too."],
         timestamp=NOW.isoformat(),
     )
     base.update(overrides)

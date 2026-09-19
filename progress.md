@@ -1450,13 +1450,150 @@ don't rewrite history.
   example, window independence, the no-optimizer-hook structural
   guarantee).
 
-## Open decisions carried forward (updated a third time)
+## 2026-09-19 (cont'd) — Strategy Research Agent (Step 14)
+
+- **Read first**: `src.risk.limits` (reused, not duplicated, for the
+  strategy-level risk review's thresholds), `src.llm.devils_advocate`
+  (the "Python overrides the LLM" idiom and the independence-test
+  technique this step reuses for a different boundary),
+  `src.llm.schemas`/`context.py`'s tail (the zero-numeric-field schema
+  pattern and the mirrored-not-imported context-dataclass pattern),
+  `src.backtest.simulator.TradeRecord`/`src.backtest.metrics
+  .PerformanceMetrics` (what this step's analysis layer consumes).
+  `TaskType.STRATEGY_RESEARCH` and `config/llm.yaml`'s
+  `strategy_research: high_reasoning` route already existed from the
+  original Step 12 scaffolding — this step is the first to actually use
+  either.
+- **`src/research/`** — new package, six modules:
+  - `performance_breakdown.py`: `AnalysisDimension` (the exact 12
+    dimensions named: strategy, delta, DTE, IV percentile, market
+    regime, underlying, sector, entry day, entry time, holding period,
+    profit target, management DTE), `TradeContext` (the analysis-only
+    metadata a `TradeRecord` doesn't itself carry, supplied by whoever
+    ran the backtest), `breakdown_by`/`breakdown_all_dimensions`
+    (per-bucket trade count, win rate, total/average/best/worst
+    **realistic** P&L — never theoretical). `entry_time` buckets as
+    `"unspecified"` when no intraday timestamp is supplied, honestly
+    reflecting that this platform's historical option-chain data
+    (Step 13) is end-of-day only — the same "documented gap, not a
+    fabricated number" choice `src.backtest.engine`'s bias-prevention
+    docstring already makes for survivorship bias.
+  - `hypothesis.py`: `Hypothesis` + `HypothesisRegistry`, an explicit
+    forward-only status state machine (`proposed` -> `backtested` ->
+    `validated` -> `out_of_sample_tested` -> `survived_out_of_sample`,
+    with `rejected` reachable from any non-terminal status but never
+    reversible) — the concrete record behind "15-20 delta put credit
+    spreads outperform 25-30 delta spreads during high-IV regimes"
+    style statements, and the counting mechanism `overfitting_guards.py`
+    reads from.
+  - `overfitting_guards.py`: five deterministic checks —
+    `check_small_sample` (< 30 trades), `check_regime_dependence`
+    (>= 80% of gross profit concentrated in one regime bucket),
+    `check_parameter_mining` (> 5 near-duplicate variations of the same
+    parameter family tested — the concrete guard behind "do not
+    repeatedly test minor parameter changes until something profitable
+    appears"), `check_multiple_testing_bias` (>= 10 hypotheses tested
+    this session with < 10% surviving out-of-sample),
+    `survivorship_bias_note` (a standing caution always included,
+    mirroring `src.backtest.engine`'s own honesty about the same open
+    vendor question). `run_overfitting_guards` assembles all five into
+    one `OverfittingGuardResult` the LLM only ever reads.
+  - `fidelity_practicality.py`: a weighted burden score (trades/week,
+    adjustments/week, legs, rolling frequency, monitoring, assignment
+    complexity, time sensitivity, liquidity) classified into
+    LOW/MEDIUM/HIGH, plus a hard `INCOMPATIBLE` gate — independent of
+    the score — for any strategy requiring sub-second decisions,
+    constant intraday adjustment, or high-frequency execution, exactly
+    matching the spec's "reject strategies requiring" list.
+  - `risk_review.py`: `review_strategy_risk` grades a candidate
+    strategy's own **realistic** backtest `PerformanceMetrics` against
+    this platform's existing portfolio-level `drawdown_risk_reduction_pct`
+    /`drawdown_halt_pct`/`max_stress_loss_pct_of_nav` thresholds
+    (`src.risk.limits`, reused rather than a second set of numbers) —
+    PASS/CONCERN/REJECT, with REJECT always outranking a milder CONCERN
+    when both apply, and a small-sample trade count alone only ever
+    producing CONCERN, never REJECT on its own.
+  - `promotion.py`: `promote_strategy` — the single choke point.
+    Requires `validation_passed`, `out_of_sample_passed`, a risk review
+    verdict of exactly `PASS`, and `human_approved` with a named
+    `human_approver`, all four independently required (no gate may be
+    inferred from another passing). **The Strategy Research Agent has no
+    path to call this**: `src.llm.strategy_research` never imports
+    `src.research.promotion` at all.
+- **`src/llm/schemas.py`**: added `AnalysisDimension` (mirrored, not
+  imported, from `src.research.performance_breakdown`'s own — a test
+  proves the two literal value sets stay identical),
+  `ResearchRecommendation`, `FidelityPracticalityRatingLiteral`, and
+  `StrategyResearchReview` — zero numeric-typed fields, same structural
+  guarantee `PortfolioDecision`/`DevilsAdvocateReview` already
+  establish; a `model_validator` refuses an `INCOMPATIBLE` Fidelity
+  rating paired with any recommendation other than reject/escalate.
+- **`src/llm/context.py`**: added `PerformanceBreakdownContext`,
+  `OverfittingGuardContext`, `FidelityPracticalityContext` — plain
+  dataclasses mirroring the three `src.research` result types field for
+  field, the same decoupling reason `QuantitativeAnalysisContext`
+  doesn't import `src.quant`.
+- **`src/llm/strategy_research.py`** (new): `evaluate_hypothesis` runs
+  one hypothesis-review cycle, cross-checks `hypothesis_id`, and — the
+  "Python overrides the LLM, never the reverse" idiom applied to a new
+  boundary — overwrites the model's own `fidelity_practicality_rating`
+  with Python's authoritative classification whenever the two disagree.
+  Because `model_copy` doesn't re-run validators, an override to
+  `INCOMPATIBLE` also force-corrects `recommendation` to
+  `escalate_for_human_review` in the same update whenever the model's
+  own recommendation wasn't already reject/escalate — otherwise the
+  override could silently leave an object in memory that violates the
+  very invariant the schema enforces at construction time.
+- **`.claude/agents/strategy_research.md`**: new persona covering the
+  eight-stage pipeline, the twelve analysis dimensions, overfitting
+  protection guidance, Fidelity practicality preference, and an explicit
+  "you cannot promote a strategy" constraints section.
+- **Full repo test suite: 1361 passing, 4 skipped** (same pre-existing
+  IBKR skips). New: 95 `tests/unit/research/` tests (all 12 dimensions'
+  bucketing including delta-magnitude-not-sign and the honest
+  `entry_time` "unspecified" fallback; the hypothesis state machine's
+  forward-only transitions; all five overfitting guards at and around
+  their thresholds; Fidelity practicality's hard `INCOMPATIBLE` gate
+  overriding an otherwise-perfect low-burden score, plus LOW/MEDIUM/HIGH
+  boundary cases; strategy risk review's PASS/CONCERN/REJECT thresholds
+  including REJECT outranking a simultaneous CONCERN and grading
+  realistic-not-theoretical metrics; every one of promotion's four gates
+  individually and jointly required) and 40 `tests/unit/llm/`
+  `strategy_research*` tests (schema zero-numeric-field and
+  extra-field-forbidden guarantees, the `INCOMPATIBLE`-recommendation
+  consistency validator, the `AnalysisDimension` literal-drift check
+  against `src.research`'s own tuple, missing-input rejection with no
+  model call, hypothesis-id cross-check, the Python-overrides-Fidelity-
+  rating path including the two-field consistency fix, and the
+  independence/production-rule-boundary proof mirroring
+  `test_devils_advocate_independence.py`'s source-inspection technique).
+
+## Open decisions carried forward (updated a fourth time)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker) —
       now also blocks fully closing the `src.risk.correlation` /
       `src.risk.stress` documented gaps above, *and* is the same open
       question `src.backtest.simulator.HistoricalOptionChainProvider`
-      (Step 13) fills the shape of but deliberately doesn't decide
+      (Step 13) fills the shape of but deliberately doesn't decide, *and*
+      is also what would let `src.research.performance_breakdown`'s
+      `iv_percentile` and `market_regime` dimensions be populated from
+      real data instead of caller-supplied `TradeContext` fixtures
+- [ ] **New from Step 14**: `src.research.hypothesis.HypothesisRegistry`
+      has the same "process-local, lost on restart" caveat as every
+      other `InMemory*` store in this codebase — a real persisted
+      hypothesis log is a Phase 0 DB item, not built yet
+- [ ] **New from Step 14**: nothing yet actually calls
+      `src.llm.strategy_research.evaluate_hypothesis` outside tests —
+      the same no-real-caller gap Steps 10/11 flagged for
+      `evaluate_proposal`/`evaluate_trade_risk`; there is also no real
+      caller yet that runs a backtest, builds `ResearchTradeObservation`s
+      from it, and feeds the whole pipeline (Observation through Risk
+      Comparison) end to end
+- [ ] **New from Step 14**: `src.research.promotion.promote_strategy`
+      has no caller either — the human-approval UI/workflow that would
+      actually construct a `PromotionRequest` (reading a `human_approver`
+      from an authenticated human, not a hardcoded string) doesn't exist
+      yet; today only a test can supply one
 - [ ] **New from Step 13**: no Strategy Screener exists yet to generate
       real `EntrySignal`s — `src.backtest` executes and manages signals
       realistically but has never generated one itself; every backtest
@@ -1592,39 +1729,47 @@ don't rewrite history.
 
 ## Next up
 
-- Eleven standalone pieces now exist. `src/orchestration/` connects ten
+- Twelve standalone pieces now exist. `src/orchestration/` connects ten
   of them into a live paper-trading pipeline (Quant Engine, Devil's
   Advocate, Portfolio Manager, Python Risk Engine, Order Validator,
-  `PaperBroker`, Portfolio, Database); `src/backtest/` is the eleventh —
-  a fully separate, day-by-day historical simulator sharing `PaperBroker`'s
-  own fill-price math (never a second implementation of it) rather than
-  plugging into the live pipeline directly, since a backtest replays
-  thousands of historical days while the pipeline drives one order at a
-  time. Every backtest reports *both* a theoretical-midpoint and a
-  realistic-execution result side by side — CAGR, drawdown, Sharpe/
-  Sortino, VaR/CVaR, and an honest exceeds/meets/approaches/falls_below
-  verdict against the platform's 12–15% research target graded only on
-  the realistic track — plus walk-forward train/validate/out-of-sample
-  splitting with no mechanism by which a later window could ever
-  influence an earlier one. What's still missing to make either half of
-  this platform a real, continuously-running system rather than a
-  function a test or a fixture drives by hand: Phase 0 foundations (a
-  real database in place of every `InMemory*` placeholder accumulated
-  across Steps 8-12, config, CI), a scheduler to drive market data
-  updates and expiration settlement on a clock instead of by explicit
-  calls, something that persists and re-loads `Portfolio` between
-  pipeline runs instead of each call starting fresh, a real caller that
-  builds `PipelineRequest` from live market data instead of
-  hand-constructed fixtures, a real historical options-data vendor
-  behind `HistoricalOptionChainProvider`, and a Strategy Screener to
-  generate real `EntrySignal`s instead of hand-built test fixtures for
-  either the pipeline or the backtest engine to consume. Also still
+  `PaperBroker`, Portfolio, Database); `src/backtest/` replays historical
+  days against that same fill-price math; `src/research/` is the
+  twelfth — a research layer standing *outside* both, reading only
+  already-closed `src.backtest` trades, that discovers and tracks
+  hypotheses without the authority to act on any of them. Every
+  hypothesis moves through an explicit, forward-only pipeline
+  (Observation -> Hypothesis -> Backtest -> Validation -> Out-of-Sample
+  -> Risk Comparison -> Human Review) with deterministic, Python-computed
+  overfitting warnings (multiple-testing bias, parameter mining, small
+  samples, regime dependence, survivorship bias) and a Fidelity
+  operational-practicality gate that hard-rejects anything requiring
+  high-frequency execution — and a single promotion function, gated on
+  four independently-required conditions including a named human
+  approver, that the Strategy Research Agent has no import path to call.
+  What's still missing to make any of these three layers a real,
+  continuously-running system rather than a function a test or a
+  fixture drives by hand: Phase 0 foundations (a real database in place
+  of every `InMemory*` placeholder accumulated across Steps 8-14,
+  config, CI), a scheduler to drive market data updates and expiration
+  settlement on a clock instead of by explicit calls, something that
+  persists and re-loads `Portfolio` between pipeline runs instead of
+  each call starting fresh, a real caller that builds `PipelineRequest`
+  from live market data instead of hand-constructed fixtures, a real
+  historical options-data vendor behind `HistoricalOptionChainProvider`,
+  a Strategy Screener to generate real `EntrySignal`s instead of
+  hand-built test fixtures for the pipeline/backtest engine to consume,
+  a real caller for `evaluate_hypothesis`/`promote_strategy`, and the
+  human-approval workflow that would actually authenticate a
+  `human_approver` rather than accept a hardcoded string. Also still
   open: the `app/` prototype disposition, the accumulating
   layout/config-duplication/untested-real-adapter questions above, the
   four Step 9 gaps, the three Step 10 gaps, the two remaining Step 11
   gaps, the five Step 12 gaps (in-memory database, Portfolio not
   persisted between runs, no expiration scheduler, the two Risk Engine
   calls not sharing one atomic market snapshot, no automated
-  subsequent-price capture), and the three new Step 13 gaps (no Strategy
+  subsequent-price capture), the three Step 13 gaps (no Strategy
   Screener, no clock-driven backtest caller, survivorship bias only
-  preventable "where possible" pending a real vendor) above.
+  preventable "where possible" pending a real vendor), and the three new
+  Step 14 gaps (in-memory hypothesis registry, no real caller for either
+  `evaluate_hypothesis` or `promote_strategy`, no human-approval
+  workflow) above.
