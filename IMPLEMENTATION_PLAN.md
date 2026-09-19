@@ -221,12 +221,45 @@ not scheduled.
   universe.
 
 ### Phase 3 — Broker abstraction + IBKR (paper only)
-- `BrokerClient` interface; `IBKRBroker` via `ib_insync` against a paper
-  account (distinct port from live, never the same credential path).
-- Order lifecycle, reconciliation on reconnect/startup, idempotent order
-  keys.
-- `SHADOW` mode end-to-end against live market data (decisions logged,
-  nothing submitted).
+- **Implemented ahead of phase order** (see §9): `Broker` interface
+  (`src/brokers/base.py`) plus canonical Account/Position/Order/Fill/
+  OrderLeg schemas — market-data-shaped methods (`get_underlying_quote`,
+  `get_option_chain`) return `src.data`'s existing canonical types
+  directly rather than a fourth redefinition. `IBKRBroker`
+  (`src/brokers/ibkr.py`) via a small `IBClientLike` Protocol this
+  module defines itself (not ib_insync's full surface), with a
+  `_RealIBAdapter` isolating every actual ib_insync call into one
+  reviewable class — untested by the automated suite (no live IBKR in
+  this environment) but structurally separated so it can be reviewed and
+  swapped independently of the tested core.
+- **Paper-only is enforced twice, independently**: connection is refused
+  unless the configured port is a known IBKR paper port (7497/4002), and
+  again, after connecting, unless every account IBKR reports uses the
+  conventional paper prefix ("DU"). Neither is a warning; both abort the
+  connection (`LiveTradingBlockedError`). There is no LIVE code path to
+  disable — same principle as `TradingMode` in §4.
+- **Idempotency, not retry, protects against duplicate orders**:
+  `place_order`/`cancel_order` are never wrapped in automatic retry (a
+  timed-out submission has an unknown outcome — blindly resubmitting
+  risks a real duplicate). `client_order_id` is the idempotency key: a
+  caller-initiated retry with the same id is safe because `place_order`
+  checks a local `IdempotencyStore` first, then falls back to searching
+  the broker's own open orders by `orderRef` (catching the case where a
+  prior submission succeeded but crashed before being recorded locally)
+  before ever submitting again.
+- Order lifecycle (`get_open_orders`, `get_fills`), `cancel_order`, and
+  `reconcile()` (reports orphaned-local / unknown-broker / status-
+  mismatch discrepancies — never auto-fixes anything).
+- Read-only calls (`get_account`, `get_positions`, `get_underlying_quote`,
+  `get_option_chain`, `get_open_orders`, `get_fills`, `reconcile`) retry
+  through transient failures, reconnecting between attempts; order
+  mutation never does.
+- **Not yet implemented:** `SHADOW`/`PAPER` mode end-to-end (no
+  orchestrator exists to drive this broker against live market data —
+  Phase 5/6), a persisted (DB-backed) idempotency store (the current one
+  is in-memory, explicitly flagged as lost on restart), and a real
+  `IBKRConfig`/credentials validation pass against an actual running
+  TWS/Gateway instance (impossible to verify in this environment).
 
 ### Phase 4 — Schwab integration
 - Research current Schwab developer API/sandbox capability first (this is
@@ -358,3 +391,42 @@ same "TODO(Phase 0): move to config" note, declared independently
 twice). Worth deciding soon whether to keep building sideways like this
 or consolidate into Phase 0 foundations before a fourth constant shows
 up — flagged, not decided here.
+
+## 9. Deviation from §1: where the Broker Abstraction Layer actually landed
+
+Fourth time: `src/brokers/` (not `src/options_platform/brokers/`).
+`src/` now has four top-level packages. Still not decided here — the
+`src/options_platform` layout question from §6 has not gotten smaller by
+being deferred four times in a row; it has gotten more expensive to
+resolve later, since every deferral means more import paths to rewrite
+if §1's original layout is ever actually adopted.
+
+`src/brokers` holds the same verified one-way boundary
+(`tests/unit/brokers/test_architecture_boundary.py`: no `src.llm`
+import), and — unlike `src/data`'s deliberate independence from
+`src/quant` — **does** depend on `src/data`: `Broker.get_underlying_quote`
+/ `get_option_chain` return `src.data`'s canonical `UnderlyingQuote`/
+`OptionChain` directly. This is the right call, not an inconsistency
+with the `src/data`-doesn't-depend-on-`src/quant` decision in §8: the
+Broker Abstraction Layer is downstream of the Market Data Layer in
+ARCHITECTURE.md's own pipeline diagram (§3), so reusing its canonical
+types is exactly "normalize into our internal schemas," not new
+coupling. `src/brokers` does not depend on `src/quant`.
+
+One more duplicated small enum to track: `src/brokers/base.py` defines
+its own `OrderAction` (buy/sell) rather than reusing
+`src.quant.black_scholes.Side`, for the same reason the other three
+`OptionRight` copies exist — this layer stays importable without
+pulling in `src/quant`. Fourth candidate for the `src/core/` primitives
+cleanup from §8, not fixed here.
+
+`ibkr.py`'s `_RealIBAdapter` — the class that actually calls
+`ib_insync`'s real API — is exercised by zero automated tests, for the
+same reason no part of this codebase has touched a real broker
+connection yet: there is no live TWS/IB Gateway in this environment to
+test against, paper or otherwise. Every other line in `IBKRBroker` is
+tested through the `IBClientLike` Protocol against a fake
+(`tests/unit/brokers/fakes.py`). This is a real gap, not a hidden one —
+`_RealIBAdapter` should get a manual smoke test against an actual paper
+TWS/Gateway session before this adapter is trusted with real (paper)
+capital, and that can't happen inside this session.

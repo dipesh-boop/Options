@@ -413,6 +413,107 @@ don't rewrite history.
   Added `pytest-asyncio` to `requirements-dev.txt` for the async
   provider-contract tests. Full repo suite: **484 tests passing**.
 
+## 2026-09-19 (cont'd) — IBKR broker integration implemented
+
+- Explicit request for Interactive Brokers behind a `Broker` interface:
+  account info, positions, underlying quotes, option chains + Greeks,
+  paper orders, open orders, fills, cancellation, reconciliation. Live
+  trading disallowed; env-var config only, no credentials in source;
+  connection health monitoring; retry where safe, never blind retry on
+  order submission; idempotency protection against duplicate orders;
+  paper accounts only; integration tests that need no live money.
+- `src/brokers/base.py`: the `Broker` ABC plus canonical
+  `Account`/`Position`/`Order`/`Fill`/`OrderLeg`/`PlaceOrderRequest`
+  schemas. Market-data-shaped methods
+  (`get_underlying_quote`/`get_option_chain`) return `src.data`'s
+  existing `UnderlyingQuote`/`OptionChain` directly — reusing the
+  canonical types, not redefining them a fourth time. `IdempotencyStore`
+  (ABC) + `InMemoryIdempotencyStore` (explicitly flagged as lost on
+  restart, a placeholder for Phase 0's real persisted order state
+  machine) live here too, since idempotency is a Broker-layer concern,
+  not an IBKR-specific one.
+- `src/brokers/ibkr.py`: `IBKRConfig` (env vars, prefix
+  `OPTIONS_AGENT_IBKR_*`, no credential fields — IBKR authenticates
+  against an already-logged-in local TWS/Gateway session, so there's no
+  secret to embed in the first place). **Paper-only enforced twice,
+  independently**: `require_paper_port()` blocks connection outright
+  unless the port is a known IBKR paper port (7497/4002) — known live
+  ports (7496/4001) and anything unrecognized are both rejected, not
+  just live ports specifically; and after connecting, every account
+  IBKR reports must use the conventional paper prefix ("DU") or the
+  connection is aborted (disconnects, then raises). Neither check is a
+  warning.
+- Talks to IBKR only through `IBClientLike`, a narrow Protocol this
+  module defines itself (not ib_insync's full surface) — `_RealIBAdapter`
+  isolates every actual `ib_insync` call and the translation from this
+  module's internal contract/order spec objects into real `ib_insync`
+  objects into one reviewable class. Tests inject a fake `IBClientLike`
+  directly and never construct `_RealIBAdapter` or import `ib_insync` at
+  all — **`_RealIBAdapter` itself is untested by the automated suite**,
+  flagged rather than hidden (no live TWS/Gateway exists in this
+  environment to test against; it needs a manual smoke test before this
+  adapter is trusted with real paper capital).
+- **Idempotency, not retry, is what makes duplicate-order protection
+  work**: `place_order`/`cancel_order` are never wrapped in automatic
+  retry — a timed-out submission has an unknown broker-side outcome, and
+  blindly resubmitting risks a real duplicate. `client_order_id` is the
+  idempotency key: `place_order` checks a local `IdempotencyStore` first
+  (fast path), then falls back to searching the broker's own open orders
+  by `orderRef` before ever submitting (defense against "we crashed
+  after submitting but before recording it locally"). A caller that
+  wants to retry after a failure calls `place_order` again with the same
+  `client_order_id` — safe by construction, not by promise.
+- Read-only methods (`get_account`, `get_positions`,
+  `get_underlying_quote`, `get_option_chain`, `get_open_orders`,
+  `get_fills`, `reconcile`) go through `_with_read_retry`: bounded
+  attempts, reconnecting between them, catching `BrokerConnectionError`
+  plus the builtin transient-transport exceptions
+  (`ConnectionError`/`TimeoutError`/`OSError`) a real socket connection
+  can raise. `place_order`/`cancel_order` never call it — proven
+  structurally by a test that greps each method's source for the retry
+  helper's name, not just behaviorally.
+- `reconcile()` compares local non-terminal orders against the broker's
+  own non-terminal open orders and reports `orphaned_local` /
+  `unknown_broker` / `status_mismatch` discrepancies. Never auto-fixes
+  anything — a test asserts a discrepancy-detecting reconcile call
+  issues zero cancel/place calls of its own.
+- **Real bugs the tests caught before shipping** (four, this time):
+  (1) `_build_ib_order`'s single/multi-leg branch had a tuple-unpacking
+  bug that would `ValueError` on every single-leg order. (2) `_RealIBAdapter`
+  originally just forwarded this module's internal `_StockSpec`/
+  `_OptionSpec`/`_LimitOrderSpec` objects straight to real `ib_insync`
+  calls, which would fail immediately against a real connection since
+  ib_insync expects its own `Contract`/`Order` types — fixed by adding
+  actual translation methods. (3) `place_order`'s `DuplicateOrderError`
+  branch was unreachable dead code (guarded by a condition already
+  falsified by an earlier early-return) — rewritten so the check is
+  reachable: `_find_open_order_by_client_id` now raises if a
+  `client_order_id` matches *more than one* broker-side order, a real
+  invariant violation. (4) `_order_status_from_ib` had no mapping for
+  IBKR's `"PartiallyFilled"` status, silently falling back to
+  `SUBMITTED` — caught by a reconciliation test expecting a status
+  mismatch to be detected.
+- Tests: `tests/unit/brokers/` — 102 tests, including a shared
+  `fakes.py` `FakeIBClient` (injectable failure counts for retry tests,
+  realistic order lifecycle — cancel actually changes status,
+  `openTrades()` excludes terminal orders like real ib_insync). Covers
+  config/paper-port enforcement, connection + paper-account verification
+  (including mixed paper/live account lists and a configured-but-absent
+  account id), connect retry, health checks, account/positions/
+  underlying-quote/option-chain retrieval with Greeks, place_order
+  idempotency (including the broker-side-adoption and
+  duplicate-broker-order-conflict paths), cancel semantics (including
+  idempotent double-cancel), open orders, fills, reconciliation's three
+  discrepancy kinds, read-retry-with-reconnect, and the
+  no-blind-retry-on-mutation structural check. Full repo suite:
+  **586 tests passing**.
+- No dependency changes: `ib_insync` and `pydantic-settings` were
+  already in `requirements.txt`. Used a small hand-rolled retry helper
+  instead of adding `tenacity` (still listed as a future dependency in
+  `IMPLEMENTATION_PLAN.md`, not yet actually needed) — precise control
+  over the reconnect-between-attempts semantic, and deterministic tests
+  without fighting a generic backoff decorator's timing.
+
 ## Open decisions carried forward (updated)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker)
@@ -421,31 +522,46 @@ don't rewrite history.
 - [ ] Final ~50-name equity universe list + liquidity criteria
 - [ ] **`app/` prototype disposition — now fully redundant, recommend
       resolving before Phase 0 (see IMPLEMENTATION_PLAN.md §7)**
-- [ ] Fold `src/llm/` + `src/quant/` + `src/data/` under
+- [ ] Fold `src/llm/` + `src/quant/` + `src/data/` + `src/brokers/` under
       `src/options_platform/`, or keep `src/` flat with multiple
-      top-level packages (IMPLEMENTATION_PLAN.md §6-§8)
+      top-level packages (IMPLEMENTATION_PLAN.md §6-§9) — deferred four
+      times now, getting more expensive to resolve later each time
 - [ ] Model tier per non-Portfolio-Manager agent role
 - [ ] Two independently-declared 15-minute freshness placeholders
       (`src.llm.schemas.MAX_MARKET_DATA_AGE`,
       `src.data.provider.DEFAULT_MAX_QUOTE_AGE`) should become one
       config value in Phase 0
-- [ ] No concrete market data provider exists yet (mock, IBKR, or
-      Schwab) — only canonical schemas + abstract interfaces
-- [ ] Three duplicated `OptionRight` enums (`src.llm`, `src.quant`,
-      `src.data`) — candidate for a shared `src/core/` primitives module
+- [ ] No concrete *market data* provider exists yet for `src.data`'s
+      `MarketDataProvider` interface (mock or real) — `IBKRBroker` now
+      implements the *broker* side (`src.brokers.base.Broker`)
+      independently; the two interfaces aren't unified
+- [ ] Four duplicated small enums (`OptionRight` x3 in `src.llm`/
+      `src.quant`/`src.data`, plus `src.brokers.OrderAction` vs.
+      `src.quant.black_scholes.Side`) — candidate for a shared
+      `src/core/` primitives module
+- [ ] `_RealIBAdapter` (the actual `ib_insync` glue in
+      `src/brokers/ibkr.py`) is untested by the automated suite and
+      needs a manual smoke test against a real paper TWS/Gateway session
+      before being trusted — impossible to verify in this environment
+- [ ] `InMemoryIdempotencyStore` is process-local only, lost on restart —
+      a placeholder for Phase 0's real persisted order state machine
 
 ## Next up
 
-- Four standalone pieces now exist — `src/llm/` (agent plumbing),
+- Five standalone pieces now exist — `src/llm/` (agent plumbing),
   `src/quant/` (deterministic calculations), `src/data/` (canonical
-  market data schemas + freshness) — each internally tested but not
+  market data schemas + freshness), `src/brokers/` (IBKR paper trading,
+  idempotent orders, reconciliation) — each internally tested but not
   connected to each other or to anything live. No DB, no Strategy
-  Screener, no Python Risk Engine, no concrete data provider, no broker.
-  Awaiting direction: keep building isolated pieces (Strategy Screener
-  would now have real inputs to work with — screened `OptionContract`s
-  from a mock provider, priced/gated by the existing Quant functions),
-  or start Phase 0 foundations (repo scaffolding, DB schema, CI, and the
-  `src/options_platform` layout decision this keeps deferring) so
-  there's a real pipeline to wire all of this into. Also still open: the
-  `app/` prototype disposition and the accumulating layout/config-
-  duplication questions above.
+  Screener, no Python Risk Engine (portfolio-state-aware limits beyond
+  `src.quant.position_sizing`'s pure calculation), no orchestrator. IBKR
+  can now genuinely be connected to (given a real paper TWS/Gateway
+  session, which this environment doesn't have) for account/position/
+  market-data/order operations — this is the first piece of the
+  platform that could touch a real (paper) external system rather than
+  only ever running against mocks. Awaiting direction: keep building
+  isolated pieces, or start Phase 0 foundations (repo scaffolding, DB
+  schema, CI, and the `src/options_platform` layout decision this keeps
+  deferring) so there's a real pipeline connecting all of this. Also
+  still open: the `app/` prototype disposition and the accumulating
+  layout/config-duplication/untested-real-adapter questions above.
