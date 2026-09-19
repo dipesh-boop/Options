@@ -169,3 +169,87 @@ don't rewrite history.
   the pipeline exists to wire this into. Also still open: the `app/`
   prototype disposition and the `src/llm/` vs `src/options_platform/`
   reconciliation above.
+
+## 2026-09-19 (cont'd) — TradeProposal redefined to the specified field set
+
+- Explicit request for a stricter `TradeProposal` with a precise field
+  list: `proposal_id`, `timestamp`, `ticker`, `strategy`, `market_regime`,
+  `expiration`, `legs`, `direction`, `contracts_requested`,
+  `target_entry`, `profit_target`, `management_dte`, `thesis`,
+  `risk_thesis`, `confidence`, `data_sources`, `data_timestamp`, plus a
+  requirement that every proposal carry market data timestamp, source,
+  reasoning summary, and invalidation conditions, and that stale/missing
+  market data be rejected. This superseded the earlier, more abstract
+  `TradeProposal`/`StructureIntent` pair from the first LLM-layer commit.
+- Interpretation calls made (flagging rather than silently resolving):
+  - "source" and "market data timestamp" in the follow-up requirement map
+    onto the already-listed `data_sources`/`data_timestamp` fields, not
+    new ones.
+  - "reasoning summary" maps onto `thesis` (a thesis *is* a reasoning
+    summary); no separate `reasoning_summary` field was added, to avoid a
+    redundant field the 17-field list didn't ask for.
+  - "invalidation conditions" is not covered by any of the 17 named
+    fields, so `invalidation_conditions: list[str]` (non-empty, non-blank
+    entries) was added as the one genuinely new required field.
+  - Kept `action: TradeAction` (open/close/roll, default `open`) as an
+    additive field beyond the specified list — removing it would have
+    silently broken the Trade Manager role's documented close/roll
+    capability (`.claude/agents/trade_manager.md`, written in the
+    previous commit). It carries no execution authority (same as
+    everything else in this schema) so it doesn't conflict with any of
+    the five forbidden concepts.
+  - Dropped `source_agent`, `rank`, and `risk_flags` from the old
+    TradeProposal shape — not in the new field list, and not load-bearing
+    elsewhere: `source_agent` is already captured at the call-result level
+    (`AgentCallResult.agent_role` in `src/llm/client.py`), ranking is the
+    Portfolio Manager's job at the container level, and risk flagging
+    already has dedicated homes in `AdversarialReview.risk_flags` and
+    `RiskReviewNote.concerns`, keyed by `proposal_id`.
+- `src/llm/schemas.py` changes:
+  - Removed `StructureIntent`; added `OptionLeg` (right/strike/side),
+    `TradeDirection` (bullish/bearish/neutral), `OptionRight` (C/P),
+    `LegSide` (buy/sell), and a shared `MarketRegimeLabel` literal used by
+    both `TradeProposal.market_regime` and `MarketRegimeAssessment.regime`
+    so the two never drift apart.
+  - `TradeProposal` still inherits `_StrictModel` (`extra="forbid"` +
+    `frozen=True`), so every one of the five explicitly forbidden
+    concepts (final approved contracts, authoritative max loss, portfolio
+    risk, broker order id, execution authorization) is rejected outright
+    if smuggled in as an extra field — proven by parametrized tests using
+    several spellings of each.
+  - Four `@model_validator(mode="after")` checks: market data freshness
+    (`data_timestamp <= timestamp`, and `timestamp - data_timestamp <=
+    MAX_MARKET_DATA_AGE`, a 15-minute placeholder constant flagged in a
+    `TODO(Phase 0)` comment as needing to move to config once one exists,
+    the same way model routing moved to `config/llm.yaml`), expiration
+    must be after the proposal's timestamp date, `management_dte` can't
+    exceed the structure's total DTE, and legs must structurally match
+    `strategy` (cash_secured_put = one short put; covered_call = one
+    short call; put_credit_spread = exactly one short + one long put,
+    short strike above long strike for a net credit). Two `field_validator`
+    checks require `timestamp` and `data_timestamp` to be timezone-aware
+    (a naive datetime is rejected, not silently assumed to be UTC).
+  - Staleness is anchored on the proposal's own `timestamp`, not
+    wall-clock "now" at validation time — deliberate, so a stored
+    proposal doesn't retroactively become "stale" just because it's read
+    back later; documented in the validator's docstring.
+- Updated `.claude/agents/strategy_analyst.md` and `portfolio_manager.md`,
+  which had prose referencing the removed `StructureIntent`/`rationale`/
+  `conviction`/`risk_flags` field names, to describe the actual current
+  schema. `trade_manager.md` needed no change (only referenced
+  `action=close|roll`, which still exists).
+- Tests: added `tests/unit/llm/test_trade_proposal.py` (a new, dedicated,
+  comprehensive file — required-field parametrization over all 18
+  fields, forbidden-field parametrization over multiple spellings of all
+  five forbidden concepts plus a field-name substring scan of
+  `TradeProposal.model_fields` as a second line of defense, leg/strategy
+  consistency for all three strategies including boundary cases like
+  equal strikes and debit-direction spreads, market data freshness
+  including the exact 15-minute boundary, missing/empty/blank market
+  data, expiration/DTE consistency, and general field constraints).
+  Rewrote the `TradeProposal`-specific parts of `test_schemas.py` (now
+  lighter — deep coverage lives in the new file) and
+  `test_execution_safety.py` (new field shapes throughout, plus the five
+  named forbidden concepts folded into its adversarial-payload
+  parametrization, plus new stale/missing-market-data pipeline tests).
+  Full suite: **193 tests passing** (`python3 -m pytest tests/ -q`).

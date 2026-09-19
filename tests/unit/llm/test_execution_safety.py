@@ -28,22 +28,31 @@ def _tool_use_response(input_: Any, *, tool_name: str = "submit_structured_outpu
     return SimpleNamespace(id="msg_adversarial", content=[block])
 
 
+# Raw JSON-shaped dict, the way it would actually arrive as a tool_use
+# block's `input` from the Anthropic API — strings for dates/datetimes,
+# not Python objects.
 VALID_TRADE_PROPOSAL_INPUT: dict[str, Any] = {
     "proposal_id": "prop-42",
-    "source_agent": "strategy_analyst",
-    "structure": {
-        "symbol": "MSFT",
-        "strategy_type": "put_credit_spread",
-        "action": "open",
-        "target_dte_min": 25,
-        "target_dte_max": 40,
-        "approx_target_delta": 0.25,
-        "notes": None,
-    },
-    "rationale": "Elevated IV rank, no earnings in window, liquid chain.",
-    "conviction": "medium",
-    "risk_flags": [],
-    "rank": 1,
+    "timestamp": "2026-01-15T14:30:00+00:00",
+    "ticker": "MSFT",
+    "strategy": "put_credit_spread",
+    "market_regime": "normal",
+    "expiration": "2026-02-20",
+    "legs": [
+        {"right": "P", "strike": 420.0, "side": "sell"},
+        {"right": "P", "strike": 410.0, "side": "buy"},
+    ],
+    "direction": "bullish",
+    "contracts_requested": 5,
+    "target_entry": 1.25,
+    "profit_target": 0.5,
+    "management_dte": 21,
+    "thesis": "Elevated IV rank, no earnings in window, liquid chain.",
+    "risk_thesis": "Max loss is width minus credit; a gap below 410 before expiry breaches it.",
+    "confidence": "medium",
+    "data_sources": ["ibkr_snapshot"],
+    "data_timestamp": "2026-01-15T14:20:00+00:00",
+    "invalidation_conditions": ["Close below 415 on the daily chart"],
 }
 
 
@@ -65,14 +74,22 @@ class TestValidTradeProposalReachesTheBoundary:
         assert proposal.proposal_id == "prop-42"
 
 
-class TestExecutionShapedFieldsNeverSurvivePipeline:
-    """An LLM (or an attacker crafting a payload) trying to smuggle
-    something that looks like a broker instruction through a
-    valid-looking TradeProposal must be stopped at stage 1."""
+class TestForbiddenFieldsNeverSurvivePipeline:
+    """An LLM (or an attacker crafting a payload) trying to smuggle a
+    final approved contract count, an authoritative max loss, a
+    portfolio risk figure, a broker order id, or an execution
+    authorization through a valid-looking TradeProposal must be stopped
+    at stage 1 — those all belong to deterministic downstream systems,
+    never to the LLM."""
 
     @pytest.mark.parametrize(
         "smuggled_fields",
         [
+            {"final_approved_contracts": 100},
+            {"authoritative_max_loss": 500.0},
+            {"portfolio_risk": 0.02},
+            {"broker_order_id": "IBKR-98765"},
+            {"execution_authorization": True},
             {"execute": True},
             {"submit_order": True},
             {"order_id": "IBKR-98765"},
@@ -82,38 +99,66 @@ class TestExecutionShapedFieldsNeverSurvivePipeline:
             {"live_mode": True},
         ],
     )
-    def test_smuggled_execution_field_blocked_at_validation(self, smuggled_fields: dict):
+    def test_smuggled_field_blocked_at_validation(self, smuggled_fields: dict):
         malformed = {**VALID_TRADE_PROPOSAL_INPUT, **smuggled_fields}
         with pytest.raises(LLMOutputError):
             _run_full_pipeline(malformed)
 
-    def test_smuggled_field_nested_inside_structure_blocked(self):
-        malformed = {
-            **VALID_TRADE_PROPOSAL_INPUT,
-            "structure": {**VALID_TRADE_PROPOSAL_INPUT["structure"], "execute_immediately": True},
-        }
+    def test_smuggled_field_nested_inside_a_leg_blocked(self):
+        malformed_legs = [
+            {**VALID_TRADE_PROPOSAL_INPUT["legs"][0], "execute_immediately": True},
+            VALID_TRADE_PROPOSAL_INPUT["legs"][1],
+        ]
+        malformed = {**VALID_TRADE_PROPOSAL_INPUT, "legs": malformed_legs}
         with pytest.raises(LLMOutputError):
             _run_full_pipeline(malformed)
 
 
 class TestOutOfScopeStrategiesNeverSurvivePipeline:
     """The platform's excluded structures (naked calls, unfunded naked
-    puts, 0DTE-style same-day expiry via action tricks, etc.) must not be
-    expressible as a valid TradeProposal at all."""
+    puts, etc.) and out-of-scope actions must not be expressible as a
+    valid TradeProposal at all."""
 
     def test_naked_call_strategy_type_rejected(self):
-        malformed = {
-            **VALID_TRADE_PROPOSAL_INPUT,
-            "structure": {**VALID_TRADE_PROPOSAL_INPUT["structure"], "strategy_type": "naked_call"},
-        }
+        malformed = {**VALID_TRADE_PROPOSAL_INPUT, "strategy": "naked_call"}
         with pytest.raises(LLMOutputError):
             _run_full_pipeline(malformed)
 
     def test_unrecognized_action_rejected(self):
+        malformed = {**VALID_TRADE_PROPOSAL_INPUT, "action": "execute_live"}
+        with pytest.raises(LLMOutputError):
+            _run_full_pipeline(malformed)
+
+    def test_covered_call_with_long_leg_rejected(self):
+        # A "covered call" proposed with a *bought* call instead of a
+        # sold one isn't the platform's covered_call strategy at all.
         malformed = {
             **VALID_TRADE_PROPOSAL_INPUT,
-            "structure": {**VALID_TRADE_PROPOSAL_INPUT["structure"], "action": "execute_live"},
+            "strategy": "covered_call",
+            "legs": [{"right": "C", "strike": 440.0, "side": "buy"}],
         }
+        with pytest.raises(LLMOutputError):
+            _run_full_pipeline(malformed)
+
+
+class TestStaleOrMissingMarketDataNeverSurvivesPipeline:
+    def test_stale_data_timestamp_rejected(self):
+        malformed = {**VALID_TRADE_PROPOSAL_INPUT, "data_timestamp": "2026-01-15T10:00:00+00:00"}
+        with pytest.raises(LLMOutputError):
+            _run_full_pipeline(malformed)
+
+    def test_missing_data_timestamp_rejected(self):
+        malformed = {k: v for k, v in VALID_TRADE_PROPOSAL_INPUT.items() if k != "data_timestamp"}
+        with pytest.raises(LLMOutputError):
+            _run_full_pipeline(malformed)
+
+    def test_missing_data_sources_rejected(self):
+        malformed = {k: v for k, v in VALID_TRADE_PROPOSAL_INPUT.items() if k != "data_sources"}
+        with pytest.raises(LLMOutputError):
+            _run_full_pipeline(malformed)
+
+    def test_empty_data_sources_rejected(self):
+        malformed = {**VALID_TRADE_PROPOSAL_INPUT, "data_sources": []}
         with pytest.raises(LLMOutputError):
             _run_full_pipeline(malformed)
 
@@ -140,7 +185,7 @@ class TestFreeTextAndProtocolLevelTamperingBlocked:
             validate_tool_response(response, TradeProposal)
 
     def test_missing_required_fields_blocked(self):
-        malformed = {k: v for k, v in VALID_TRADE_PROPOSAL_INPUT.items() if k != "rationale"}
+        malformed = {k: v for k, v in VALID_TRADE_PROPOSAL_INPUT.items() if k != "thesis"}
         with pytest.raises(LLMOutputError):
             _run_full_pipeline(malformed)
 
@@ -157,15 +202,16 @@ class TestBoundaryGuardIsTheLastLine:
 
     def test_guard_rejects_a_forged_object_with_matching_attributes(self):
         class Forged:
-            """Has every attribute a TradeProposal has, but isn't one."""
+            """Has plausible TradeProposal-shaped attributes, but isn't one."""
 
             proposal_id = "prop-42"
-            source_agent = "strategy_analyst"
-            structure = None
-            rationale = "looks legit"
-            conviction = "high"
-            risk_flags: list = []
-            rank = 1
+            ticker = "MSFT"
+            strategy = "put_credit_spread"
+            legs: list = []
+            thesis = "looks legit"
+            risk_thesis = "looks legit"
+            confidence = "high"
+            contracts_requested = 5
 
         with pytest.raises(TypeError):
             ensure_trade_proposal(Forged())

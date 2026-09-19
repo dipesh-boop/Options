@@ -1,6 +1,15 @@
 """Schema-level proof that malformed or execution-shaped LLM output
-cannot be constructed as a trusted object in the first place."""
+cannot be constructed as a trusted object in the first place.
+
+TradeProposal itself gets deep, dedicated coverage in
+test_trade_proposal.py (required fields, forbidden fields, leg/strategy
+validation, market data freshness). This file covers the shared
+`_StrictModel` behavior (extra="forbid", frozen) across the other
+agent-output schemas, plus the `ensure_trade_proposal` boundary guard.
+"""
 from __future__ import annotations
+
+from datetime import date, datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -8,36 +17,36 @@ from pydantic import ValidationError
 from src.llm.schemas import (
     AdversarialReview,
     Conviction,
-    RiskFlag,
+    LegSide,
+    OptionLeg,
+    OptionRight,
     StrategyType,
-    StructureIntent,
-    TradeAction,
+    TradeDirection,
     TradeProposal,
     ensure_trade_proposal,
 )
 
 
-def _valid_structure_kwargs() -> dict:
-    return dict(
-        symbol="AAPL",
-        strategy_type=StrategyType.CASH_SECURED_PUT,
-        action=TradeAction.OPEN,
-        target_dte_min=21,
-        target_dte_max=35,
-        approx_target_delta=0.3,
-        notes="30-delta CSP, mid-expiry",
-    )
-
-
 def _valid_proposal_kwargs(**overrides) -> dict:
     base = dict(
         proposal_id="prop-1",
-        source_agent="strategy_analyst",
-        structure=StructureIntent(**_valid_structure_kwargs()),
-        rationale="High IV percentile, liquid chain, no earnings before expiry.",
-        conviction=Conviction.MEDIUM,
-        risk_flags=[RiskFlag(code="iv_elevated", severity="caution", note="IV rank > 80")],
-        rank=1,
+        timestamp=datetime(2026, 1, 15, 14, 30, tzinfo=timezone.utc),
+        ticker="AAPL",
+        strategy=StrategyType.CASH_SECURED_PUT,
+        market_regime="normal",
+        expiration=date(2026, 2, 20),
+        legs=[OptionLeg(right=OptionRight.PUT, strike=210.0, side=LegSide.SELL)],
+        direction=TradeDirection.BULLISH,
+        contracts_requested=2,
+        target_entry=2.10,
+        profit_target=0.5,
+        management_dte=21,
+        thesis="High IV percentile, liquid chain, no earnings before expiry.",
+        risk_thesis="Assignment risk if the stock drops sharply before expiry.",
+        confidence=Conviction.MEDIUM,
+        data_sources=["ibkr_snapshot"],
+        data_timestamp=datetime(2026, 1, 15, 14, 20, tzinfo=timezone.utc),
+        invalidation_conditions=["Close below 205 on the daily chart"],
     )
     base.update(overrides)
     return base
@@ -47,90 +56,11 @@ class TestTradeProposalPositiveControl:
     def test_valid_proposal_parses(self):
         proposal = TradeProposal(**_valid_proposal_kwargs())
         assert proposal.proposal_id == "prop-1"
-        assert proposal.structure.symbol == "AAPL"
+        assert proposal.ticker == "AAPL"
 
     def test_ensure_trade_proposal_accepts_real_instance(self):
         proposal = TradeProposal(**_valid_proposal_kwargs())
         assert ensure_trade_proposal(proposal) is proposal
-
-
-class TestTradeProposalRejectsExecutionShapedFields:
-    """`extra='forbid'` should reject any field that looks like it's
-    trying to become an executable broker instruction, even if every
-    other field is otherwise perfectly valid."""
-
-    @pytest.mark.parametrize(
-        "injected_field",
-        [
-            {"order_id": "IBKR-12345"},
-            {"execute": True},
-            {"submit": True},
-            {"broker": "ibkr"},
-            {"quantity": 100},
-            {"limit_price": 1.23},
-            {"account_id": "U1234567"},
-            {"bypass_risk_gate": True},
-        ],
-    )
-    def test_extra_field_rejected(self, injected_field: dict):
-        payload = _valid_proposal_kwargs()
-        payload_dict = {
-            **{k: v for k, v in payload.items() if k != "structure"},
-            "structure": payload["structure"].model_dump(),
-            **injected_field,
-        }
-        with pytest.raises(ValidationError):
-            TradeProposal.model_validate(payload_dict)
-
-    def test_execution_field_on_structure_rejected(self):
-        structure_dict = _valid_structure_kwargs()
-        structure_dict["execute_immediately"] = True
-        with pytest.raises(ValidationError):
-            StructureIntent.model_validate(structure_dict)
-
-
-class TestTradeProposalRejectsMalformedData:
-    def test_missing_required_field(self):
-        payload = _valid_proposal_kwargs()
-        payload_dict = {k: v for k, v in payload.items() if k != "rationale"}
-        payload_dict["structure"] = payload["structure"].model_dump()
-        with pytest.raises(ValidationError):
-            TradeProposal.model_validate(payload_dict)
-
-    def test_invalid_strategy_type_enum(self):
-        structure_dict = _valid_structure_kwargs()
-        structure_dict["strategy_type"] = "naked_call"  # explicitly excluded strategy
-        with pytest.raises(ValidationError):
-            StructureIntent.model_validate(structure_dict)
-
-    def test_invalid_action_enum(self):
-        structure_dict = _valid_structure_kwargs()
-        structure_dict["action"] = "execute_live"
-        with pytest.raises(ValidationError):
-            StructureIntent.model_validate(structure_dict)
-
-    def test_dte_max_below_dte_min_rejected(self):
-        structure_dict = _valid_structure_kwargs()
-        structure_dict["target_dte_min"] = 30
-        structure_dict["target_dte_max"] = 10
-        with pytest.raises(ValidationError):
-            StructureIntent.model_validate(structure_dict)
-
-    def test_delta_out_of_range_rejected(self):
-        structure_dict = _valid_structure_kwargs()
-        structure_dict["approx_target_delta"] = 1.5
-        with pytest.raises(ValidationError):
-            StructureIntent.model_validate(structure_dict)
-
-    def test_rank_must_be_positive(self):
-        payload = _valid_proposal_kwargs()
-        payload_dict = {**payload, "structure": payload["structure"].model_dump(), "rank": 0}
-        with pytest.raises(ValidationError):
-            TradeProposal.model_validate(payload_dict)
-
-    def test_non_dict_payload_rejected(self):
-        with pytest.raises(ValidationError):
-            TradeProposal.model_validate("not a trade proposal")
 
 
 class TestEnsureTradeProposalBoundaryGuard:
@@ -140,7 +70,10 @@ class TestEnsureTradeProposalBoundaryGuard:
 
     def test_rejects_plain_dict_even_with_correct_shape(self):
         payload = _valid_proposal_kwargs()
-        payload_dict = {**payload, "structure": payload["structure"].model_dump()}
+        payload_dict = {
+            **payload,
+            "legs": [leg.model_dump() for leg in payload["legs"]],
+        }
         with pytest.raises(TypeError):
             ensure_trade_proposal(payload_dict)
 
@@ -167,4 +100,17 @@ class TestModelsAreFrozen:
     def test_trade_proposal_is_immutable(self):
         proposal = TradeProposal(**_valid_proposal_kwargs())
         with pytest.raises(ValidationError):
-            proposal.rank = 99  # type: ignore[misc]
+            proposal.contracts_requested = 99  # type: ignore[misc]
+
+    def test_adversarial_review_is_immutable(self):
+        review = AdversarialReview(proposal_id="prop-1", critique="Concentration risk.")
+        with pytest.raises(ValidationError):
+            review.do_not_advance = True  # type: ignore[misc]
+
+
+class TestOtherSchemasRejectExtraFields:
+    def test_adversarial_review_rejects_extra_field(self):
+        with pytest.raises(ValidationError):
+            AdversarialReview.model_validate(
+                {"proposal_id": "prop-1", "critique": "weak thesis", "unexpected_field": True}
+            )
