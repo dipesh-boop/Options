@@ -1303,11 +1303,176 @@ don't rewrite history.
   OK/REPRICE_REQUIRED/REJECTED paths, execution-audit record shape and
   append-only follow-up behavior).
 
-## Open decisions carried forward (updated again)
+## 2026-09-19 (cont'd) — Institutional-quality backtesting engine (Step 13)
+
+- **Read first**: `src.data.historical` (`HistoricalBar`,
+  `assert_no_lookahead`) and `src.data.earnings`
+  (`is_within_earnings_window`) as the existing bias-prevention
+  precedents to reuse rather than reinvent; `src.brokers.paper`'s fill
+  model (`FillModel`, `compute_fill`, `fillable_quantity`,
+  `price_satisfies_limit`) as the execution math this package must reuse
+  for both backtest fills and live paper fills, not duplicate.
+- **`src/backtest/`** — all 10 named files:
+  - `simulator.py`: `HistoricalOptionQuote` (this package's own
+    historical options-chain quote — deliberately not built on
+    `TimestampedModel`, the same reasoning `HistoricalBar` already gives,
+    since a 2024-03-15 quote's validity never expires) plus
+    `HistoricalOptionChainProvider` (the vendor-agnostic abstraction
+    `ARCHITECTURE.md §12` already flagged as an open question, filled in
+    shape only), `assert_no_lookahead_options` (the options-chain twin of
+    `assert_no_lookahead`), and the position/trade data model
+    (`BacktestLeg`, `BacktestPosition`, `TradeRecord`, `EntrySignal`,
+    `PortfolioState`) — every position and trade carries *both* a
+    realistic and a theoretical dollar figure side by side from entry
+    through close, computed independently rather than one derived from
+    the other.
+  - `slippage.py`: a `HistoricalOptionQuote` -> `src.brokers.paper`
+    `LegQuote`/`OrderLeg` adapter, not a second fill-price model —
+    `fill_realistic` calls `compute_fill`/`fillable_quantity`/
+    `price_satisfies_limit` directly; `fill_theoretical` is pinned to its
+    own fixed MID/zero-friction config regardless of what the realistic
+    side is configured with, so the theoretical track can never
+    accidentally inherit realistic friction; `mark_to_market` answers
+    "what would it cost right now" for profit-target valuation, with no
+    limit-price gate (it isn't placing an order).
+  - `commissions.py`: `CommissionSchedule` + `calculate_commission`, kept
+    as its own tiny module (named explicitly by the spec) so a future
+    per-broker schedule has an obvious place to live.
+  - `execution.py`: combines slippage + commission into one
+    `ExecutionResult` for both opening (`execute_entry`) and closing
+    (`execute_exit`, via `flip_legs`) orders, always producing realistic
+    and theoretical figures together.
+  - `expiration.py`: `days_to_expiration`, `is_expiring_today`,
+    `management_dte_reached`, `profit_target_reached` — the
+    DTE-management and profit-target trigger rules every open position
+    is checked against on every simulated day.
+  - `assignment.py`: `intrinsic_value`, `settle_leg`, `settle_position` —
+    real cash- and share-settlement by intrinsic value at expiration,
+    covering all three strategies (CSP assignment buys shares, covered
+    call assignment sells shares, PCS settles both legs independently so
+    the between-strikes partial-loss case and the below-both-strikes
+    max-loss case are genuinely different settlements, not the same
+    formula scaled).
+  - `engine.py`: `run_backtest` — the day-by-day loop. For every open
+    position on every simulated day: settle if expiring today, else
+    check profit-target/management-DTE and close via a real market order
+    if triggered (with `NoFillError` keeping a position open rather than
+    forcing a phantom close); then open any new entries scheduled for
+    that day. Every single quote lookup — for open positions and new
+    entries alike — is piped through `assert_no_lookahead_options` before
+    use. `BacktestConfig`, `evaluate_target`/`TargetCategory` (grades
+    *realistic*, never theoretical, CAGR against the 12–15% research
+    target — "exceeds"/"meets"/"approaches"/"falls_below"), and
+    `build_backtest_result` (assembles both metric sets, slippage
+    cost/year, slippage as % of theoretical gross profit, turnover/year,
+    average entry bid/ask spread, and an optional SPY/risk-free
+    benchmark comparison) all live here too.
+  - `metrics.py`: every metric the spec names by exact formula —
+    CAGR, annual volatility, Sharpe, Sortino, max drawdown, Calmar, win
+    rate, average winner/loser, profit factor, expectancy, historical
+    VaR/CVaR (95%), worst month, worst year, longest drawdown (duration,
+    distinct from max drawdown's depth), capital utilization (time-
+    weighted collateral deployed), trade count, average holding period —
+    each one a standard textbook definition, hand-checked against a
+    small exact synthetic example in tests rather than merely trusted
+    because the code runs (the same "independently verifiable" standard
+    `src.quant` set).
+  - `benchmark.py`: `spy_total_return` (reuses `HistoricalBar` +
+    `assert_no_lookahead`, never a second bar type or a second
+    look-ahead check), `risk_free_return` (simple constant-rate accrual —
+    a deliberately simple Treasury stand-in, a real yield curve is future
+    work), `compare_to_benchmarks`.
+  - `walk_forward.py`: `generate_walk_forward_splits` (rolling
+    TRAINING/VALIDATION/OUT-OF-SAMPLE windows, matching the spec's own
+    example — train 2015-2019, validate 2020-2021, out-of-sample 2022,
+    then roll forward by `out_of_sample_years` by default) and
+    `run_walk_forward` (runs one already-fixed `BacktestConfig`
+    independently across all three windows, each from a fresh
+    `PortfolioState`). "Never optimize using the out-of-sample period" is
+    enforced structurally, not by convention: `run_walk_forward`'s
+    signature has no optimizer/objective-function/parameter-search
+    argument anywhere, so there is nothing through which a later
+    window's result could be fed back into an earlier decision even if a
+    future caller wanted to — proven by a test that walks the function's
+    own signature for anything optimizer-shaped.
+- **Bias prevention, documented one mechanism per named bias rather than
+  one generic disclaimer** (now in `engine.py`'s own module docstring):
+  look-ahead bias/data leakage is enforced by `assert_no_lookahead_options`
+  (every quote lookup) and `assert_no_lookahead` (the benchmark);
+  survivorship bias is "where possible" by design — a data-provider
+  property this engine can't enforce on its own, same open vendor
+  question `ARCHITECTURE.md §12` already carries; future earnings
+  knowledge is out of this module's authority since it consumes but
+  never generates `EntrySignal`s (a future Strategy Screener's job,
+  which already has `src.data.earnings.is_within_earnings_window`
+  available to it); future volatility knowledge is prevented because
+  `HistoricalOptionQuote.iv` is just another field on the same object
+  `assert_no_lookahead_options` already gates.
+- **A real bug found and fixed before any test caught it**: the
+  profit-target check originally called `mark_to_market` on a position's
+  *original* (unflipped) legs — e.g. still `sell` for a short put —
+  instead of the *closing* order's legs (`buy` to close). Under plain
+  `FillModel.MID` this happened to produce the same number (mid has no
+  buy/sell asymmetry), which is exactly why it went uncaught by an early
+  manual smoke test using the zero-friction default. Under
+  `MID_WITH_SLIPPAGE`/`LIQUIDITY_ADJUSTED`, though, `compute_fill`
+  always subtracts slippage from whatever `net_price` it computes —
+  pricing the wrong (unflipped) direction meant slippage was being
+  applied as if *opening* a fresh position, which *understates* the true
+  cost to close and would have triggered profit-target exits too early,
+  silently flattering realistic returns in exactly the way "never
+  automatically assume midpoint fills" exists to prevent. Fixed by
+  valuing `flip_legs(position.legs)` (the actual closing order) and
+  negating the sign, with a regression test
+  (`test_slippage.py::test_slippage_model_moves_price_against_whichever_direction_is_traded`
+  and `test_engine.py::test_slippage_model_makes_the_realistic_close_strictly_worse_than_mid`)
+  that fails immediately if the sign regresses.
+- **Full repo test suite: 1226 passing, 4 skipped** (same pre-existing
+  IBKR skips). New: 122 `tests/unit/backtest/` tests across 10 files —
+  `HistoricalOptionQuote` validation and look-ahead enforcement,
+  commission formulas, realistic-vs-theoretical fill/mark-to-market
+  behavior including the slippage-direction regression, entry/exit
+  execution and put-credit-spread payoff (round-trip zero-sum at
+  unchanged prices, full max profit when a spread decays to worthless),
+  DTE/profit-target trigger boundaries, expiration settlement across all
+  three strategies (OTM worthless, CSP assignment, covered-call
+  assignment, PCS partial-loss-vs-max-loss), the day-by-day engine loop
+  (look-ahead-bias enforcement, contract-multiplier scaling, cash
+  accounting reconciliation on close/expiration/assignment/DTE-management,
+  target-category boundaries, slippage/commission isolation in
+  `build_backtest_result`, zero-trade edge cases with no division by
+  zero), metrics (CAGR, max/longest drawdown, Calmar, Sharpe/Sortino
+  zero-variance and zero-downside edge cases, worst month/year, VaR/CVaR
+  on hand-computed synthetic return series, trade statistics, capital
+  utilization), benchmark comparison (SPY return, risk-free accrual,
+  look-ahead enforcement, excess-return wiring), and walk-forward
+  splitting/execution (the spec's own train/validate/out-of-sample
+  example, window independence, the no-optimizer-hook structural
+  guarantee).
+
+## Open decisions carried forward (updated a third time)
 
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker) —
       now also blocks fully closing the `src.risk.correlation` /
-      `src.risk.stress` documented gaps above
+      `src.risk.stress` documented gaps above, *and* is the same open
+      question `src.backtest.simulator.HistoricalOptionChainProvider`
+      (Step 13) fills the shape of but deliberately doesn't decide
+- [ ] **New from Step 13**: no Strategy Screener exists yet to generate
+      real `EntrySignal`s — `src.backtest` executes and manages signals
+      realistically but has never generated one itself; every backtest
+      run so far is hand-constructed fixtures, the same gap Step 12
+      flagged for `PipelineRequest`
+- [ ] **New from Step 13**: `src.backtest.engine.run_backtest` has no
+      clock-driven caller either — like `PaperBroker.settle_expiration`
+      (Step 12), it's a function a caller must invoke explicitly with a
+      pre-built `trading_days` list, not yet wired into anything that
+      runs a real historical range end to end against a real vendor
+- [ ] **New from Step 13**: survivorship bias is only preventable "where
+      possible" — it depends entirely on whichever real historical
+      vendor eventually fills `HistoricalOptionChainProvider`/
+      `HistoricalDataProvider` correctly including delisted/failed
+      tickers; this package has no way to detect or correct for a
+      vendor that silently omits them
 - [ ] Schwab paper-trading / sandbox capability (Phase 4 blocker)
 - [ ] Sector/classification data source for correlation/concentration checks
 - [ ] Final ~50-name equity universe list + liquidity criteria
@@ -1427,30 +1592,39 @@ don't rewrite history.
 
 ## Next up
 
-- Ten standalone pieces now exist, and — for the first time — one of
-  them actually *connects* the rest: `src/orchestration/` runs the full
-  required pipeline (Quant Engine, Devil's Advocate, Portfolio Manager,
-  Python Risk Engine, Order Validator, `PaperBroker`, Portfolio,
-  Database) back-to-back against a single shared scenario, in the exact
-  ordering Step 11's independence requirement and Step 12's flow diagram
-  both demand, with a missing stage rejecting the order outright rather
-  than silently degrading. `PaperBroker` gives this platform its first
-  broker that can actually be run in a loop without a real account
-  behind it — simulating fills, partial fills, collateral, expiration,
-  assignment, and exercise well enough to paper-trade the platform's
-  three strategies end to end. What's still missing to make this a real,
-  continuously-running system rather than a single `run_order_pipeline`
-  call a test drives by hand: Phase 0 foundations (a real database in
-  place of every `InMemory*` placeholder accumulated across Steps 8-12,
-  config, CI), a scheduler to drive market data updates and expiration
-  settlement on a clock instead of by explicit test calls, something
-  that persists and re-loads `Portfolio` between pipeline runs instead
-  of each call starting fresh, and a real caller that builds
-  `PipelineRequest` from live market data instead of hand-constructed
-  fixtures. Also still open: the `app/` prototype disposition, the
-  accumulating layout/config-duplication/untested-real-adapter questions
-  above, the four Step 9 gaps, the three Step 10 gaps, the two remaining
-  Step 11 gaps, and the five new Step 12 gaps (in-memory database,
-  Portfolio not persisted between runs, no expiration scheduler, the two
-  Risk Engine calls not sharing one atomic market snapshot, no automated
-  subsequent-price capture) above.
+- Eleven standalone pieces now exist. `src/orchestration/` connects ten
+  of them into a live paper-trading pipeline (Quant Engine, Devil's
+  Advocate, Portfolio Manager, Python Risk Engine, Order Validator,
+  `PaperBroker`, Portfolio, Database); `src/backtest/` is the eleventh —
+  a fully separate, day-by-day historical simulator sharing `PaperBroker`'s
+  own fill-price math (never a second implementation of it) rather than
+  plugging into the live pipeline directly, since a backtest replays
+  thousands of historical days while the pipeline drives one order at a
+  time. Every backtest reports *both* a theoretical-midpoint and a
+  realistic-execution result side by side — CAGR, drawdown, Sharpe/
+  Sortino, VaR/CVaR, and an honest exceeds/meets/approaches/falls_below
+  verdict against the platform's 12–15% research target graded only on
+  the realistic track — plus walk-forward train/validate/out-of-sample
+  splitting with no mechanism by which a later window could ever
+  influence an earlier one. What's still missing to make either half of
+  this platform a real, continuously-running system rather than a
+  function a test or a fixture drives by hand: Phase 0 foundations (a
+  real database in place of every `InMemory*` placeholder accumulated
+  across Steps 8-12, config, CI), a scheduler to drive market data
+  updates and expiration settlement on a clock instead of by explicit
+  calls, something that persists and re-loads `Portfolio` between
+  pipeline runs instead of each call starting fresh, a real caller that
+  builds `PipelineRequest` from live market data instead of
+  hand-constructed fixtures, a real historical options-data vendor
+  behind `HistoricalOptionChainProvider`, and a Strategy Screener to
+  generate real `EntrySignal`s instead of hand-built test fixtures for
+  either the pipeline or the backtest engine to consume. Also still
+  open: the `app/` prototype disposition, the accumulating
+  layout/config-duplication/untested-real-adapter questions above, the
+  four Step 9 gaps, the three Step 10 gaps, the two remaining Step 11
+  gaps, the five Step 12 gaps (in-memory database, Portfolio not
+  persisted between runs, no expiration scheduler, the two Risk Engine
+  calls not sharing one atomic market snapshot, no automated
+  subsequent-price capture), and the three new Step 13 gaps (no Strategy
+  Screener, no clock-driven backtest caller, survivorship bias only
+  preventable "where possible" pending a real vendor) above.
