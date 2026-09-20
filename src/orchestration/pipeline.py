@@ -29,10 +29,13 @@ computed artifact.
 """
 from __future__ import annotations
 
+import json
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
 from src.brokers.base import Order, PlaceOrderRequest
@@ -80,7 +83,9 @@ class DatabaseRecord:
 
 class Database:
     """Minimal append-only interface — a real implementation is a Phase
-    0 item; `InMemoryDatabase` below is the only implementation today."""
+    0 item; `InMemoryDatabase` is process-local only, `SqliteDatabase`
+    below is a genuinely durable interim implementation of this same
+    interface."""
 
     def save(self, record: DatabaseRecord) -> None:
         raise NotImplementedError
@@ -90,6 +95,9 @@ class Database:
 
 
 class InMemoryDatabase(Database):
+    """Process-local only — lost on restart. Use `SqliteDatabase`
+    wherever a pipeline-run record must survive a crash."""
+
     def __init__(self) -> None:
         self._records: list[DatabaseRecord] = []
 
@@ -98,6 +106,63 @@ class InMemoryDatabase(Database):
 
     def all(self) -> list[DatabaseRecord]:
         return list(self._records)
+
+
+def _record_to_json(record: DatabaseRecord) -> str:
+    return json.dumps({
+        "record_id": record.record_id,
+        "proposal_id": record.proposal_id,
+        "status": record.status.value,
+        "order": record.order.model_dump(mode="json") if record.order is not None else None,
+        "fidelity_ticket": record.fidelity_ticket.model_dump(mode="json") if record.fidelity_ticket is not None else None,
+        "created_at": record.created_at.isoformat(),
+    })
+
+
+def _record_from_json(raw: str) -> DatabaseRecord:
+    data = json.loads(raw)
+    return DatabaseRecord(
+        record_id=data["record_id"],
+        proposal_id=data["proposal_id"],
+        status=PipelineStatus(data["status"]),
+        order=Order.model_validate(data["order"]) if data["order"] is not None else None,
+        fidelity_ticket=FidelityTradeTicket.model_validate(data["fidelity_ticket"]) if data["fidelity_ticket"] is not None else None,
+        created_at=datetime.fromisoformat(data["created_at"]),
+    )
+
+
+class SqliteDatabase(Database):
+    """SY-002 fix: a durable `Database` backed by a single sqlite file,
+    the pipeline-audit-trail counterpart to `SqliteIdempotencyStore`. A
+    record saved here is still readable by a freshly constructed
+    instance pointed at the same file after the process that wrote it
+    has crashed and restarted — closing the "all idempotency/database/
+    audit state is in-memory only" gap for this piece of state. Each
+    operation opens and closes its own connection, so the store itself
+    holds no in-process state a crash could lose."""
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._path = str(db_path)
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS pipeline_records ("
+                "record_id TEXT PRIMARY KEY, record_json TEXT NOT NULL)"
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self._path)
+
+    def save(self, record: DatabaseRecord) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO pipeline_records (record_id, record_json) VALUES (?, ?)",
+                (record.record_id, _record_to_json(record)),
+            )
+
+    def all(self) -> list[DatabaseRecord]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT record_json FROM pipeline_records ORDER BY rowid").fetchall()
+        return [_record_from_json(row[0]) for row in rows]
 
 
 def default_quant_stage(
@@ -157,7 +222,20 @@ def default_portfolio_update_stage(portfolio: Portfolio, proposal: TradeProposal
     """The pipeline's Portfolio stage: folds a filled order into a new
     `Portfolio` snapshot (frozen, so this returns a new instance rather
     than mutating). Uses only what the fill itself proves — the order's
-    own legs and fill quantity — never the originally requested size."""
+    own legs and fill quantity — never the originally requested size.
+
+    SY-005 fix: `cash` is now updated alongside `positions`. This
+    `Portfolio.cash` field means "NAV not currently committed as
+    capital to an open position" (`capital_deployed_pct` is defined as
+    exactly `(nav - cash) / nav`, and `total_capital_at_risk` sums each
+    position's own `capital_at_risk`) — so opening a new position
+    reduces it by that position's `capital_at_risk`, the same quantity
+    already being recorded on `new_position` below, keeping `cash` and
+    the aggregate `capital_at_risk` across positions self-consistent.
+    Before this fix, `cash` never changed after a fill: every cash-
+    dependent Risk Engine check (buying power, minimum cash reserve,
+    capital-deployed cap) was evaluated against a number that never
+    reflected any prior fill in this same portfolio's history."""
     legs = [
         PortfolioPositionLeg(
             right=leg.right.value if leg.right is not None else "C",
@@ -180,7 +258,22 @@ def default_portfolio_update_stage(portfolio: Portfolio, proposal: TradeProposal
         max_loss=qa.max_loss * (order.filled_quantity / proposal.contracts_requested),
         opened_at=order.timestamp,
     )
-    return portfolio.model_copy(update={"positions": [*portfolio.positions, new_position]})
+    new_cash = portfolio.cash - new_position.capital_at_risk
+    if new_cash < 0:
+        # `model_copy` does not re-run Portfolio's own validators
+        # (Field(ge=0) on `cash`), so this invariant is checked
+        # explicitly rather than silently producing an invalid
+        # Portfolio -- fails closed, and (paired with the SY-003 fix)
+        # is caught and recorded as a distinct portfolio_update failure
+        # rather than corrupting downstream state.
+        raise ValueError(
+            f"portfolio update would drive cash negative ({new_cash:.2f}): "
+            f"capital_at_risk={new_position.capital_at_risk:.2f} exceeds available cash={portfolio.cash:.2f}"
+        )
+    return portfolio.model_copy(update={
+        "positions": [*portfolio.positions, new_position],
+        "cash": new_cash,
+    })
 
 
 @dataclass(frozen=True)
@@ -440,10 +533,36 @@ async def run_order_pipeline(request: PipelineRequest, stages: PipelineStages) -
             request,
         )
 
-    # 7. Portfolio
-    updated_portfolio = stages.portfolio_update_stage(request.portfolio, request.proposal, qa, order)
+    # 7. Portfolio. SY-003 fix: this stage used to be the one stage in
+    # the pipeline not wrapped in try/except -- an exception here
+    # propagated straight out of run_order_pipeline uncaught, even
+    # though the fill had *already happened* (cash debited, Fill
+    # records appended on stages.paper_broker). Worse, since nothing
+    # ever reached _record() in that case, the database gained no
+    # record of a real fill at all, and a caller retrying the identical
+    # proposal would short-circuit on PaperBroker's own idempotency
+    # check and return the already-filled order without ever re-running
+    # this (still-failing) update logic -- a permanent gap. Catching it
+    # here, like every other stage, guarantees _record() always runs and
+    # the real fill is never silently lost, while still naming the
+    # distinct "filled but portfolio update failed" outcome so it's
+    # never confused with a normal, fully-updated fill.
+    fill_status = PipelineStatus.FILLED if order.status.value == "filled" else PipelineStatus.PARTIALLY_FILLED
+    try:
+        updated_portfolio = stages.portfolio_update_stage(request.portfolio, request.proposal, qa, order)
+    except Exception as exc:  # noqa: BLE001
+        return _record(
+            stages,
+            PipelineOutcome(
+                fill_status, "portfolio_update",
+                f"order {order.status.value} ({order.filled_quantity} contract(s)) but portfolio update failed: {exc}",
+                quantitative_analysis=qa, devils_advocate_review=da_evaluation, portfolio_manager_decision=pm_evaluation,
+                risk_decision=risk_result, order=order, fidelity_ticket=fidelity_ticket,
+            ),
+            request,
+        )
 
-    status = PipelineStatus.FILLED if order.status.value == "filled" else PipelineStatus.PARTIALLY_FILLED
+    status = fill_status
     outcome = PipelineOutcome(
         status, None, f"{status.value}: {order.filled_quantity} contract(s)",
         quantitative_analysis=qa, devils_advocate_review=da_evaluation, portfolio_manager_decision=pm_evaluation,

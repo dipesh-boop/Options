@@ -74,8 +74,11 @@ class TestHypotheticalOutcomeFromSettlement:
         proposal = _csp_proposal()
         entry_quotes = [_quote(95.0, 1.95, 2.05)]
         outcome = hypothetical_outcome_from_settlement(proposal, entry_quotes, 80.0, rejected_stage="risk_engine", fill_config=ZERO_FRICTION, commission_schedule=ZERO_COMMISSION)
-        # credit 200 collected, then pay 95*100=9500 to take the shares
-        assert outcome.hypothetical_pnl == pytest.approx(200.0 - 9500.0)
+        # credit 200 collected; a rejected proposal has no pre-existing
+        # shares, so the newly-acquired stock is marked immediately at
+        # settlement -- the loss is intrinsic value only (95 - 80 =
+        # 15/share), not the full 95*100 strike notional.
+        assert outcome.hypothetical_pnl == pytest.approx(200.0 - 15.0 * 100.0)
         assert outcome.exit_reason == "assignment"
 
 

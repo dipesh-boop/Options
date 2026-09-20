@@ -5,9 +5,16 @@
 **Posture of this document:** this audit was performed as if by an independent
 team hired to find every way this options-trading research platform could
 lose money incorrectly, calculate risk incorrectly, corrupt accounting,
-hallucinate data, bypass safeguards, or execute unintended trades. **No
-findings below have been fixed.** This document is the audit only — a
-follow-up step will decide what to remediate and in what order.
+hallucinate data, bypass safeguards, or execute unintended trades.
+
+**Step 17B remediation update:** every CRITICAL and HIGH finding (10 total —
+OP-001, SY-001, SY-002, SY-004, MD-001, MD-003, SY-003, SY-005, SY-006,
+TS-004) has since been fixed, each with a regression test proving the
+vulnerability is closed, and is marked **Status: FIXED (Step 17B)** in its
+own section below with a pointer to the fix and its test. No existing test
+was weakened to reach a passing state; the full suite (1531 tests) passes.
+All MEDIUM/LOW findings remain **OPEN** and unremediated — this document
+still doubles as the audit record for those.
 
 **Method:** four parallel, independent, read-only investigations (market-data
 failures; options mechanics; system/orchestration failures; LLM boundary +
@@ -32,42 +39,42 @@ platform were ever connected to real capital without remediation first.
 
 ## Summary table
 
-| ID | Severity | Section | One-line summary |
-|----|----------|---------|-------------------|
-| OP-001 | CRITICAL | Options | Backtest assignment/exercise drops the share-value side of settlement, corrupting P&L by the full strike notional |
-| SY-001 | CRITICAL | System | Screener-generated `proposal_id`s are unique only within one scan call; reused across scans they collide and silently swallow real new trades |
-| SY-002 | CRITICAL | System | All idempotency/database/audit state is in-memory only; a crash-then-retry after a real fill cannot be recognized and will double-submit |
-| SY-004 | CRITICAL | System | Sequential candidates in one `/morning-scan` run all check against the same pre-scan portfolio snapshot; risk limits are not enforced cumulatively within a batch |
-| MD-001 | HIGH | Market-data | The Risk Engine's freshness gate is bypassed by simply omitting the `now` parameter (falls back to the proposal's own self-reported time, not the wall clock) |
-| MD-003 | HIGH | Market-data | Contract-matching never verifies the underlying ticker, only (expiration, strike, right) |
-| SY-003 | HIGH | System | An exception in the Portfolio-update pipeline stage is uncaught; a real fill can permanently never reach the database |
-| SY-005 | HIGH | System | `Portfolio.cash` is never updated after a fill — only positions are appended |
-| SY-006 | HIGH | System | Reconciliation discrepancies are only ever reported, never used to correct state or block a duplicate recommendation |
-| TS-004 | HIGH | Trade State | A CLOSE/ROLL proposal the Risk Engine approves has no order artifact built for it; the Order Validator crashes with an uncaught `AttributeError` |
-| MD-002 | MEDIUM | Market-data | Quant Engine (pipeline stage 1) skips the ticker-match and liquidity checks the Risk Engine performs on the same data |
-| MD-004 | MEDIUM | Market-data | `OptionChain` has no validator enforcing every contract's `underlying` matches the chain's own symbol |
-| MD-005 | MEDIUM | Market-data | `UnderlyingQuote` has no bid≤ask validator (unlike `OptionContract`/`HistoricalOptionQuote`) |
-| MD-006 | MEDIUM | Market-data | A zero-contract chain fetch is reported "healthy" by feed-health verification |
-| OP-002 | MEDIUM | Options | `PaperBroker` never re-marks an assigned equity position to the live underlying price |
-| OP-003 | MEDIUM | Options | Multi-leg order quantity has no cross-leg equality validator; only leg 0's quantity is consulted |
-| OP-005 | MEDIUM | Options | "Dividend risk" / "early exercise" are mandatory checklist categories with zero grounding data anywhere |
-| SY-007 | MEDIUM | System | The Order Validator's own duplicate-id check is dead code — never supplied a non-empty set by its only caller |
-| SY-008 | MEDIUM | System | Fidelity execution time-of-day bucketing silently assumes a timezone nothing enforces |
-| LM-001 | MEDIUM | LLM | Devil's Advocate's `why_not_thesis` text is re-embedded, unsanitized, into the Portfolio Manager's next LLM call |
-| LM-002 | MEDIUM | LLM | Automated "no numeric field" tests cover only 3 of 15 non-`TradeProposal` LLM schemas |
-| QF-001 | MEDIUM | Quantitative | Portfolio correlation check is silently skipped (not fail-closed) whenever `price_history` is empty |
-| MD-007 | LOW | Market-data | Strike/expiration matching fails closed (over-rejects) rather than mismatching; corporate-action sub-cent strikes could trigger it |
-| MD-008 | LOW | Market-data | Corporate actions/stock splits entirely unhandled; contract multiplier hardcoded as 100 in 8+ places |
-| OP-004 | LOW | Options | Put-credit-spread collateral netting is scoped to a single order (fails safe, over-conservative) |
-| OP-006 | LOW | Options | Exact-at-the-money settlement deterministically resolves to "not assigned"; pin risk is unmodeled and undocumented |
-| OP-007 | LOW | Options | The 100x contract multiplier is redeclared independently in 8+ modules |
-| SY-009 | LOW | System | No market-holiday calendar exists anywhere; DTE/trading-day math is raw calendar days |
-| SY-010 | LOW | System | No locking anywhere; current race-freedom is incidental to an all-synchronous implementation, not a designed guarantee |
-| LM-003 | LOW | LLM | `profit_target`/`management_dte` reach the human-facing Fidelity ticket unchecked beyond schema bounds (currently a dormant path) |
-| LM-004 | LOW | LLM | `PortfolioManagerReview` is unused, untested dead code shadowing `PortfolioDecision` |
-| FS-005 | LOW | Fidelity | `FidelityTradeTicket` can in principle be constructed directly at a terminal FILLED status, bypassing the lifecycle functions (no live exploit path) |
-| QF-002 | LOW | Quantitative | Survivorship bias in backtesting is honestly documented as unenforced ("where possible"), not actually prevented |
-| QF-003 | LOW | Quantitative | `TRADING_DAYS_PER_YEAR` is a dead constant in `src/backtest/metrics.py` that could mislead a future maintainer |
+| ID | Severity | Status | Section | One-line summary |
+|----|----------|--------|---------|-------------------|
+| OP-001 | CRITICAL | **FIXED** | Options | Backtest assignment/exercise drops the share-value side of settlement, corrupting P&L by the full strike notional |
+| SY-001 | CRITICAL | **FIXED** | System | Screener-generated `proposal_id`s are unique only within one scan call; reused across scans they collide and silently swallow real new trades |
+| SY-002 | CRITICAL | **FIXED** | System | All idempotency/database/audit state is in-memory only; a crash-then-retry after a real fill cannot be recognized and will double-submit |
+| SY-004 | CRITICAL | **FIXED** | System | Sequential candidates in one `/morning-scan` run all check against the same pre-scan portfolio snapshot; risk limits are not enforced cumulatively within a batch |
+| MD-001 | HIGH | **FIXED** | Market-data | The Risk Engine's freshness gate is bypassed by simply omitting the `now` parameter (falls back to the proposal's own self-reported time, not the wall clock) |
+| MD-003 | HIGH | **FIXED** | Market-data | Contract-matching never verifies the underlying ticker, only (expiration, strike, right) |
+| SY-003 | HIGH | **FIXED** | System | An exception in the Portfolio-update pipeline stage is uncaught; a real fill can permanently never reach the database |
+| SY-005 | HIGH | **FIXED** | System | `Portfolio.cash` is never updated after a fill — only positions are appended |
+| SY-006 | HIGH | **FIXED** | System | Reconciliation discrepancies are only ever reported, never used to correct state or block a duplicate recommendation |
+| TS-004 | HIGH | **FIXED** | Trade State | A CLOSE/ROLL proposal the Risk Engine approves has no order artifact built for it; the Order Validator crashes with an uncaught `AttributeError` |
+| MD-002 | MEDIUM | OPEN | Market-data | Quant Engine (pipeline stage 1) skips the ticker-match and liquidity checks the Risk Engine performs on the same data |
+| MD-004 | MEDIUM | OPEN | Market-data | `OptionChain` has no validator enforcing every contract's `underlying` matches the chain's own symbol |
+| MD-005 | MEDIUM | OPEN | Market-data | `UnderlyingQuote` has no bid≤ask validator (unlike `OptionContract`/`HistoricalOptionQuote`) |
+| MD-006 | MEDIUM | OPEN | Market-data | A zero-contract chain fetch is reported "healthy" by feed-health verification |
+| OP-002 | MEDIUM | OPEN | Options | `PaperBroker` never re-marks an assigned equity position to the live underlying price |
+| OP-003 | MEDIUM | OPEN | Options | Multi-leg order quantity has no cross-leg equality validator; only leg 0's quantity is consulted |
+| OP-005 | MEDIUM | OPEN | Options | "Dividend risk" / "early exercise" are mandatory checklist categories with zero grounding data anywhere |
+| SY-007 | MEDIUM | OPEN | System | The Order Validator's own duplicate-id check is dead code — never supplied a non-empty set by its only caller |
+| SY-008 | MEDIUM | OPEN | System | Fidelity execution time-of-day bucketing silently assumes a timezone nothing enforces |
+| LM-001 | MEDIUM | OPEN | LLM | Devil's Advocate's `why_not_thesis` text is re-embedded, unsanitized, into the Portfolio Manager's next LLM call |
+| LM-002 | MEDIUM | OPEN | LLM | Automated "no numeric field" tests cover only 3 of 15 non-`TradeProposal` LLM schemas |
+| QF-001 | MEDIUM | OPEN | Quantitative | Portfolio correlation check is silently skipped (not fail-closed) whenever `price_history` is empty |
+| MD-007 | LOW | OPEN | Market-data | Strike/expiration matching fails closed (over-rejects) rather than mismatching; corporate-action sub-cent strikes could trigger it |
+| MD-008 | LOW | OPEN | Market-data | Corporate actions/stock splits entirely unhandled; contract multiplier hardcoded as 100 in 8+ places |
+| OP-004 | LOW | OPEN | Options | Put-credit-spread collateral netting is scoped to a single order (fails safe, over-conservative) |
+| OP-006 | LOW | OPEN | Options | Exact-at-the-money settlement deterministically resolves to "not assigned"; pin risk is unmodeled and undocumented |
+| OP-007 | LOW | OPEN | Options | The 100x contract multiplier is redeclared independently in 8+ modules |
+| SY-009 | LOW | OPEN | System | No market-holiday calendar exists anywhere; DTE/trading-day math is raw calendar days |
+| SY-010 | LOW | OPEN | System | No locking anywhere; current race-freedom is incidental to an all-synchronous implementation, not a designed guarantee |
+| LM-003 | LOW | OPEN | LLM | `profit_target`/`management_dte` reach the human-facing Fidelity ticket unchecked beyond schema bounds (currently a dormant path) |
+| LM-004 | LOW | OPEN | LLM | `PortfolioManagerReview` is unused, untested dead code shadowing `PortfolioDecision` |
+| FS-005 | LOW | OPEN | Fidelity | `FidelityTradeTicket` can in principle be constructed directly at a terminal FILLED status, bypassing the lifecycle functions (no live exploit path) |
+| QF-002 | LOW | OPEN | Quantitative | Survivorship bias in backtesting is honestly documented as unenforced ("where possible"), not actually prevented |
+| QF-003 | LOW | OPEN | Quantitative | `TRADING_DAYS_PER_YEAR` is a dead constant in `src/backtest/metrics.py` that could mislead a future maintainer |
 
 Also see **"Verified safe / no finding"** at the end of each section and the
 consolidated list at the very end — a large majority of the codebase's own
@@ -122,6 +129,7 @@ mechanics.
 - **Possible consequence:** silent approval of a trade against arbitrarily stale market data — in the exact function whose entire job is to prevent that. A proposal built hours or days ago and only evaluated later (a queued review, a replay, a retried call) would pass the freshness gate every time.
 - **Reproduction:** call `evaluate_trade_proposal(proposal, portfolio, qa, market_data, broker_caps, limits=limits)` without `now` — this is literally the calling convention the repository's own positive-control tests use (`tests/unit/risk/test_engine_positive_controls.py`, all APPROVE-path tests omit `now`). The one production call site (`src.orchestration.pipeline.run_order_pipeline`) is safe only because `PipelineRequest.now` is a required field — but `evaluate_trade_proposal` is a public module-level function, and any other caller (a manual review tool, a notebook, a future API endpoint, a retry path) that uses the natural default-parameter calling convention defeats the check with zero error or warning.
 - **Recommended remediation (not applied):** make `now` a required keyword argument with no default (forcing every caller to supply the real wall clock explicitly), or have the function itself call a real clock (e.g. `datetime.now(timezone.utc)`) when `now` is not supplied, rather than falling back to data the proposal itself controls.
+- **Status: FIXED (Step 17B).** Chose the first option: `now: datetime` is now a required keyword-only argument on both `evaluate_trade_proposal` and `_evaluate`, with no default and no fallback of any kind — `as_of = now` directly. A silent `datetime.now()` fallback was deliberately rejected as the fix, since it would make the function's behavior depend on the real wall clock even in tests that never intended that (a latent flakiness risk as this codebase's fixtures use fixed future dates). All test call sites that previously omitted `now` (relying on the vulnerable fallback) now supply it explicitly. Regression tests: `tests/unit/risk/test_engine_bypass_attempts.py::TestFreshnessGateCannotBeBypassedRegressionMD001` (proves `now` is mandatory, and that real elapsed time is caught even when the proposal's own timestamp is unchanged — the exact exploit shape).
 
 ### MD-002 — Quant Engine stage skips checks the Risk Engine performs on the same data
 - **Severity:** MEDIUM
@@ -138,6 +146,7 @@ mechanics.
 - **Possible consequence:** a caller bug that supplies a chain/quote set for the wrong ticker (e.g. `src/workflows/morning_scan.py`'s `fresh_chains` dict, keyed by ticker string but never cross-validated against `chain.underlying.symbol`) combined with a coincidentally-matching strike/expiration/right (very plausible for common round strikes and standard monthly expirations across large-caps) would silently price a trade — or a backtest fill — from a completely different underlying's market data, with no error at all.
 - **Reproduction:** call `resolve_leg_contracts(proposal_for_TICKER_A, market_data_for_TICKER_B, ...)` where TICKER_B's chain happens to have a contract at the same (expiration, strike, right) as one of TICKER_A's proposed legs — it resolves successfully to TICKER_B's contract.
 - **Recommended remediation (not applied):** add an explicit `underlying`/ticker equality assertion directly inside `_find_contract` and `_match_quotes_for_legs` themselves, so the guarantee doesn't depend on every caller having already checked it upstream.
+- **Status: FIXED (Step 17B).** Both functions now take an explicit `underlying` parameter and match on `(underlying, expiration, strike, right)`, not just `(expiration, strike, right)` — `src.risk.trade_risk._find_contract`/`resolve_leg_contracts` (passes `proposal.ticker`) and `src.backtest.engine._match_quotes_for_legs` (passes `position.ticker`/`entry.ticker` at each of its three call sites). Regression tests: `tests/unit/risk/test_trade_risk_contract_matching.py::TestResolveLegContractsChecksUnderlying` and `tests/unit/backtest/test_engine.py::TestMatchQuotesForLegsChecksUnderlyingRegressionMD003` (both prove a wrong-ticker contract/quote at a coincidentally matching strike/expiration/right is never matched).
 
 ### MD-004 — `OptionChain` has no contract/underlying consistency validator
 - **Severity:** MEDIUM
@@ -190,6 +199,7 @@ mechanics.
 - **Possible consequence:** any backtest of this platform's core strategies that experiences even one ITM assignment shows a P&L error on the order of the *full strike notional* (strike × 100 × contracts) — dwarfing premium, slippage, and commission effects the rest of the engine carefully tracks. Since `evaluate_target`/`build_backtest_result` grade the platform's 12-15% CAGR research target directly off these numbers, **the target evaluation is meaningless for any strategy/period that experiences an assignment** — which, for cash-secured puts and covered calls, is a routine, by-design outcome, not an edge case.
 - **Reproduction:** this is codified as a currently-*passing* test that asserts the wrong number as correct — `tests/unit/backtest/test_engine.py::test_short_put_assigned_itm_at_expiration_reduces_pnl_by_intrinsic_value` (a cash-secured put, strike 95, sold for $200 credit, settling at $90 — only $500 ITM) asserts `realistic_pnl == -9,300.0`. The real economics: assignment costs $9,500 cash but delivers 100 shares worth ~$9,000 at settlement, for a true mark-to-market loss of ~$300 (premium $200 minus intrinsic $500) — the bug overstates the loss by ~$9,000, exactly the discarded share value. The mirrored covered-call test (`test_covered_call_assigned_itm_settles_via_the_short_call_leg_only`) asserts a $10,700 gain where the real gain is ~$700 — again overstated by exactly the discarded share value, and the test's own supplied `underlying_cost_basis=100.0` is never used in the P&L formula at all.
 - **Recommended remediation (not applied):** either (a) give `BacktestPosition`/`PortfolioState` a real equity/share ledger and apply `share_impact` to it, marking the resulting shares to market and accounting for their eventual disposal, or (b) if share tracking is out of scope for this engine, compute a settlement P&L using *intrinsic value only* (not the full strike notional) and document explicitly that the backtest engine does not model post-assignment share economics. Update the two named tests once the fix is decided (they currently assert the bug's output as correct and must not be treated as passing evidence of correctness in the meantime).
+- **Status: FIXED (Step 17B).** Implemented option (b): added `src.backtest.assignment.realized_settlement_pnl`, which converts `settle_position`'s per-leg output into an intrinsic-value-based economic impact — a covered position's own cost basis is used when a leg disposes of shares the caller already held (the only case `underlying_shares_held > 0` applies to), otherwise the new stock position is treated as immediately marked to the settlement price. `src.backtest.engine._settle_expired_position` and `src.workflows.rejected_trade_review.hypothetical_outcome_from_settlement` both now consume it instead of raw `cash_impact`. The two named tests (`test_short_put_assigned_itm_at_expiration_reduces_pnl_by_intrinsic_value`, `test_covered_call_assigned_itm_settles_via_the_short_call_leg_only`) and the rejected-trade-review equivalent were corrected to the true economics. Regression tests: `tests/unit/backtest/test_assignment.py::TestRealizedSettlementPnlRegressionOP001` (6 tests, including an explicit assertion that the old, wrong full-notional value is never produced).
 
 ### OP-002 — `PaperBroker` never re-marks an equity position to the live price after assignment
 - **Severity:** MEDIUM
@@ -250,6 +260,7 @@ mechanics.
 - **Possible consequence:** if a `PaperBroker`/idempotency-store instance is reused across more than one `/morning-scan` invocation (a very plausible shape for a persistent multi-day research/paper-trading loop — nothing in `PaperBroker.place_order` prevents this), the *same* ticker's first successful candidate on two different days both get `proposal_id = "scan-{TICKER}-1"`. The second day's `place_order` call finds an existing order under that id and returns the **first day's stale result** without validating collateral or attempting to fill the genuinely different trade — a real new order is silently dropped and misreported as an old fill.
 - **Reproduction:** run `generate_candidates` twice against a shared `PaperBroker` instance for the same ticker (different chain data each time, as would happen on two different days) — both first-successful candidates receive `proposal_id="scan-{TICKER}-1"`; the second `place_order` call returns the first call's `Order` object unchanged.
 - **Recommended remediation (not applied):** derive `proposal_id` from something that's actually unique per intended trade — e.g. include the scan date, the selected expiration, and the strike(s) in the id, not just an in-call counter.
+- **Status: FIXED (Step 17B).** `_next_id` in `src.workflows.candidate_generation.generate_candidates` now builds `proposal_id` from `{prefix}-{ticker}-{scan date}-{strategy tag}-{expiration}-{strike(s)}-{counter}`, unique per intended trade rather than per in-call counter alone. Regression tests: `tests/unit/workflows/test_candidate_generation.py::TestProposalIdsAreUniqueAcrossScanRunsRegressionSY001` (proves the same ticker/strike on two different scan dates no longer collides, and that the id encodes the scan date).
 
 ### SY-002 — Idempotency protection does not survive a process restart
 - **Severity:** CRITICAL
@@ -258,6 +269,7 @@ mechanics.
 - **Possible consequence:** if `PaperBroker.place_order` succeeds and fills, but the process crashes before the caller records/acts on the result, a retry (by a human or scheduler) in a new process finds no matching idempotency entry and places a brand-new order — indistinguishable from the first (lost) one. If a human interprets a regenerated Fidelity ticket as "the retry of the one that failed" and manually enters it while the original had also gone through, this duplicates a *real* order.
 - **Reproduction:** run `run_order_pipeline` to a successful fill, discard the process/objects (simulating a crash), reconstruct fresh `PaperBroker`/`InMemoryIdempotencyStore`/`InMemoryDatabase` instances, and re-run the identical `PipelineRequest` — it fills again as if new, with no duplicate detection.
 - **Recommended remediation (not applied):** this requires the persisted database and idempotency store already tracked as a standing Phase 0 item in `progress.md` — no in-memory-only workaround can close this gap; flagging here as a confirmed, present-tense risk rather than a hypothetical one.
+- **Status: FIXED (Step 17B).** Added genuinely durable (not in-memory) implementations of both interfaces named in this finding: `src.brokers.base.SqliteIdempotencyStore` and `src.orchestration.pipeline.SqliteDatabase`, each backed by a single sqlite file, each operation opening and closing its own connection so the store itself holds no in-process state a crash could lose. `InMemoryIdempotencyStore`/`InMemoryDatabase` remain the defaults (unchanged) for tests and short-lived runs; the durable classes are drop-in implementations of the same `IdempotencyStore`/`Database` interfaces for any caller that needs crash-survival. This does not replace the still-open, larger Phase 0 persisted-order-state-machine item, but it closes the specific "cannot survive a process restart" gap this finding named. Regression tests: `tests/unit/brokers/test_base.py::TestSqliteIdempotencyStoreRegressionSY002` and `tests/unit/brokers/test_paper_broker.py::TestIdempotencySurvivesRestartRegressionSY002` (a `PaperBroker` wired to a sqlite-backed store recognizes a retry after the Python objects are discarded and a fresh instance is constructed against the same file — and a contrasting test shows the in-memory default does not), plus `tests/unit/orchestration/test_pipeline.py::TestSqliteDatabaseSurvivesRestartRegressionSY002`.
 
 ### SY-003 — An exception in the Portfolio-update stage causes a permanent partial write
 - **Severity:** HIGH
@@ -266,6 +278,7 @@ mechanics.
 - **Possible consequence:** at the point of failure, `PaperBroker.place_order` has already completed — the order is filled, cash debited, `Fill` records appended — but the database permanently has no record of it. If the caller retries the same proposal, `PaperBroker.place_order` short-circuits on the existing idempotency entry and returns the already-filled order *without re-running the failing update logic*, meaning the database gap can be permanent, not just delayed. Nothing reconciles this afterward (`PaperBroker.reconcile()` trivially reports clean, since a paper broker's local state is definitionally "the broker's state").
 - **Reproduction:** supply a `portfolio_update_stage` callable that raises on any input, run the pipeline to a successful `PaperBroker` fill, and observe: the returned exception propagates out of `run_order_pipeline`, and `database.all()` never gains a record for that filled order, including on a subsequent retry with the same proposal.
 - **Recommended remediation (not applied):** wrap stage 7 in the same `try/except Exception -> _record(...)` pattern every other stage already uses, distinguishing "filled but portfolio-update failed" as its own recorded outcome rather than an unhandled crash.
+- **Status: FIXED (Step 17B).** Stage 7 is now wrapped in the same `try/except Exception` pattern as every other stage. On failure, `_record(...)` still runs (so the real fill is never silently lost from the database), and the outcome preserves the true fill status (`FILLED`/`PARTIALLY_FILLED`, never mislabeled as a rejection) with `rejected_stage="portfolio_update"` and a message naming the failure — a distinct, always-persisted "filled but portfolio update failed" outcome rather than an unhandled crash. Regression tests: `tests/unit/orchestration/test_pipeline.py::TestPortfolioUpdateFailureRegressionSY003` (proves the pipeline call never raises, the real fill is still reported, and a database record is always written despite the failure).
 
 ### SY-004 — Sequential candidates in one scan run share a stale portfolio snapshot
 - **Severity:** CRITICAL
@@ -274,6 +287,7 @@ mechanics.
 - **Possible consequence:** a scan that generates multiple approvable candidates across different tickers can approve each one *individually* against limits that, applied to the batch cumulatively, would have rejected some of them — e.g. two CSPs that would each individually pass the 20% minimum-cash-reserve check against the untouched starting portfolio, but that together deploy far more capital than the reserve rule intends. This is a real, live, currently-wired defeat of the Risk Engine's own stated portfolio-level protections, reachable on any `/morning-scan` run that approves more than one candidate — and every approved candidate can independently produce a human-facing `AWAITING_HUMAN` Fidelity ticket, meaning a human could manually execute several "APPROVE"-labeled real trades whose *combined* effect was never actually checked against the platform's own risk limits.
 - **Reproduction:** construct a `Portfolio` near a cash-reserve or concentration boundary, generate two candidates on different tickers each individually just inside the limit, and run them through `run_morning_scan` — both are evaluated against the identical starting `Portfolio` and can both be approved, even though applying the first's economics before evaluating the second would have pushed the second past the limit.
 - **Recommended remediation (not applied):** thread `outcome.updated_portfolio` forward as the `portfolio` for the next candidate's `PipelineRequest` within the same scan run (falling back to `inputs.portfolio` only for the first candidate, or whenever the previous candidate did not fill), so cumulative effects within one run are actually seen by the Risk Engine's own checks.
+- **Status: FIXED (Step 17B).** `run_morning_scan` now tracks a `current_portfolio` that starts at `inputs.portfolio` and is replaced by each candidate's own `outcome.updated_portfolio` whenever a fill occurs (left unchanged for a candidate that didn't fill), threaded into every subsequent candidate's `PipelineRequest`. Regression tests: `tests/unit/workflows/test_morning_scan.py::TestPortfolioThreadedAcrossCandidatesRegressionSY004` (patches `run_order_pipeline` directly to prove the second candidate's request carries the first candidate's own fill result, not the stale pre-scan snapshot, and that a no-fill candidate doesn't reset the carried portfolio). Paired with the SY-005 fix (`Portfolio.cash` now actually changes on a fill), this closes the full cumulative-enforcement gap this finding described.
 
 ### SY-005 — `Portfolio.cash` is never updated after a fill
 - **Severity:** HIGH
@@ -282,6 +296,7 @@ mechanics.
 - **Possible consequence:** every cash-dependent Risk Engine check (buying power, minimum cash reserve, capital-deployed cap) is evaluated against a number that never actually reflects prior fills — the exact accounting corruption the audit's "corrupt accounting" category asks about.
 - **Reproduction:** call `default_portfolio_update_stage(portfolio, proposal, qa, order)` for a filled order and inspect the result — `.cash` is bit-for-bit identical to the input `portfolio.cash`, regardless of the credit received or collateral required by the new position.
 - **Recommended remediation (not applied):** update `cash` in the same `model_copy` call, using the fill's own proven economics (the credit/debit actually realized and any collateral now committed), the same way `PaperBroker`'s own internal `_cash` is correctly updated on every fill.
+- **Status: FIXED (Step 17B).** `default_portfolio_update_stage` now reduces `cash` by the new position's own `capital_at_risk` in the same `model_copy` call — consistent with this `Portfolio` type's own semantics (`capital_deployed_pct` is defined as exactly `(nav - cash) / nav`, so `cash` means "NAV not committed to an open position," not a raw brokerage cash balance). Since `model_copy` does not re-run Portfolio's own `Field(ge=0)` validator, an explicit check raises a clear `ValueError` if this would drive cash negative, rather than silently producing an invalid Portfolio — paired with the SY-003 fix, this is caught and recorded as a distinct portfolio_update failure instead of corrupting downstream state. Regression tests: `tests/unit/orchestration/test_portfolio_update_stage.py` (5 tests: cash decreases by capital_at_risk, partial fills scale correctly, NAV is unchanged by opening a position, and the negative-cash case fails closed).
 
 ### SY-006 — Reconciliation discrepancies are only ever reported, never acted on
 - **Severity:** HIGH
@@ -290,6 +305,7 @@ mechanics.
 - **Possible consequence:** if a human has already manually placed a real Fidelity trade that the internal `Portfolio` was never updated to reflect, `reconcile_portfolio` correctly flags it as `missing_from_internal` — but the *same scan run* will still happily generate a new candidate for that same ticker, and the duplicate-position check (blind to the confirmed-but-untracked position) can approve a second, real-money duplicate trade recommendation in the very report that flagged the discrepancy.
 - **Reproduction:** supply a `ConfirmedFidelityPosition` for a ticker with no matching internal `Portfolio` position, and a universe/chain that would otherwise generate a new candidate for that same ticker — `run_morning_scan` reports the discrepancy *and* still produces a fresh candidate (and potentially an approved ticket) for the same underlying/strategy/expiration.
 - **Recommended remediation (not applied):** either exclude a ticker from new-candidate generation whenever reconciliation flags an unresolved `missing_from_internal` discrepancy for it, or feed confirmed Fidelity positions into the duplicate-position check directly, not just the internal `Portfolio`.
+- **Status: FIXED (Step 17B).** Implemented the first option: `run_morning_scan` now computes the set of tickers with an unresolved `missing_from_internal` discrepancy before generating any candidates, and skips those tickers entirely for the rest of that scan run (recorded in a new `reconciliation_screened_out` report field and rendered in the report text), rather than only reporting the discrepancy after the fact. Regression tests: `tests/unit/workflows/test_morning_scan.py::TestReconciliationBlocksNewCandidatesRegressionSY006` (proves a ticker with an untracked Fidelity position gets no new candidate even though the same universe/chain would otherwise produce an approved one, that the skip is rendered, and that it's scoped per-ticker, not a blanket halt).
 
 ### SY-007 — Order Validator's own duplicate-id check is dead code
 - **Severity:** MEDIUM
@@ -423,6 +439,7 @@ mechanics.
 - **Possible consequence:** any legitimate close-or-roll trade recommendation that the Risk Engine would otherwise approve crashes the pipeline instead of producing a clean result (approved order, rejection, or otherwise) — the CLOSE/ROLL trade-action pathway is completely broken end-to-end at the pipeline level, not merely a narrow edge case, since managing (closing/rolling) existing positions is a core, named platform capability.
 - **Reproduction:** build a `TradeProposal` with `action=TradeAction.CLOSE` that would otherwise pass every Risk Engine check (fresh data, liquid contracts, sufficient cash, no concentration/stress violations), call `evaluate_trade_proposal(...)` (returns `approved_order=None`, `decision=APPROVE`), then call `validate_and_build_order_request(None, risk_decision=RiskDecision.APPROVE, approved_contracts=<N>, broker_capabilities=<caps>, client_order_id="x")` — raises `AttributeError: 'NoneType' object has no attribute 'quantity'`. Confirmed via source inspection that no test anywhere in `tests/` exercises `TradeAction.CLOSE`/`ROLL` through the Risk Engine or Order Validator (only a schema-level test touches the enum values at all).
 - **Recommended remediation (not applied):** either (a) build an `ApprovedOrder` for CLOSE/ROLL actions too (using the appropriate closing leg actions), or (b) have `evaluate_trade_proposal` explicitly reject CLOSE/ROLL proposals with a clean `ReasonCode` if that capability isn't actually implemented yet, and (c) regardless, add a `None` check at the top of `validate_and_build_order_request` that raises `OrderValidationError` (not an `AttributeError`) for a missing `approved_order`, so this class of gap fails clean rather than crashing even after (a)/(b) are addressed.
+- **Status: FIXED (Step 17B).** Implemented both (b) and (c). `_evaluate` now rejects any `proposal.action != TradeAction.OPEN` immediately after the kill-switch check with a new `ReasonCode.REJECT_UNSUPPORTED_ACTION`, before any approved-order construction is attempted — CLOSE/ROLL still isn't an implemented capability, but a proposal requesting it now always gets a normal `RiskDecisionResult`, never a crash. `validate_and_build_order_request`'s `approved_order` parameter is now typed `ApprovedOrder | None`, with an explicit `None` check at the top raising `OrderValidationError` — defense-in-depth per the audit's own recommendation, independent of (b). Regression tests: `tests/unit/risk/test_engine_bypass_attempts.py::TestCloseRollProposalsRegressionTS004`, `tests/unit/brokers/test_order_validator.py::TestMissingApprovedOrderRegressionTS004`, and an end-to-end `tests/unit/orchestration/test_pipeline.py::TestCloseRollProposalsRegressionTS004` proving a CLOSE/ROLL proposal no longer crashes `run_order_pipeline`.
 
 ---
 
@@ -450,5 +467,9 @@ re-litigating what's already sound:
 
 ---
 
-*End of audit. No findings above have been remediated. This document is
-input to a future remediation-planning step, not a completed fix log.*
+*End of audit, as originally written (Step 17). Step 17B (see the
+remediation update at the top of this document) subsequently fixed all 10
+CRITICAL/HIGH findings, each with a regression test proving the fix, without
+weakening any existing test — the full suite (1531 tests) passes. All
+MEDIUM/LOW findings remain open and unremediated; this document continues to
+serve as their audit record pending a future remediation step.*

@@ -114,12 +114,24 @@ class QuantitativeAnalysis(BaseModel):
         return v
 
 
-def _find_contract(market_data: OptionChain, *, expiration: date, strike: float, right: DataOptionRight) -> OptionContract:
+def _find_contract(
+    market_data: OptionChain, *, underlying: str, expiration: date, strike: float, right: DataOptionRight
+) -> OptionContract:
+    """MD-003 fix: matches on `(underlying, expiration, strike, right)`,
+    not just `(expiration, strike, right)`. Without the ticker check, a
+    caller that accidentally supplied a chain/quote set for the wrong
+    underlying (e.g. a dict keyed by ticker string but never cross-
+    validated against `chain.underlying.symbol`) combined with a
+    coincidentally-matching strike/expiration/right -- very plausible
+    for common round strikes and standard monthly expirations across
+    large-caps -- would otherwise silently resolve to a completely
+    different underlying's contract with no error at all."""
     for c in market_data.contracts:
-        if c.expiration == expiration and c.strike == strike and c.right == right:
+        if c.underlying == underlying and c.expiration == expiration and c.strike == strike and c.right == right:
             return c
     raise ContractNotFoundError(
-        f"no contract in market_data for expiration={expiration} strike={strike} right={right.value!r}"
+        f"no contract in market_data for underlying={underlying!r} expiration={expiration} "
+        f"strike={strike} right={right.value!r}"
     )
 
 
@@ -169,7 +181,9 @@ def resolve_leg_contracts(
     result."""
     resolved = []
     for leg in proposal.legs:
-        contract = _find_contract(market_data, expiration=proposal.expiration, strike=leg.strike, right=_leg_data_right(leg))
+        contract = _find_contract(
+            market_data, underlying=proposal.ticker, expiration=proposal.expiration, strike=leg.strike, right=_leg_data_right(leg)
+        )
         resolved.append(require_fresh_contract(contract, as_of=as_of, max_age_minutes=max_age_minutes))
     return resolved
 

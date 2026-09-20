@@ -33,6 +33,7 @@ class ReasonCode(str, Enum):
     REJECT_MALFORMED_PROPOSAL = "reject_malformed_proposal"
     REJECT_INVALID_CONTRACT = "reject_invalid_contract"
     REJECT_UNSUPPORTED_STRATEGY = "reject_unsupported_strategy"
+    REJECT_UNSUPPORTED_ACTION = "reject_unsupported_action"
 
     # Market data.
     REJECT_STALE_DATA = "reject_stale_data"

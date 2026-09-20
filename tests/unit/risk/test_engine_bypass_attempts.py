@@ -45,6 +45,7 @@ def _evaluate(scenario, **overrides):
         market_data=scenario.market_data,
         broker_capabilities=scenario.broker_capabilities,
         limits=scenario.limits,
+        now=NOW,
     )
     kwargs.update(overrides)
     return evaluate_trade_proposal(**kwargs)
@@ -148,6 +149,42 @@ class TestStaleQuotes:
         result = _evaluate(scenario, market_data=market_data)
         assert result.decision == RiskDecision.REJECT
         assert result.reason_codes == [ReasonCode.REJECT_STALE_DATA]
+
+
+class TestFreshnessGateCannotBeBypassedRegressionMD001:
+    """MD-001: `evaluate_trade_proposal` used to accept `now=None` (its
+    default) and silently fall back to `proposal.timestamp` -- the
+    proposal's own self-reported time, never independently verified.
+    Since market data and the proposal are normally stamped moments
+    apart, that fallback made the freshness gate report "fresh"
+    regardless of how much real time had actually elapsed. `now` is now
+    a required keyword-only argument with no fallback at all."""
+
+    def test_now_is_a_required_argument_not_optional(self):
+        scenario = build_approved_pcs_scenario()
+        with pytest.raises(TypeError):
+            evaluate_trade_proposal(
+                scenario.proposal, scenario.portfolio, scenario.quantitative_analysis,
+                scenario.market_data, scenario.broker_capabilities, limits=scenario.limits,
+            )
+
+    def test_real_elapsed_time_is_caught_even_though_proposal_timestamp_is_unchanged(self):
+        """The exact MD-001 exploit shape: the proposal's own timestamp
+        still says "just now" (an attacker/caller never has to touch
+        it), but real time has moved on since the market data was
+        fetched -- the freshness gate must catch this using the
+        independently-supplied wall clock, not the proposal's word for
+        it."""
+        scenario = build_approved_pcs_scenario()
+        much_later = NOW + timedelta(hours=2)
+        result = _evaluate(scenario, now=much_later)
+        assert result.decision == RiskDecision.REJECT
+        assert result.reason_codes == [ReasonCode.REJECT_STALE_DATA]
+
+    def test_genuinely_fresh_as_of_the_supplied_now_still_approves(self):
+        scenario = build_approved_pcs_scenario()
+        result = _evaluate(scenario, now=NOW)
+        assert result.decision == RiskDecision.APPROVE
 
 
 class TestMissingQuotes:
@@ -451,3 +488,41 @@ class TestUnknownRiskFailsClosed:
         result = _evaluate(scenario)
         assert result.decision == RiskDecision.REJECT
         assert result.reason_codes == [ReasonCode.REJECT_UNKNOWN_RISK]
+
+
+class TestCloseRollProposalsRegressionTS004:
+    """TS-004: a CLOSE/ROLL proposal that would otherwise clear every
+    risk check used to receive decision=APPROVE with approved_order=None
+    -- and the Order Validator's first, unguarded
+    `approved_order.quantity` access then raised a plain AttributeError,
+    crashing the entire pipeline call instead of producing any clean
+    result. The Risk Engine must now reject CLOSE/ROLL cleanly, with its
+    own ReasonCode, before ever reaching approved-order construction."""
+
+    def test_close_action_is_rejected_cleanly_not_approved_with_no_order(self):
+        from src.llm.schemas import TradeAction
+
+        scenario = build_approved_pcs_scenario()
+        close_proposal = pcs_proposal(action=TradeAction.CLOSE, proposal_id=scenario.proposal.proposal_id)
+        result = _evaluate(scenario, proposal_obj=close_proposal)
+        assert result.decision == RiskDecision.REJECT
+        assert result.reason_codes == [ReasonCode.REJECT_UNSUPPORTED_ACTION]
+        assert result.approved_order is None
+        assert result.fidelity_ticket is None
+
+    def test_roll_action_is_rejected_cleanly_not_approved_with_no_order(self):
+        from src.llm.schemas import TradeAction
+
+        scenario = build_approved_pcs_scenario()
+        roll_proposal = pcs_proposal(action=TradeAction.ROLL, proposal_id=scenario.proposal.proposal_id)
+        result = _evaluate(scenario, proposal_obj=roll_proposal)
+        assert result.decision == RiskDecision.REJECT
+        assert result.reason_codes == [ReasonCode.REJECT_UNSUPPORTED_ACTION]
+
+    def test_an_otherwise_identical_open_proposal_still_approves(self):
+        """Proves the new check is scoped to non-OPEN actions only --
+        it doesn't accidentally reject the platform's normal path."""
+        scenario = build_approved_pcs_scenario()
+        result = _evaluate(scenario)
+        assert result.decision == RiskDecision.APPROVE
+        assert result.approved_order is not None

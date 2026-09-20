@@ -109,12 +109,27 @@ def evaluate_trade_proposal(
     broker_capabilities: BrokerCapabilities | None,
     *,
     limits: RiskLimitsConfig | None = None,
-    now: datetime | None = None,
+    now: datetime,
 ) -> RiskDecisionResult:
     """The single deterministic choke point every trade must pass
     through. Never raises: every failure mode, anticipated or not, is
     converted to a `RiskDecisionResult` with `RiskDecision.REJECT` (or
-    `HALT`) before it reaches the caller."""
+    `HALT`) before it reaches the caller.
+
+    `now` is **required** and must be the real wall clock (MD-001 fix):
+    an earlier optional `now: datetime | None = None` silently fell back
+    to `proposal.timestamp` — the proposal's own self-reported time,
+    never independently verified — whenever a caller used the natural
+    default-parameter calling convention. Since `market_data.timestamp`
+    and `proposal.timestamp` are normally stamped moments apart at
+    proposal-construction time, that fallback made the freshness gate
+    report "fresh" regardless of how much real time had actually
+    elapsed since the data was fetched. Making `now` mandatory closes
+    the gap without introducing a second, time-dependent code path (a
+    silent `datetime.now()` fallback would make this function's
+    behavior depend on the wall clock at import time even in tests that
+    never intended that) — every caller must now say explicitly what
+    moment it considers "now"."""
     limits = limits or get_default_limits()
     try:
         return _evaluate(proposal_obj, portfolio, quantitative_analysis, market_data, broker_capabilities, limits, now)
@@ -129,7 +144,7 @@ def _evaluate(
     market_data: OptionChain,
     broker_capabilities: BrokerCapabilities | None,
     limits: RiskLimitsConfig,
-    now: datetime | None,
+    now: datetime,
 ) -> RiskDecisionResult:
     # 0. Boundary guard: only a genuine, already-validated TradeProposal
     # instance may proceed — a dict, a subclass, or any other type is
@@ -154,7 +169,27 @@ def _evaluate(
     if kill.halted:
         return _halt(kill.reason_code, kill.message or "portfolio halted")
 
-    as_of = now or proposal.timestamp
+    # 1.5. TS-004 fix: CLOSE/ROLL is not yet an implemented pipeline
+    # capability -- `_build_approved_order` (and every downstream Order
+    # Validator / Fidelity-ticket path) only knows how to construct an
+    # opening order. Before this check existed, a CLOSE/ROLL proposal
+    # that cleared every other risk check still received
+    # decision=APPROVE with approved_order=None, and
+    # validate_and_build_order_request's first, unguarded
+    # `approved_order.quantity` access raised a plain AttributeError --
+    # not this module's own OrderValidationError -- crashing the entire
+    # pipeline call instead of producing any clean result. Rejecting
+    # explicitly here, before any of that machinery runs, means a
+    # CLOSE/ROLL proposal always gets a normal RiskDecisionResult like
+    # any other proposal, never a crash.
+    if proposal.action != TradeAction.OPEN:
+        return _reject(
+            ReasonCode.REJECT_UNSUPPORTED_ACTION,
+            f"action={proposal.action.value!r} is not yet a supported pipeline capability; "
+            "only OPEN proposals can be evaluated for an approved order",
+        )
+
+    as_of = now
 
     # 2. Market data identity + freshness.
     if market_data.underlying.symbol != proposal.ticker:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.backtest.assignment import settle_position
+from src.backtest.assignment import realized_settlement_pnl, settle_position
 from src.backtest.commissions import CommissionSchedule
 from src.backtest.execution import execute_entry, execute_exit
 from src.backtest.simulator import BacktestLeg, HistoricalOptionQuote
@@ -107,7 +107,13 @@ def hypothetical_outcome_from_settlement(
     commission_schedule: CommissionSchedule,
 ) -> HypotheticalOutcome:
     """What this proposal would have realized had it been entered and
-    then held to expiration, settling at `settlement_price`."""
+    then held to expiration, settling at `settlement_price`. A rejected
+    proposal is always a *new* trade under consideration, never a
+    covered position with pre-existing shares, so this always uses the
+    intrinsic-value default of `realized_settlement_pnl` (no cost-basis
+    override) -- see that function's docstring for why raw
+    `cash_impact` (the full strike notional) would overstate this by the
+    value of the stock position it ignores."""
     legs = _to_backtest_legs(proposal)
     entry = execute_entry(
         legs=legs, expiration=proposal.expiration, quotes=entry_quotes, requested_contracts=proposal.contracts_requested,
@@ -115,8 +121,8 @@ def hypothetical_outcome_from_settlement(
     )
     entry_total = entry.realistic_price * _CONTRACT_MULTIPLIER * entry.filled_contracts
     settlements = settle_position(legs, entry.filled_contracts, settlement_price)
-    cash_impact = sum(s.cash_impact for s in settlements)
-    pnl = entry_total + cash_impact - entry.commission
+    realized_impact = realized_settlement_pnl(settlements, entry.filled_contracts)
+    pnl = entry_total + realized_impact - entry.commission
     exit_reason = "assignment" if any(s.assigned_or_exercised for s in settlements) else "expiration_otm"
     return HypotheticalOutcome(
         proposal_id=proposal.proposal_id, ticker=proposal.ticker, strategy=proposal.strategy.value,

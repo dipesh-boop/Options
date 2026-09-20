@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from src.risk.reason_codes import ReasonCode, RiskDecision
 from tests.unit.risk.conftest import (
+    NOW,
     build_approved_covered_call_scenario,
     build_approved_csp_scenario,
     build_approved_pcs_scenario,
@@ -19,7 +20,7 @@ class TestApprovePaths:
         scenario = build_approved_pcs_scenario()
         result = evaluate_trade_proposal(
             scenario.proposal, scenario.portfolio, scenario.quantitative_analysis,
-            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits,
+            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits, now=NOW,
         )
         assert result.decision == RiskDecision.APPROVE
         assert result.reason_codes == [ReasonCode.APPROVED]
@@ -31,7 +32,7 @@ class TestApprovePaths:
         scenario = build_approved_csp_scenario()
         result = evaluate_trade_proposal(
             scenario.proposal, scenario.portfolio, scenario.quantitative_analysis,
-            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits,
+            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits, now=NOW,
         )
         assert result.decision == RiskDecision.APPROVE
         assert result.approved_contracts == 1
@@ -41,7 +42,7 @@ class TestApprovePaths:
         scenario = build_approved_covered_call_scenario()
         result = evaluate_trade_proposal(
             scenario.proposal, scenario.portfolio, scenario.quantitative_analysis,
-            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits,
+            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits, now=NOW,
         )
         assert result.decision == RiskDecision.APPROVE
         assert result.approved_contracts == 1
@@ -54,7 +55,7 @@ class TestResizePath:
         oversized = pcs_proposal(contracts_requested=50, proposal_id=scenario.proposal.proposal_id)
         result = evaluate_trade_proposal(
             oversized, scenario.portfolio, scenario.quantitative_analysis,
-            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits,
+            scenario.market_data, scenario.broker_capabilities, limits=scenario.limits, now=NOW,
         )
         # quantitative_analysis was computed for contracts_requested=2 in
         # the baseline scenario, so a mismatch against 50 contracts should

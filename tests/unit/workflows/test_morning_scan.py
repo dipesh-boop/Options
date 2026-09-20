@@ -13,8 +13,9 @@ import pytest
 from src.brokers.fidelity import TicketStatus
 from src.data.earnings import EarningsEvent
 from src.llm.schemas import StrategyType
-from src.orchestration.pipeline import PipelineStatus
+from src.orchestration.pipeline import PipelineOutcome, PipelineStatus
 from src.risk.limits import get_default_limits
+from src.risk.portfolio_risk import Portfolio
 from src.workflows import morning_scan
 from src.workflows.candidate_generation import QuantFilterConfig, UniverseEntry
 from src.workflows.morning_scan import MorningScanInputs, render_morning_scan_report, run_morning_scan
@@ -146,6 +147,56 @@ class TestFeedAndReconciliationReporting:
         assert "Reconciliation discrepancies" in text
 
 
+class TestReconciliationBlocksNewCandidatesRegressionSY006:
+    """SY-006: a reconciliation discrepancy used to be only reported,
+    never acted on -- the very same scan run that flagged a confirmed
+    Fidelity position as untracked internally could still generate (and
+    potentially get approved) a fresh, real duplicate trade
+    recommendation for that same ticker, since the duplicate-position
+    check only ever sees the stale internal `Portfolio.positions`."""
+
+    @pytest.mark.asyncio
+    async def test_ticker_with_untracked_fidelity_position_gets_no_new_candidate(self):
+        confirmed = [ConfirmedFidelityPosition(
+            ticker="XYZ", strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=date(2026, 10, 16),
+            strikes=frozenset({95.0, 90.0}), contracts=1, confirmed_by="dipesh", confirmed_at=NOW,
+        )]
+        report = await run_morning_scan(_base_inputs(confirmed_fidelity_positions=confirmed))
+        assert report.reconciliation.clean is False
+        assert any(d.kind == "missing_from_internal" and d.ticker == "XYZ" for d in report.reconciliation.discrepancies)
+        # the exact SY-006 exploit: this same universe/chain would
+        # otherwise produce an approved XYZ candidate (see
+        # TestApprovedTradePath) -- it must not, while this ticker's
+        # Fidelity position is unreconciled.
+        assert report.results == ()
+        assert len(report.reconciliation_screened_out) == 1
+        assert "XYZ" in report.reconciliation_screened_out[0]
+
+    @pytest.mark.asyncio
+    async def test_screened_out_ticker_is_rendered_in_the_report(self):
+        confirmed = [ConfirmedFidelityPosition(
+            ticker="XYZ", strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=date(2026, 10, 16),
+            strikes=frozenset({95.0, 90.0}), contracts=1, confirmed_by="dipesh", confirmed_at=NOW,
+        )]
+        report = await run_morning_scan(_base_inputs(confirmed_fidelity_positions=confirmed))
+        text = render_morning_scan_report(report)
+        assert "Screened out pending reconciliation" in text
+        assert "XYZ" in text
+
+    @pytest.mark.asyncio
+    async def test_a_different_ticker_is_unaffected_by_another_tickers_discrepancy(self):
+        """The screen is per-ticker, not a blanket halt on any
+        discrepancy anywhere in the portfolio."""
+        confirmed = [ConfirmedFidelityPosition(
+            ticker="OTHER_TICKER", strategy=StrategyType.CASH_SECURED_PUT, expiration=date(2026, 10, 16),
+            strikes=frozenset({50.0}), contracts=1, confirmed_by="dipesh", confirmed_at=NOW,
+        )]
+        report = await run_morning_scan(_base_inputs(confirmed_fidelity_positions=confirmed))
+        assert report.reconciliation.clean is False
+        assert report.reconciliation_screened_out == ()
+        assert report.no_trade_reason is None  # XYZ's own candidate still proceeds normally
+
+
 class TestEarningsWindowScreening:
     @pytest.mark.asyncio
     async def test_candidate_within_earnings_window_is_screened_out(self):
@@ -186,6 +237,81 @@ class TestPortfolioReporting:
         report = await run_morning_scan(_base_inputs(portfolio_net_delta=-12.5, portfolio_net_theta=8.0, portfolio_net_vega=40.0))
         text = render_morning_scan_report(report)
         assert "-12.5" in text
+
+
+class TestPortfolioThreadedAcrossCandidatesRegressionSY004:
+    """SY-004: every candidate in one scan run used to be evaluated
+    against the same pre-scan `Portfolio` snapshot -- the Risk Engine's
+    cumulative checks (cash reserve, capital deployed, concentration,
+    duplicate position) for candidate N+1 never saw what candidate N
+    had already been approved for moments earlier in the same run.
+    These tests patch `run_order_pipeline` itself (rather than building
+    a full multi-ticker LLM-mocked fixture) so they isolate exactly the
+    one thing `run_morning_scan`'s own loop is responsible for: which
+    `Portfolio` object it puts on each candidate's `PipelineRequest`."""
+
+    def _two_ticker_inputs(self, **overrides) -> MorningScanInputs:
+        chain_a = default_pcs_chain(symbol="AAA")
+        chain_b = default_pcs_chain(symbol="BBB")
+        stages = full_stages(chain=chain_a)  # never actually reaches the real pipeline; patched away
+        base = dict(
+            chain=chain_a,
+            stages=stages,
+            fetch_results={"AAA": chain_a, "BBB": chain_b},
+            universe=[UniverseEntry("AAA", "TECH"), UniverseEntry("BBB", "TECH")],
+            max_candidates=5,
+        )
+        base.update(overrides)
+        return _base_inputs(**base)
+
+    @pytest.mark.asyncio
+    async def test_second_candidates_request_carries_the_first_candidates_updated_portfolio(self, monkeypatch):
+        sentinel_portfolio = make_portfolio(nav=999_999.0, cash=1.0, peak_equity=1_000_000.0)
+        seen_portfolios: list[Portfolio] = []
+
+        async def fake_run_order_pipeline(request, stages):
+            seen_portfolios.append(request.portfolio)
+            if len(seen_portfolios) == 1:
+                return PipelineOutcome(status=PipelineStatus.FILLED, rejected_stage=None, reason="ok", updated_portfolio=sentinel_portfolio)
+            return PipelineOutcome(status=PipelineStatus.NO_FILL, rejected_stage=None, reason="ok")
+
+        monkeypatch.setattr(morning_scan, "run_order_pipeline", fake_run_order_pipeline)
+        inputs = self._two_ticker_inputs()
+        report = await run_morning_scan(inputs)
+
+        assert len(seen_portfolios) == 2
+        assert seen_portfolios[0] is inputs.portfolio  # first candidate: the pre-scan snapshot
+        assert seen_portfolios[1] is sentinel_portfolio  # second candidate: the first candidate's own fill result
+        assert seen_portfolios[1] is not inputs.portfolio  # the OP-004/SY-004 bug's old (wrong) behavior
+        assert report is not None  # sanity: the scan still completes end to end
+
+    @pytest.mark.asyncio
+    async def test_a_no_fill_candidate_does_not_reset_the_carried_portfolio(self, monkeypatch):
+        """Three candidates: the first fills (produces a cumulative
+        portfolio), the second doesn't fill (no updated_portfolio), the
+        third must still see the first's cumulative result, not fall
+        back to the stale pre-scan snapshot."""
+        sentinel_portfolio = make_portfolio(nav=999_999.0, cash=1.0, peak_equity=1_000_000.0)
+        seen_portfolios: list[Portfolio] = []
+
+        async def fake_run_order_pipeline(request, stages):
+            seen_portfolios.append(request.portfolio)
+            if len(seen_portfolios) == 1:
+                return PipelineOutcome(status=PipelineStatus.FILLED, rejected_stage=None, reason="ok", updated_portfolio=sentinel_portfolio)
+            return PipelineOutcome(status=PipelineStatus.NO_FILL, rejected_stage=None, reason="ok")
+
+        monkeypatch.setattr(morning_scan, "run_order_pipeline", fake_run_order_pipeline)
+        chain_c = default_pcs_chain(symbol="CCC")
+        inputs = self._two_ticker_inputs(
+            fetch_results={"AAA": default_pcs_chain(symbol="AAA"), "BBB": default_pcs_chain(symbol="BBB"), "CCC": chain_c},
+            universe=[UniverseEntry("AAA", "TECH"), UniverseEntry("BBB", "TECH"), UniverseEntry("CCC", "TECH")],
+        )
+        await run_morning_scan(inputs)
+
+        assert len(seen_portfolios) == 3
+        assert seen_portfolios[0] is inputs.portfolio
+        assert seen_portfolios[1] is sentinel_portfolio
+        assert seen_portfolios[2] is sentinel_portfolio  # carried through the no-fill candidate, not reset
 
 
 class TestMaxCandidatesCap:

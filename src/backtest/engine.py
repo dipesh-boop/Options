@@ -52,7 +52,7 @@ from typing import Callable
 
 from typing import Literal
 
-from src.backtest.assignment import settle_position
+from src.backtest.assignment import realized_settlement_pnl, settle_position
 from src.backtest.benchmark import BenchmarkComparison, compare_to_benchmarks
 from src.backtest.commissions import CommissionSchedule
 from src.backtest.execution import execute_entry, execute_exit, flip_legs
@@ -107,11 +107,22 @@ class BacktestConfig:
 
 
 def _match_quotes_for_legs(
-    quotes: list[HistoricalOptionQuote], position_legs, expiration: date
+    quotes: list[HistoricalOptionQuote], position_legs, expiration: date, underlying: str
 ) -> list[HistoricalOptionQuote] | None:
+    """MD-003 fix: matches on `(underlying, expiration, strike, right)`,
+    not just `(expiration, strike, right)` -- see
+    `src.risk.trade_risk._find_contract`'s docstring for why omitting
+    the underlying check is a real (if narrow) mispricing risk, not
+    just theoretical: a caller-side quote-lookup bug that returns
+    another ticker's quotes would otherwise silently match by
+    coincidental strike/expiration/right and price this leg from a
+    completely different underlying's market."""
     matched: list[HistoricalOptionQuote] = []
     for leg in position_legs:
-        found = next((q for q in quotes if q.strike == leg.strike and q.right == leg.right and q.expiration == expiration), None)
+        found = next(
+            (q for q in quotes if q.underlying == underlying and q.strike == leg.strike and q.right == leg.right and q.expiration == expiration),
+            None,
+        )
         if found is None:
             return None
         matched.append(found)
@@ -132,7 +143,7 @@ def _close_position(
     event alone contributes* — entry cash already moved when the
     position opened, so only the exit debit and exit commission apply
     here; entry commission is not subtracted a second time."""
-    matched = _match_quotes_for_legs(quotes_today, position.legs, position.expiration)
+    matched = _match_quotes_for_legs(quotes_today, position.legs, position.expiration, position.ticker)
     if matched is None:
         raise ValueError(f"no quotes available to close {position.position_id} on {as_of.isoformat()}")
 
@@ -179,17 +190,33 @@ def _close_position(
 
 
 def _settle_expired_position(position: BacktestPosition, as_of: date, settlement_price: float) -> tuple[TradeRecord, float]:
-    """Expiration settlement's cash flow is identical on both tracks
-    (a fixed strike-based formula, no market fill involved) — the
-    caller applies the single returned `cash_impact` to both
-    `realistic_cash` and `theoretical_cash`."""
+    """Expiration settlement's economics are identical on both tracks (a
+    fixed strike/intrinsic-value-based formula, no market fill involved)
+    — the caller applies the single returned realized-impact figure to
+    both `realistic_cash` and `theoretical_cash`.
+
+    This engine has no ongoing share ledger (`realistic_equity`/
+    `theoretical_equity` are cash-only, always), so a settlement's
+    contribution is computed via `realized_settlement_pnl` — **intrinsic
+    value**, not the full strike notional a raw `cash_impact` sum would
+    give. See that function's docstring: a covered call's shares (the
+    only case with `underlying_shares_held > 0`) are realized against
+    their actual cost basis; any other assignment/exercise is treated as
+    an immediate mark-to-settlement of the resulting stock position,
+    since it is never tracked beyond this instant.
+    """
     settlements = settle_position(list(position.legs), position.contracts, settlement_price)
-    cash_impact = sum(s.cash_impact for s in settlements)
     any_assigned = any(s.assigned_or_exercised for s in settlements)
     close_reason = "assignment" if any_assigned else "expiration_otm"
+    realized_impact = realized_settlement_pnl(
+        settlements,
+        position.contracts,
+        underlying_shares_held=position.underlying_shares_held,
+        underlying_cost_basis=position.underlying_cost_basis,
+    )
 
-    realistic_pnl = position.realistic_entry_credit_total + cash_impact - position.entry_commission
-    theoretical_pnl = position.theoretical_entry_credit_total + cash_impact
+    realistic_pnl = position.realistic_entry_credit_total + realized_impact - position.entry_commission
+    theoretical_pnl = position.theoretical_entry_credit_total + realized_impact
 
     record = TradeRecord(
         position_id=position.position_id,
@@ -202,14 +229,14 @@ def _settle_expired_position(position: BacktestPosition, as_of: date, settlement
         capital_at_risk=position.capital_at_risk,
         realistic_entry_credit=position.realistic_entry_credit_total,
         entry_spread_pct=position.entry_spread_pct,
-        realistic_exit_debit=cash_impact,
+        realistic_exit_debit=realized_impact,
         theoretical_entry_credit=position.theoretical_entry_credit_total,
-        theoretical_exit_debit=cash_impact,
+        theoretical_exit_debit=realized_impact,
         commission_paid=position.entry_commission,
         realistic_pnl=realistic_pnl,
         theoretical_pnl=theoretical_pnl,
     )
-    return record, cash_impact
+    return record, realized_impact
 
 
 def run_backtest(
@@ -246,7 +273,7 @@ def run_backtest(
                 state.closed_trades.append(record)
                 continue
 
-            matched = _match_quotes_for_legs(quotes_today, position.legs, position.expiration)
+            matched = _match_quotes_for_legs(quotes_today, position.legs, position.expiration, position.ticker)
             should_close = False
             close_reason = ""
             if matched is not None:
@@ -287,7 +314,7 @@ def run_backtest(
 
         for entry in entries_by_date.get(as_of, []):
             quotes_today = assert_no_lookahead_options(quote_lookup(entry.ticker, as_of), as_of)
-            matched = _match_quotes_for_legs(quotes_today, entry.legs, entry.expiration)
+            matched = _match_quotes_for_legs(quotes_today, entry.legs, entry.expiration, entry.ticker)
             if matched is None:
                 continue
             try:

@@ -111,7 +111,7 @@ def test_engine_module_never_calls_anything_named_like_an_llm_call(monkeypatch: 
         if not name.startswith("_") and callable(getattr(llm_router, name)):
             monkeypatch.setattr(llm_router, name, _boom, raising=False)
 
-    from tests.unit.risk.conftest import build_approved_pcs_scenario
+    from tests.unit.risk.conftest import NOW, build_approved_pcs_scenario
 
     scenario = build_approved_pcs_scenario()
     from src.risk.engine import evaluate_trade_proposal
@@ -123,6 +123,7 @@ def test_engine_module_never_calls_anything_named_like_an_llm_call(monkeypatch: 
         scenario.market_data,
         scenario.broker_capabilities,
         limits=scenario.limits,
+        now=NOW,
     )
     assert result.decision is not None  # reached a decision without ever needing src.llm.client/router
 

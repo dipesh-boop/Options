@@ -119,6 +119,32 @@ class TestRejectedDecisions:
             )
 
 
+class TestMissingApprovedOrderRegressionTS004:
+    """TS-004: a `None` `approved_order` (exactly what the Risk Engine
+    returns for a CLOSE/ROLL proposal it approves but builds no order
+    for) used to reach `approved_order.quantity` unguarded and raise a
+    plain `AttributeError` -- not this module's own `OrderValidationError`
+    -- which the pipeline's Order Validator stage couldn't catch (it
+    only catches `OrderValidationError`), crashing the entire pipeline
+    call. This must now fail clean instead."""
+
+    def test_none_approved_order_raises_order_validation_error_not_attribute_error(self):
+        with pytest.raises(OrderValidationError):
+            validate_and_build_order_request(
+                None, risk_decision=RiskDecision.APPROVE, approved_contracts=2, broker_capabilities=internal_paper_caps()
+            )
+
+    def test_none_approved_order_never_raises_a_bare_attribute_error(self):
+        try:
+            validate_and_build_order_request(
+                None, risk_decision=RiskDecision.APPROVE, approved_contracts=2, broker_capabilities=internal_paper_caps()
+            )
+        except OrderValidationError:
+            pass  # expected
+        except AttributeError:
+            pytest.fail("a None approved_order must raise OrderValidationError, not a bare AttributeError")
+
+
 class TestMissingOrInvalidApprovedContracts:
     def test_none_approved_contracts_rejected(self):
         approved = make_approved_order()

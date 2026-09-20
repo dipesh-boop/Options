@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.backtest.assignment import intrinsic_value, settle_leg, settle_position
+from src.backtest.assignment import intrinsic_value, realized_settlement_pnl, settle_leg, settle_position
 from src.backtest.simulator import BacktestLeg
 from src.data.option_chain import OptionRight
 
@@ -116,3 +116,64 @@ class TestSettlePositionPutCreditSpread:
         settlements = settle_position(list(legs), contracts=1, settlement_price=100.0)
         assert all(not s.assigned_or_exercised for s in settlements)
         assert sum(s.cash_impact for s in settlements) == 0.0
+
+
+class TestRealizedSettlementPnlRegressionOP001:
+    """OP-001: raw `cash_impact` is the full strike notional, which
+    corrupts realized P&L by ignoring the value of the resulting stock
+    position. `realized_settlement_pnl` must report the much smaller,
+    intrinsic-value-based economic impact instead."""
+
+    def test_otm_leg_contributes_nothing(self):
+        legs = (BacktestLeg(right=OptionRight.PUT, strike=95.0, side="sell"),)
+        settlements = settle_position(list(legs), contracts=1, settlement_price=100.0)
+        assert realized_settlement_pnl(settlements, contracts=1) == 0.0
+
+    def test_naked_short_put_assignment_is_bounded_by_intrinsic_value_not_full_notional(self):
+        """Cash-secured put, strike 95, settling at 90 (only $5 ITM).
+        The full strike notional (95*100=9,500) must never appear as the
+        settlement's economic impact -- only the $500 intrinsic loss."""
+        legs = (BacktestLeg(right=OptionRight.PUT, strike=95.0, side="sell"),)
+        settlements = settle_position(list(legs), contracts=1, settlement_price=90.0)
+        impact = realized_settlement_pnl(settlements, contracts=1)
+        assert impact == pytest.approx(-5.0 * _MULT)
+        assert impact != pytest.approx(-95.0 * _MULT)  # the OP-001 bug's old (wrong) value
+
+    def test_covered_call_assignment_uses_actual_cost_basis_not_intrinsic_value(self):
+        """Covered call: shares held at cost basis 100, call strike 105,
+        settling at 115. Realized gain must be (105-100)*100=500 (the
+        actual cost-basis gain), not the option's own intrinsic value
+        (10*100=1,000) and not the full strike notional (105*100=10,500)."""
+        legs = (BacktestLeg(right=OptionRight.CALL, strike=105.0, side="sell"),)
+        settlements = settle_position(list(legs), contracts=1, settlement_price=115.0)
+        impact = realized_settlement_pnl(settlements, contracts=1, underlying_shares_held=100, underlying_cost_basis=100.0)
+        assert impact == pytest.approx((105.0 - 100.0) * _MULT)
+        assert impact != pytest.approx(10.0 * _MULT)  # intrinsic-value-only would be wrong here too
+        assert impact != pytest.approx(105.0 * _MULT)  # the OP-001 bug's old (wrong) value
+
+    def test_covered_call_with_zero_shares_held_falls_back_to_intrinsic_value(self):
+        """Without underlying_shares_held set, there is no cost basis to
+        realize against -- falls back to the same intrinsic-value
+        treatment as any other short leg."""
+        legs = (BacktestLeg(right=OptionRight.CALL, strike=105.0, side="sell"),)
+        settlements = settle_position(list(legs), contracts=1, settlement_price=115.0)
+        impact = realized_settlement_pnl(settlements, contracts=1)
+        assert impact == pytest.approx(-10.0 * _MULT)
+
+    def test_put_credit_spread_both_legs_itm_matches_max_loss_unchanged(self):
+        """A fully-assigned vertical spread's shares always net to flat
+        -- this is the one shape the old cash_impact-sum formula already
+        got right, and the fix must not regress it."""
+        legs = (
+            BacktestLeg(right=OptionRight.PUT, strike=95.0, side="sell"),
+            BacktestLeg(right=OptionRight.PUT, strike=90.0, side="buy"),
+        )
+        settlements = settle_position(list(legs), contracts=1, settlement_price=85.0)
+        impact = realized_settlement_pnl(settlements, contracts=1)
+        assert impact == pytest.approx(-(95.0 - 90.0) * _MULT)
+
+    def test_scales_with_contracts(self):
+        legs = (BacktestLeg(right=OptionRight.PUT, strike=95.0, side="sell"),)
+        settlements = settle_position(list(legs), contracts=3, settlement_price=90.0)
+        impact = realized_settlement_pnl(settlements, contracts=3)
+        assert impact == pytest.approx(-5.0 * _MULT * 3)

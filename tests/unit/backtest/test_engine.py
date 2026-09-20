@@ -14,6 +14,7 @@ from src.backtest.engine import (
     BacktestConfig,
     DEFAULT_TARGET_HIGH,
     DEFAULT_TARGET_LOW,
+    _match_quotes_for_legs,
     build_backtest_result,
     evaluate_target,
     run_backtest,
@@ -177,8 +178,11 @@ class TestExpirationAndAssignment:
 
         trade = state.closed_trades[0]
         assert trade.close_reason == "assignment"
-        # credit 200 collected, then pay 95*100=9500 to take the shares, receive nothing back (option settlement only)
-        assert trade.realistic_pnl == pytest.approx(200.0 - 95.0 * _MULT)
+        # credit 200 collected; the newly-acquired shares are immediately
+        # marked at the settlement price (this engine has no ongoing
+        # share ledger), so the loss is the intrinsic value only
+        # (95 - 90 = 5/share), not the full 95*100 strike notional.
+        assert trade.realistic_pnl == pytest.approx(200.0 - 5.0 * _MULT)
         assert state.realistic_cash == pytest.approx(100_000.0 + trade.realistic_pnl)
 
     def test_covered_call_assigned_itm_settles_via_the_short_call_leg_only(self):
@@ -195,8 +199,40 @@ class TestExpirationAndAssignment:
 
         trade = state.closed_trades[0]
         assert trade.close_reason == "assignment"
-        # credit 200 collected at entry, then receive 105*100=10500 for delivering the shares
-        assert trade.realistic_pnl == pytest.approx(200.0 + 105.0 * _MULT)
+        # credit 200 collected at entry; the shares delivered were
+        # already held at cost basis 100 (underlying_cost_basis), so the
+        # realized gain is (strike - cost basis) = 5/share, not the full
+        # 105*100 strike notional the option settlement alone pays.
+        assert trade.realistic_pnl == pytest.approx(200.0 + (105.0 - 100.0) * _MULT)
+
+
+class TestMatchQuotesForLegsChecksUnderlyingRegressionMD003:
+    """MD-003: matching used to be (expiration, strike, right) only --
+    a quote for a completely different underlying at a coincidentally
+    matching strike/expiration/right would silently match. Now the
+    underlying must match too."""
+
+    def test_correct_underlying_matches(self):
+        legs = cash_secured_put_legs()
+        quotes = [make_quote(strike=95.0, right=OptionRight.PUT, bid=1.9, ask=2.1, underlying=UNDERLYING)]
+        matched = _match_quotes_for_legs(quotes, legs, EXPIRATION, UNDERLYING)
+        assert matched is not None and len(matched) == 1
+
+    def test_wrong_underlying_at_matching_strike_and_expiration_is_never_matched(self):
+        legs = cash_secured_put_legs()
+        quotes = [make_quote(strike=95.0, right=OptionRight.PUT, bid=1.9, ask=2.1, underlying="WRONG_TICKER")]
+        matched = _match_quotes_for_legs(quotes, legs, EXPIRATION, UNDERLYING)
+        assert matched is None
+
+    def test_correct_underlying_quote_still_matches_when_a_wrong_underlying_quote_is_also_present(self):
+        legs = cash_secured_put_legs()
+        quotes = [
+            make_quote(strike=95.0, right=OptionRight.PUT, bid=9.9, ask=10.1, underlying="WRONG_TICKER"),
+            make_quote(strike=95.0, right=OptionRight.PUT, bid=1.9, ask=2.1, underlying=UNDERLYING),
+        ]
+        matched = _match_quotes_for_legs(quotes, legs, EXPIRATION, UNDERLYING)
+        assert matched is not None
+        assert matched[0].bid == pytest.approx(1.9)  # the correct-underlying quote, not the wrong-ticker one
 
 
 class TestManagementDteClose:

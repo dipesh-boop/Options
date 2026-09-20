@@ -2,7 +2,7 @@
 filter, and deterministic TradeProposal generation."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -214,6 +214,45 @@ class TestMultipleStrategiesRequested:
         )
         ids = [c.proposal.proposal_id for c in candidates]
         assert len(ids) == len(set(ids))
+
+
+class TestProposalIdsAreUniqueAcrossScanRunsRegressionSY001:
+    """SY-001: the old `f"{prefix}-{ticker}-{counter}"` scheme reset its
+    counter to 0 on every call, so the same ticker's first candidate on
+    two different scan runs (e.g. two different days sharing one
+    long-lived PaperBroker/idempotency-store instance) collided on the
+    identical id -- the second day's genuinely new order would then be
+    silently returned as the first day's stale, already-filled result."""
+
+    def _same_shape_chain(self, as_of: datetime):
+        # Deliberately the same strike/delta/expiration shape on both
+        # "days" -- this is exactly the collision scenario: identical
+        # selected contract, called on two different scan dates. Each
+        # day's chain is freshly timestamped (as any real day's fetch
+        # would be) so the freshness gate doesn't confound the id test.
+        return make_chain([make_put(95.0, -0.20, bid=1.95, ask=2.05)], timestamp=as_of)
+
+    def test_same_ticker_two_different_scan_dates_never_collide(self):
+        day_two_now = datetime(NOW.year, NOW.month, NOW.day + 1, NOW.hour, tzinfo=timezone.utc)
+        day_one = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), self._same_shape_chain(NOW), [StrategyType.CASH_SECURED_PUT],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW,
+        )
+        day_two = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), self._same_shape_chain(day_two_now), [StrategyType.CASH_SECURED_PUT],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=day_two_now,
+        )
+        assert len(day_one) == 1 and len(day_two) == 1
+        id_one = day_one[0].proposal.proposal_id
+        id_two = day_two[0].proposal.proposal_id
+        assert id_one != id_two, "proposal_id collided across two different scan runs for the same ticker/strike"
+
+    def test_proposal_id_encodes_the_scan_date(self):
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), self._same_shape_chain(NOW), [StrategyType.CASH_SECURED_PUT],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW,
+        )
+        assert NOW.date().isoformat() in candidates[0].proposal.proposal_id
 
 
 class TestGeneratedProposalsAreValid:

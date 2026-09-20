@@ -20,6 +20,7 @@ from src.brokers.base import (
     Position,
     ReconciliationDiscrepancy,
     ReconciliationReport,
+    SqliteIdempotencyStore,
 )
 from src.data.option_chain import OptionRight
 
@@ -171,6 +172,66 @@ class TestInMemoryIdempotencyStore:
         store.save(Order(**_order_kwargs(status=OrderStatus.FILLED)))
         assert len(store.all()) == 1
         assert store.get("co-1").status == OrderStatus.FILLED
+
+
+class TestSqliteIdempotencyStoreRegressionSY002:
+    """SY-002: `InMemoryIdempotencyStore` cannot recognize a retry after
+    a process restart -- these tests prove `SqliteIdempotencyStore`
+    does, by discarding the Python object entirely (simulating a crash)
+    and constructing a brand-new instance against the same file."""
+
+    def test_get_missing_returns_none(self, tmp_path):
+        store = SqliteIdempotencyStore(tmp_path / "idempotency.db")
+        assert store.get("nope") is None
+
+    def test_save_then_get_roundtrips(self, tmp_path):
+        store = SqliteIdempotencyStore(tmp_path / "idempotency.db")
+        order = Order(**_order_kwargs())
+        store.save(order)
+        fetched = store.get("co-1")
+        assert fetched is not None
+        assert fetched.client_order_id == "co-1"
+        assert fetched.status == OrderStatus.SUBMITTED
+
+    def test_all_returns_every_saved_order(self, tmp_path):
+        store = SqliteIdempotencyStore(tmp_path / "idempotency.db")
+        store.save(Order(**_order_kwargs(client_order_id="co-1")))
+        store.save(Order(**_order_kwargs(client_order_id="co-2")))
+        assert {o.client_order_id for o in store.all()} == {"co-1", "co-2"}
+
+    def test_save_overwrites_same_client_order_id(self, tmp_path):
+        store = SqliteIdempotencyStore(tmp_path / "idempotency.db")
+        store.save(Order(**_order_kwargs(status=OrderStatus.SUBMITTED)))
+        store.save(Order(**_order_kwargs(status=OrderStatus.FILLED)))
+        assert len(store.all()) == 1
+        assert store.get("co-1").status == OrderStatus.FILLED
+
+    def test_survives_simulated_process_restart(self, tmp_path):
+        """The actual SY-002 reproduction: save an order, discard the
+        store object entirely (no shared connection, no shared Python
+        state of any kind survives), then construct a *brand-new*
+        instance pointed at the same file path -- a genuine restart
+        must still recognize the client_order_id."""
+        db_path = tmp_path / "idempotency.db"
+        first_process_store = SqliteIdempotencyStore(db_path)
+        first_process_store.save(Order(**_order_kwargs(client_order_id="co-crash-then-retry", status=OrderStatus.FILLED)))
+        del first_process_store  # simulate the process crashing
+
+        second_process_store = SqliteIdempotencyStore(db_path)
+        recovered = second_process_store.get("co-crash-then-retry")
+        assert recovered is not None
+        assert recovered.status == OrderStatus.FILLED
+
+    def test_in_memory_store_by_contrast_does_not_survive_a_restart(self):
+        """Documents exactly the gap SqliteIdempotencyStore closes: a
+        fresh InMemoryIdempotencyStore (the "process restart") has no
+        way to see an order saved by a prior instance."""
+        first_process_store = InMemoryIdempotencyStore()
+        first_process_store.save(Order(**_order_kwargs(client_order_id="co-1")))
+        del first_process_store
+
+        second_process_store = InMemoryIdempotencyStore()
+        assert second_process_store.get("co-1") is None
 
 
 def test_broker_is_abstract():

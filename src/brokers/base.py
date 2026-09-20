@@ -12,9 +12,11 @@ to honor it.
 """
 from __future__ import annotations
 
+import sqlite3
 from abc import ABC, abstractmethod
 from datetime import date, datetime
 from enum import Enum
+from pathlib import Path
 
 from pydantic import Field
 
@@ -177,7 +179,10 @@ class IdempotencyStore(ABC):
     refuse to duplicate a submission. A concrete adapter is handed one
     of these (defaulting to `InMemoryIdempotencyStore`); Phase 0's real,
     persisted order state machine (ARCHITECTURE.md §7) is the eventual
-    durable implementation — not built yet."""
+    full durable implementation — `SqliteIdempotencyStore` below is a
+    genuinely durable (survives a process restart), narrower interim
+    implementation of this same interface, usable today wherever
+    crash-then-retry safety actually matters."""
 
     @abstractmethod
     def get(self, client_order_id: str) -> Order | None: ...
@@ -191,7 +196,9 @@ class IdempotencyStore(ABC):
 
 class InMemoryIdempotencyStore(IdempotencyStore):
     """Process-local only — lost on restart. A placeholder, not a
-    production guarantee; flagged, not hidden."""
+    production guarantee; flagged, not hidden. Use
+    `SqliteIdempotencyStore` wherever a retry after a crash must still
+    be recognized as a duplicate."""
 
     def __init__(self) -> None:
         self._orders: dict[str, Order] = {}
@@ -204,6 +211,49 @@ class InMemoryIdempotencyStore(IdempotencyStore):
 
     def all(self) -> list[Order]:
         return list(self._orders.values())
+
+
+class SqliteIdempotencyStore(IdempotencyStore):
+    """SY-002 fix: a durable `IdempotencyStore` backed by a single
+    sqlite file. Unlike `InMemoryIdempotencyStore`, a `client_order_id`
+    recorded here is still recognized by a *freshly constructed*
+    instance pointed at the same file — i.e. it survives the process
+    that recorded it crashing and being restarted, which is exactly the
+    guarantee `Broker.place_order`'s own docstring says a caller-side
+    retry depends on. Each operation opens and closes its own
+    connection rather than holding one open for the store's lifetime,
+    so it has no in-process state that a "crash" (simply discarding the
+    Python object, as this class's own tests do) could lose."""
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._path = str(db_path)
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS idempotency_orders ("
+                "client_order_id TEXT PRIMARY KEY, order_json TEXT NOT NULL)"
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self._path)
+
+    def get(self, client_order_id: str) -> Order | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT order_json FROM idempotency_orders WHERE client_order_id = ?", (client_order_id,)
+            ).fetchone()
+        return Order.model_validate_json(row[0]) if row is not None else None
+
+    def save(self, order: Order) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO idempotency_orders (client_order_id, order_json) VALUES (?, ?)",
+                (order.client_order_id, order.model_dump_json()),
+            )
+
+    def all(self) -> list[Order]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT order_json FROM idempotency_orders").fetchall()
+        return [Order.model_validate_json(row[0]) for row in rows]
 
 
 class Broker(ABC):

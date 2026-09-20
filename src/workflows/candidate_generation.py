@@ -205,10 +205,20 @@ def generate_candidates(
     candidates: list[Candidate] = []
     counter = 0
 
-    def _next_id() -> str:
+    def _next_id(strategy_tag: str, expiration: date, strikes: tuple[float, ...]) -> str:
+        # SY-001 fix: a bare in-call counter (`f"{prefix}-{ticker}-{n}"`)
+        # is unique only within one `generate_candidates` call. Reused
+        # across separate scan runs against the same broker/idempotency
+        # instance (a persistent multi-day paper-trading loop), two
+        # different days' first candidates for the same ticker would
+        # collide on the identical id, and the second day's genuinely
+        # new order would be silently treated as a duplicate of the
+        # first. Including the scan date, expiration, and strike(s)
+        # makes the id unique per *intended trade*, not per call order.
         nonlocal counter
         counter += 1
-        return f"{proposal_id_prefix}-{ticker}-{counter}"
+        strike_part = "-".join(f"{s:g}" for s in strikes)
+        return f"{proposal_id_prefix}-{ticker}-{now.date().isoformat()}-{strategy_tag}-{expiration.isoformat()}-{strike_part}-{counter}"
 
     if StrategyType.CASH_SECURED_PUT in strategies:
         best: tuple[date, OptionContract] | None = None
@@ -223,7 +233,7 @@ def generate_candidates(
         if best is not None:
             exp, contract = best
             proposal = _build_proposal(
-                proposal_id=_next_id(), ticker=ticker, strategy=StrategyType.CASH_SECURED_PUT, expiration=exp,
+                proposal_id=_next_id("csp", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.CASH_SECURED_PUT, expiration=exp,
                 legs=[OptionLeg(right=OptionRight.PUT, strike=contract.strike, side=LegSide.SELL)],
                 target_entry=contract.mid, market_regime=market_regime,
                 thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE, IV {contract.iv:.0%}" if contract.iv is not None else f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE",
@@ -248,7 +258,7 @@ def generate_candidates(
             if best is not None:
                 exp, contract = best
                 proposal = _build_proposal(
-                    proposal_id=_next_id(), ticker=ticker, strategy=StrategyType.COVERED_CALL, expiration=exp,
+                    proposal_id=_next_id("cc", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.COVERED_CALL, expiration=exp,
                     legs=[OptionLeg(right=OptionRight.CALL, strike=contract.strike, side=LegSide.SELL)],
                     target_entry=contract.mid, market_regime=market_regime,
                     thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta covered call on {ticker} against {holding.shares} held shares, {(exp - now.date()).days} DTE",
@@ -277,7 +287,7 @@ def generate_candidates(
         if best is not None:
             exp, short_put, long_put, credit = best
             proposal = _build_proposal(
-                proposal_id=_next_id(), ticker=ticker, strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=exp,
+                proposal_id=_next_id("pcs", exp, (short_put.strike, long_put.strike)), ticker=ticker, strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=exp,
                 legs=[
                     OptionLeg(right=OptionRight.PUT, strike=short_put.strike, side=LegSide.SELL),
                     OptionLeg(right=OptionRight.PUT, strike=long_put.strike, side=LegSide.BUY),

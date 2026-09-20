@@ -48,7 +48,7 @@ def build_occ_symbol(ticker: str, expiration: date, right: OptionRight, strike: 
 
 
 def validate_and_build_order_request(
-    approved_order: ApprovedOrder,
+    approved_order: ApprovedOrder | None,
     *,
     risk_decision: RiskDecision,
     approved_contracts: int | None,
@@ -61,7 +61,23 @@ def validate_and_build_order_request(
     raising `OrderValidationError` with a specific reason. Every
     parameter is required explicitly (no defaults that could paper over
     a caller forgetting to pass one), matching this platform's "a
-    missing stage means REJECT ORDER" rule at the parameter level."""
+    missing stage means REJECT ORDER" rule at the parameter level.
+
+    TS-004 defense-in-depth: `approved_order` is `None` for any decision
+    the Risk Engine doesn't build one for (today, that's every non-OPEN
+    action, since the Risk Engine itself now rejects those explicitly
+    before ever reaching here — see its TS-004 fix). This module must
+    never assume `approved_order` is real just because it was told
+    APPROVE/RESIZE; the check below turns a missing order into this
+    module's own clean `OrderValidationError` rather than the
+    `AttributeError` a first unguarded `approved_order.quantity` access
+    used to raise — one that the pipeline's Order Validator stage
+    couldn't catch (it only catches `OrderValidationError`), crashing
+    the entire pipeline call."""
+    if approved_order is None:
+        raise OrderValidationError(
+            "no ApprovedOrder to place an order for — the Risk Engine did not build one for this proposal"
+        )
     if risk_decision not in (RiskDecision.APPROVE, RiskDecision.RESIZE):
         raise OrderValidationError(
             f"cannot place an order for a Risk Engine decision of {risk_decision.value!r} — "

@@ -91,6 +91,7 @@ class MorningScanReport:
     vix_level: float | None
     notable_economic_events: tuple[str, ...]
     earnings_screened_out: tuple[str, ...]
+    reconciliation_screened_out: tuple[str, ...]
     results: tuple[CandidateResult, ...]
     no_trade_reason: str | None
 
@@ -124,10 +125,29 @@ async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
     sectors = sorted(set(inputs.portfolio.sector_by_ticker.values()))
     sector_exposure = {sector: sector_exposure_pct(inputs.portfolio, sector) for sector in sectors}
 
+    # SY-006 fix: a ticker reconciliation has already flagged as
+    # "confirmed in Fidelity but not tracked internally" must not also
+    # get a fresh candidate generated for it in the same run -- without
+    # this, the very report that flags the discrepancy could still
+    # produce (and potentially get approved) a real duplicate trade
+    # recommendation for a position that's already open, simply because
+    # the duplicate-position check only ever sees `portfolio.positions`
+    # (the same stale internal view the discrepancy is about), never
+    # the confirmed-but-untracked Fidelity position itself.
+    tickers_with_untracked_fidelity_positions = {
+        d.ticker for d in reconciliation.discrepancies if d.kind == "missing_from_internal"
+    }
+
     earnings_by_ticker = inputs.earnings_by_ticker or {}
     earnings_screened_out: list[str] = []
+    reconciliation_screened_out: list[str] = []
     candidate_pool: list[Candidate] = []
     for entry in inputs.universe:
+        if entry.ticker in tickers_with_untracked_fidelity_positions:
+            reconciliation_screened_out.append(
+                f"{entry.ticker}: confirmed Fidelity position not yet tracked internally (see reconciliation)"
+            )
+            continue
         chain = fresh_chains.get(entry.ticker)
         if chain is None:
             continue
@@ -148,13 +168,25 @@ async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
     candidate_pool = candidate_pool[: inputs.max_candidates]
 
     results: list[CandidateResult] = []
+    # SY-004 fix: start from the pre-scan snapshot, then thread each
+    # candidate's own `updated_portfolio` forward as the *next*
+    # candidate's Risk Engine input. Without this, every candidate in
+    # the batch is checked against the same stale, pre-scan cash/
+    # position state, so the Risk Engine's cash-reserve/capital-deployed/
+    # concentration/correlation/duplicate-position checks never see what
+    # this same run has already approved moments earlier -- two
+    # individually-compliant candidates could together breach a limit
+    # that applies to the portfolio as a whole. A candidate that didn't
+    # fill (rejected, no fill, reprice required) leaves `current_portfolio`
+    # unchanged, since there is nothing new for the next candidate to see.
+    current_portfolio = inputs.portfolio
     for candidate in candidate_pool:
         chain = fresh_chains[candidate.proposal.ticker]
         snapshot = inputs.snapshot_factory(chain, candidate)
         request = PipelineRequest(
             proposal=candidate.proposal,
             market_data=chain,
-            portfolio=inputs.portfolio,
+            portfolio=current_portfolio,
             limits=inputs.limits,
             market_regime=inputs.market_regime,
             risk_reviewer_note=inputs.risk_reviewer_note_factory(candidate.proposal),
@@ -166,6 +198,8 @@ async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
         )
         outcome = await run_order_pipeline(request, inputs.stages)
         results.append(CandidateResult(candidate=candidate, outcome=outcome))
+        if outcome.updated_portfolio is not None:
+            current_portfolio = outcome.updated_portfolio
 
     no_trade_reason = _no_trade_reason(results, candidate_pool)
 
@@ -187,6 +221,7 @@ async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
         vix_level=inputs.vix_level,
         notable_economic_events=tuple(inputs.notable_economic_events),
         earnings_screened_out=tuple(earnings_screened_out),
+        reconciliation_screened_out=tuple(reconciliation_screened_out),
         results=tuple(results),
         no_trade_reason=no_trade_reason,
     )
@@ -230,6 +265,8 @@ def render_morning_scan_report(report: MorningScanReport) -> str:
         lines += [f"Stale data: {', '.join(report.freshness.stale_symbols)}"]
     if not report.reconciliation.clean:
         lines += [f"Reconciliation discrepancies: {len(report.reconciliation.discrepancies)} (see log)"]
+    if report.reconciliation_screened_out:
+        lines += [f"Screened out pending reconciliation: {'; '.join(report.reconciliation_screened_out)}"]
     if report.earnings_screened_out:
         lines += [f"Screened out for earnings window: {'; '.join(report.earnings_screened_out)}"]
 

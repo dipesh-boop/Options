@@ -18,6 +18,7 @@ from src.orchestration.pipeline import (
     PipelineRequest,
     PipelineStages,
     PipelineStatus,
+    SqliteDatabase,
     default_portfolio_update_stage,
     default_quant_stage,
     run_order_pipeline,
@@ -90,6 +91,109 @@ class TestHappyPath:
         assert len(outcome.updated_portfolio.positions) == 1
         assert len(stages.database.all()) == 1
         assert stages.database.all()[0].status == PipelineStatus.FILLED
+
+
+class TestCloseRollProposalsRegressionTS004:
+    """TS-004 end to end: a CLOSE/ROLL proposal used to crash
+    `run_order_pipeline` with an uncaught `AttributeError` (the Risk
+    Engine approved it with no `approved_order`, and the Order
+    Validator's first unguarded attribute access blew up). The full
+    pipeline call must now return a clean, normal `PipelineOutcome`."""
+
+    @pytest.mark.asyncio
+    async def test_close_proposal_does_not_crash_the_pipeline(self):
+        from src.llm.schemas import TradeAction
+
+        stages = _full_stages()
+        close_request = _request(proposal=make_proposal(action=TradeAction.CLOSE))
+        outcome = await run_order_pipeline(close_request, stages)  # must not raise
+        assert outcome.status == PipelineStatus.REJECTED
+        assert outcome.rejected_stage == "risk_engine"
+        assert "unsupported" in outcome.reason.lower() or "not yet a supported" in outcome.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_roll_proposal_does_not_crash_the_pipeline(self):
+        from src.llm.schemas import TradeAction
+
+        stages = _full_stages()
+        roll_request = _request(proposal=make_proposal(action=TradeAction.ROLL))
+        outcome = await run_order_pipeline(roll_request, stages)  # must not raise
+        assert outcome.status == PipelineStatus.REJECTED
+
+
+class TestSqliteDatabaseSurvivesRestartRegressionSY002:
+    """SY-002: `InMemoryDatabase` loses every pipeline-run record on a
+    process restart. `SqliteDatabase` is the durable alternative -- a
+    record saved through one instance must still be readable by a
+    brand-new instance pointed at the same file."""
+
+    @pytest.mark.asyncio
+    async def test_record_survives_a_simulated_process_restart(self, tmp_path):
+        db_path = tmp_path / "pipeline.db"
+        stages = _full_stages(database=SqliteDatabase(db_path))
+        outcome = await run_order_pipeline(_request(), stages)
+        assert outcome.status == PipelineStatus.FILLED
+        del stages  # simulate the process crashing -- no Python object survives
+
+        reopened = SqliteDatabase(db_path)
+        records = reopened.all()
+        assert len(records) == 1
+        assert records[0].status == PipelineStatus.FILLED
+        assert records[0].proposal_id == _request().proposal.proposal_id
+        assert records[0].order is not None and records[0].order.filled_quantity == 2
+        assert records[0].fidelity_ticket is not None
+
+
+class TestPortfolioUpdateFailureRegressionSY003:
+    """SY-003: an exception in the Portfolio-update stage used to be
+    the one stage not wrapped in try/except -- it propagated straight
+    out of `run_order_pipeline` uncaught, even though the fill had
+    already happened (cash debited, Fill records appended), and no
+    database record was ever written for it. These tests prove the
+    real fill is never lost: the pipeline call always returns instead
+    of raising, and a database record is always saved."""
+
+    @pytest.mark.asyncio
+    async def test_pipeline_call_does_not_raise_when_portfolio_update_stage_fails(self):
+        def failing_portfolio_update(portfolio, proposal, qa, order):
+            raise RuntimeError("boom: portfolio update exploded")
+
+        stages = _full_stages(portfolio_update_stage=failing_portfolio_update)
+        outcome = await run_order_pipeline(_request(), stages)  # must not raise
+        assert outcome.rejected_stage == "portfolio_update"
+        assert "boom: portfolio update exploded" in outcome.reason
+
+    @pytest.mark.asyncio
+    async def test_the_real_fill_is_still_reported_not_masked_as_a_rejection(self):
+        """The order genuinely filled -- that fact must survive even
+        though the portfolio update itself failed, so a human or
+        downstream reconciliation never mistakes this for "nothing
+        happened.\""""
+        def failing_portfolio_update(portfolio, proposal, qa, order):
+            raise RuntimeError("boom")
+
+        stages = _full_stages(portfolio_update_stage=failing_portfolio_update)
+        outcome = await run_order_pipeline(_request(), stages)
+        assert outcome.status == PipelineStatus.FILLED
+        assert outcome.order is not None and outcome.order.filled_quantity == 2
+        assert outcome.updated_portfolio is None  # honestly absent, never fabricated
+
+    @pytest.mark.asyncio
+    async def test_a_database_record_is_still_written_despite_the_failure(self):
+        """The permanent-gap half of SY-003: previously, nothing ever
+        reached _record() on this path, so a retry with the same
+        proposal would find PaperBroker's idempotency check satisfied
+        and short-circuit without ever re-running the failing update
+        logic -- silently losing this fill forever."""
+        def failing_portfolio_update(portfolio, proposal, qa, order):
+            raise RuntimeError("boom")
+
+        stages = _full_stages(portfolio_update_stage=failing_portfolio_update)
+        outcome = await run_order_pipeline(_request(), stages)
+        records = stages.database.all()
+        assert len(records) == 1
+        assert records[0].status == PipelineStatus.FILLED
+        assert records[0].order is not None and records[0].order.filled_quantity == 2
 
 
 class TestMissingStages:

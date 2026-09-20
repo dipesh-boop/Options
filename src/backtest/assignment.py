@@ -56,3 +56,43 @@ def settle_leg(leg: BacktestLeg, contracts: int, settlement_price: float) -> Leg
 
 def settle_position(legs: list[BacktestLeg], contracts: int, settlement_price: float) -> list[LegSettlement]:
     return [settle_leg(leg, contracts, settlement_price) for leg in legs]
+
+
+def realized_settlement_pnl(
+    settlements: list[LegSettlement],
+    contracts: int,
+    *,
+    underlying_shares_held: int = 0,
+    underlying_cost_basis: float = 0.0,
+) -> float:
+    """Converts `settle_position`'s per-leg `cash_impact`/`share_impact`
+    into a realized P&L contribution, using **intrinsic value** rather
+    than the full strike notional. Neither the backtest engine nor the
+    rejected-trade-review "what if" pricer maintains an ongoing share
+    ledger, so any stock position freshly *created* by assignment/
+    exercise (a cash-secured put assigned, or either leg of a spread) is
+    treated as immediately valued at the settlement price it was created
+    at — economically equivalent to marking it to market and closing it
+    out on the spot, which is exactly what "intrinsic value" means here.
+
+    The one exception is a leg that *disposes of* shares the caller
+    already held before this settlement (a covered position, signaled by
+    `underlying_shares_held > 0` — the only shape in this codebase that
+    ever sets it, a covered call's short call leg being assigned): that
+    leg's gain/loss is realized against its *actual* cost basis, not the
+    option's own intrinsic value, since those shares were not created by
+    this settlement and may have a cost basis far from the strike.
+    """
+    total = 0.0
+    for settlement in settlements:
+        if not settlement.assigned_or_exercised:
+            continue
+        is_short = settlement.leg.side == "sell"
+        disposes_shares = settlement.share_impact < 0
+        if is_short and disposes_shares and underlying_shares_held > 0:
+            total += (settlement.leg.strike - underlying_cost_basis) * _CONTRACT_MULTIPLIER * contracts
+        elif is_short:
+            total -= settlement.intrinsic_value * _CONTRACT_MULTIPLIER * contracts
+        else:
+            total += settlement.intrinsic_value * _CONTRACT_MULTIPLIER * contracts
+    return total

@@ -1964,6 +1964,120 @@ don't rewrite history.
       has no automated capture path — something still needs to actually
       look up a later price and call `record_subsequent_price`; nothing
       does that today
+- [ ] **New from Step 17**: 20 MEDIUM/LOW findings from `SECURITY_AUDIT.md`
+      remain open and unremediated (all 10 CRITICAL/HIGH findings were
+      fixed in Step 17B — see below). Notable ones: no ticker-match/
+      liquidity check on the Quant Engine's own stage-1 pass (MD-002),
+      `OptionChain`/`UnderlyingQuote` missing consistency/bid≤ask
+      validators (MD-004/MD-005), `PaperBroker` never re-marks an
+      assigned equity position to the live price (OP-002), Devil's
+      Advocate's `why_not_thesis` re-embedded unsanitized into the
+      Portfolio Manager's next LLM call (LM-001), and corporate
+      actions/stock splits entirely unhandled (MD-008/OP-007). Full list
+      with reproduction steps and recommended remediation in
+      `SECURITY_AUDIT.md`.
+
+## 2026-09-20 (cont'd) — Hostile system audit and remediation (Steps 17-17B)
+
+**Step 17 — hostile audit.** Assumed the posture of an independent team
+hired to find every way this platform could lose money incorrectly,
+calculate risk incorrectly, corrupt accounting, hallucinate data, bypass
+safeguards, or execute unintended trades. Four parallel read-only
+subagents covered market-data failures, options mechanics, system/
+orchestration failures, and LLM boundary/quantitative correctness; direct
+manual review covered the Risk Engine, drawdown/kill-switch/concentration/
+correlation, the Fidelity manual-execution boundary, and the trade state
+machine. Produced `SECURITY_AUDIT.md`: 36 findings (4 CRITICAL, 6 HIGH, 14
+MEDIUM, 12 LOW) plus a consolidated "verified safe" list covering position
+sizing, LLM schema numeric-field boundaries, Black-Scholes/probability/
+payoff correctness, NaN/Infinite guarding, the full Fidelity-security
+surface, and the trade state machine. No code was changed in Step 17 —
+audit only, as instructed.
+
+**Step 17B — remediate every CRITICAL/HIGH finding.** Fixed all 10
+CRITICAL/HIGH findings from the audit, each with a regression test proving
+the vulnerability is closed, without weakening or deleting any existing
+test:
+
+- **OP-001** (CRITICAL) — backtest assignment/exercise was discarding the
+  share-value side of settlement, corrupting P&L by the full strike
+  notional (a currently-passing test asserted a ~$9,000 overstatement on
+  a single-contract CSP assignment). Added
+  `src.backtest.assignment.realized_settlement_pnl`, converting
+  settlement into an intrinsic-value-based economic impact (a covered
+  position's own cost basis is used where applicable); `engine.py` and
+  `rejected_trade_review.py` both now consume it. Corrected the two named
+  tests that had encoded the bug's wrong output as "correct."
+- **SY-001** (CRITICAL) — screener `proposal_id`s collided across
+  separate scan runs (bare in-call counter, no date/expiration/strike
+  encoded), silently swallowing genuinely new trades as stale duplicates.
+  `_next_id` now encodes the scan date, strategy, expiration, and
+  strike(s).
+- **SY-002** (CRITICAL) — all idempotency/database state was in-memory
+  only, unable to recognize a crash-then-retry. Added
+  `SqliteIdempotencyStore`/`SqliteDatabase`, durable drop-in
+  implementations of the existing `IdempotencyStore`/`Database`
+  interfaces (in-memory defaults unchanged).
+- **SY-004** (CRITICAL) — sequential candidates within one `/morning-scan`
+  run all evaluated against the same pre-scan portfolio snapshot, so
+  cumulative risk-limit enforcement across a batch never actually
+  happened. `run_morning_scan` now threads each candidate's own
+  `updated_portfolio` forward as the next candidate's Risk Engine input.
+- **MD-001** (HIGH) — the Risk Engine's freshness gate silently fell back
+  to `proposal.timestamp` (never independently verified) whenever a
+  caller omitted `now`. `now` is now a required keyword-only argument
+  with no default and no fallback.
+- **MD-003** (HIGH) — contract/quote matching never verified the
+  underlying ticker, only (expiration, strike, right). Both
+  `_find_contract`/`resolve_leg_contracts` (trade_risk.py) and
+  `_match_quotes_for_legs` (backtest/engine.py) now match on underlying
+  too.
+- **SY-003** (HIGH) — an exception in the Portfolio-update pipeline stage
+  was uncaught, and (unlike every other stage) never reached the database
+  write — a real fill could be permanently lost. Stage 7 now wraps in the
+  same try/except-then-record pattern every other stage uses.
+- **SY-005** (HIGH) — `Portfolio.cash` was never updated after a fill,
+  only `positions`. `default_portfolio_update_stage` now reduces `cash`
+  by the new position's `capital_at_risk`, consistent with this
+  `Portfolio` type's own `capital_deployed_pct` semantics; fails closed
+  (explicit `ValueError`, since `model_copy` doesn't re-validate) rather
+  than silently going negative.
+- **SY-006** (HIGH) — reconciliation discrepancies were only ever
+  reported, never acted on — the same scan run that flagged an untracked
+  Fidelity position could still generate a fresh, real duplicate
+  recommendation for it. `run_morning_scan` now excludes any ticker with
+  an unresolved `missing_from_internal` discrepancy from candidate
+  generation for that run.
+- **TS-004** (HIGH) — a CLOSE/ROLL proposal the Risk Engine approved had
+  no `ApprovedOrder` built for it, and the Order Validator's first
+  unguarded `approved_order.quantity` access raised a plain
+  `AttributeError`, crashing the whole pipeline call. The Risk Engine now
+  rejects non-OPEN actions cleanly with a new `ReasonCode
+  .REJECT_UNSUPPORTED_ACTION`; `validate_and_build_order_request` also
+  gained an explicit `None` check (defense-in-depth) that raises its own
+  `OrderValidationError` instead.
+
+New test files: `tests/unit/orchestration/test_portfolio_update_stage.py`,
+`tests/unit/risk/test_trade_risk_contract_matching.py`. Extensive
+additions to `tests/unit/backtest/test_assignment.py`,
+`tests/unit/backtest/test_engine.py`, `tests/unit/brokers/test_base.py`,
+`tests/unit/brokers/test_order_validator.py`,
+`tests/unit/brokers/test_paper_broker.py`,
+`tests/unit/orchestration/test_pipeline.py`,
+`tests/unit/risk/test_engine_bypass_attempts.py`,
+`tests/unit/workflows/test_candidate_generation.py`, and
+`tests/unit/workflows/test_morning_scan.py`. The only lines removed from
+any pre-existing test were the 3 assertions that had encoded OP-001's bug
+as "correct" (now corrected) and the mechanical addition of a required
+`now=` argument to call sites that previously omitted it (MD-001) — no
+assertion was loosened or deleted to reach a passing state. Full suite:
+1531 passed, 4 skipped (up from 1485 at the end of Step 16).
+
+`SECURITY_AUDIT.md` updated in place: every fixed finding now carries a
+**Status: FIXED (Step 17B)** note naming the fix and its regression test;
+the summary table gained a Status column; the 20 remaining MEDIUM/LOW
+findings are explicitly marked OPEN and still describe real, unremediated
+gaps.
 
 ## Next up
 
