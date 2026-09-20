@@ -1568,8 +1568,131 @@ don't rewrite history.
   independence/production-rule-boundary proof mirroring
   `test_devils_advocate_independence.py`'s source-inspection technique).
 
-## Open decisions carried forward (updated a fourth time)
+## 2026-09-20 — Daily `/morning-scan` workflow (Step 15)
 
+- **Read first**: `src.data.provider` (freshness primitives to reuse for
+  stages 1-2), `src.orchestration.pipeline` in full (confirmed stages
+  14-21 of the requested 21-step workflow are already exactly
+  `run_order_pipeline`, called once per candidate — Quant Engine,
+  Devil's Advocate, Portfolio Manager, Risk Engine (which already runs
+  correlation/concentration internally, covering stages 17-18), PaperBroker,
+  and Fidelity ticket generation), `src.risk.portfolio_risk` (capital/cash/
+  sector-exposure helpers already exist and needed no reimplementation),
+  `src.brokers.fidelity.render_ticket_text` (already produces most of the
+  spec's FIDELITY TRADE TICKET fields — reused, not duplicated), and
+  confirmed no `.claude/commands/` directory existed yet.
+- **`src/workflows/`** — new package, three modules plus the orchestrator,
+  covering stages 1-13 (steps 14-21 are pure reuse):
+  - `feed_health.py` (stages 1-2): `verify_market_data_feeds`/
+    `verify_data_freshness` — pure judgment functions over
+    already-attempted fetch results (`dict[symbol, OptionChain | Exception]`),
+    matching `src.data`'s own "normalize what a provider said, don't
+    fetch it" separation; this module performs no I/O of its own.
+  - `reconciliation.py` (stages 3-4): `ConfirmedFidelityPosition` — data
+    a human typed in after looking at their own Fidelity account, never
+    fetched, scraped, or inferred (Fidelity stays `MANUAL_EXECUTION`
+    forever) — and `reconcile_portfolio`, using the exact same identity
+    key `src.risk.portfolio_risk.find_duplicate_position` already
+    established (ticker + strategy + expiration + exact strike set),
+    reporting `missing_from_internal`/`missing_from_fidelity`/
+    `quantity_mismatch` discrepancies distinctly rather than folding
+    them into one generic "mismatch."
+  - `candidate_generation.py` (stages 10-13): **the first deterministic
+    Strategy Screener this codebase has had** — closing part of the gap
+    flagged in every progress.md entry since Step 9. `passes_liquidity_filter`
+    reuses `config/risk_limits.yaml`'s own thresholds (never a second
+    set of numbers); `generate_candidates` picks, per requested strategy
+    per ticker, the single contract (or short/long pair, for a put
+    credit spread) whose data-reported delta is closest to a configured
+    target range and that clears liquidity — a covered call is only
+    generated for a ticker where `Portfolio.underlying_holdings` already
+    shows >= 100 shares held. Every `TradeProposal` this module builds
+    still goes through the full, unchanged pipeline before it can become
+    anything — this module only decides what's worth asking the
+    pipeline about; `thesis`/`risk_thesis` are template strings
+    describing exactly what the screen found, never a claim about the
+    future.
+  - `morning_scan.py`: `run_morning_scan` — stages 1-9 assemble context
+    (feed health, freshness, reconciliation, capital/cash/drawdown from
+    `src.risk.portfolio_risk`, and pass-through market
+    regime/VIX/economic-events/earnings-calendar context the caller
+    supplies, since no dedicated `src.llm.market_regime` orchestration
+    module exists yet — a documented gap, not silently built around);
+    stages 10-13 call `generate_candidates` per universe ticker, then
+    screen out any candidate whose expiration falls in a known earnings
+    window (`src.data.earnings.is_within_earnings_window`, reused);
+    stages 14-21 run `run_order_pipeline` once per surviving candidate
+    (ranked by stated credit, capped at `max_candidates`), entirely
+    unchanged from Step 12. `render_morning_scan_report` renders the
+    exact section order and fields the spec names — MARKET REGIME,
+    PORTFOLIO (portfolio-level delta/theta/vega render as "not tracked"
+    when the caller doesn't supply them, never fabricated — no existing
+    type aggregates Greeks across `PortfolioPosition`s yet), TOP
+    OPPORTUNITIES, DEVIL'S ADVOCATE, RISK ENGINE, and FIDELITY TRADE
+    TICKET or, whenever nothing produced a ticket, an explicit `NO
+    TRADE` with a plain-language reason ending in "Cash is a valid
+    position" — never a trade manufactured to have something to show.
+  - `render_morning_scan_ticket_section` adds exactly the three fields
+    `render_ticket_text` doesn't already print (probability of profit,
+    an explicit exit rule beyond the profit target, the Risk Engine's
+    own verdict) rather than modifying that already-tested Step 8/12
+    function.
+- **`.claude/commands/morning-scan.md`** — the actual slash command,
+  the first in `.claude/commands/`: walks all 21 named steps, states
+  exactly which are new Python (1-13) versus reused pipeline calls
+  (14-21), and repeats the three hard constraints inline (never place an
+  order, `NO TRADE` is a complete and successful run, cash is a valid
+  position) so they can't be missed by only reading code.
+- **Full repo test suite: 1424 passing, 4 skipped** (same pre-existing
+  IBKR skips). New: 63 `tests/unit/workflows/` tests — feed health/
+  freshness including custom max-age and vacuous-empty-input cases;
+  reconciliation's three discrepancy kinds plus multi-position
+  independence; liquidity filtering (thin open interest, low volume,
+  wide spread, zero-mid division-by-zero safety); `QuantFilterConfig`
+  validation; candidate generation for all three strategies including
+  the covered-call share-ownership gate, cross-expiration best-delta
+  selection, net-debit and no-further-OTM-leg rejection for spreads, and
+  unique proposal ids; a full approved-trade run producing an
+  `AWAITING_HUMAN` ticket end to end through the unmodified Step 12
+  pipeline; NO TRADE via empty universe, Devil's Advocate REJECT,
+  Portfolio Manager hold-cash, a stale feed, and a zero `max_candidates`
+  cap; feed-failure and reconciliation-discrepancy surfacing in the
+  rendered report; earnings-window screening both triggering and not
+  triggering; honest "not tracked" rendering for unsupplied portfolio
+  Greeks; and a structural proof (source inspection, mirroring
+  `test_devils_advocate_independence.py`'s technique) that this package
+  never imports a live broker client, never constructs a
+  `FidelityTradeTicket` directly, and never calls `transition`/
+  `confirm_fill` — every ticket it can produce comes from the existing,
+  already-tested MANUAL pipeline path and defaults to `AWAITING_HUMAN`.
+
+## Open decisions carried forward (updated a fifth time)
+
+- [ ] **New from Step 15**: no `src.llm.market_regime` orchestration
+      module exists yet — `/morning-scan` stage 6 ("analyze current
+      market regime") currently takes a `MarketRegimeAssessment` as a
+      caller-supplied input rather than computing one itself; the
+      `.claude/agents/market_regime.md` persona exists but nothing
+      wires it to real index/volatility data the way Steps 10/11/14 did
+      for their own agent roles
+- [ ] **New from Step 15**: `run_morning_scan` takes `fetch_results`
+      (already-attempted `OptionChain` fetches) and confirmed Fidelity
+      positions as plain inputs — nothing yet actually drives real
+      `MarketDataProvider.get_option_chain` calls across a universe on a
+      schedule, or prompts a human for Fidelity confirmations; a real
+      `/morning-scan` run today needs a caller to assemble those first
+- [ ] **New from Step 15**: `MorningScanReport.portfolio_net_delta`/
+      `_theta`/`_vega` are caller-supplied and render as "not tracked"
+      when omitted — no existing type aggregates Greeks across
+      `PortfolioPosition`s the way `src.risk.trade_risk.compute_trade_greeks`
+      does for one proposed trade; a portfolio-level Greeks aggregator
+      is genuinely new work, not yet started
+- [ ] **New from Step 15**: `candidate_generation.py`'s screener is
+      deliberately simple (closest-to-target-delta, one candidate per
+      strategy per ticker) — it is not the eventual real Strategy
+      Screener/Opportunity Scanner this platform still needs (candidate
+      ranking is "richest stated credit first," an explicitly provisional
+      heuristic, not a considered scoring model)
 - [ ] Historical options data vendor for backtesting (Phase 2 blocker) —
       now also blocks fully closing the `src.risk.correlation` /
       `src.risk.stress` documented gaps above, *and* is the same open
@@ -1729,47 +1852,55 @@ don't rewrite history.
 
 ## Next up
 
-- Twelve standalone pieces now exist. `src/orchestration/` connects ten
-  of them into a live paper-trading pipeline (Quant Engine, Devil's
+- Thirteen standalone pieces now exist, and for the first time one of
+  them is a command a human actually runs: `/morning-scan`
+  (`.claude/commands/morning-scan.md`) drives the daily research cycle
+  end to end via `src.workflows.run_morning_scan`, which supplies
+  stages 1-13 (feed/freshness verification, Fidelity reconciliation,
+  cash/capital reporting, and this platform's first deterministic
+  Strategy Screener) and hands stages 14-21 to `run_order_pipeline`
+  completely unchanged, one candidate at a time. `src/orchestration/`
+  still connects the live paper-trading pipeline (Quant Engine, Devil's
   Advocate, Portfolio Manager, Python Risk Engine, Order Validator,
-  `PaperBroker`, Portfolio, Database); `src/backtest/` replays historical
-  days against that same fill-price math; `src/research/` is the
-  twelfth — a research layer standing *outside* both, reading only
-  already-closed `src.backtest` trades, that discovers and tracks
-  hypotheses without the authority to act on any of them. Every
-  hypothesis moves through an explicit, forward-only pipeline
-  (Observation -> Hypothesis -> Backtest -> Validation -> Out-of-Sample
-  -> Risk Comparison -> Human Review) with deterministic, Python-computed
-  overfitting warnings (multiple-testing bias, parameter mining, small
-  samples, regime dependence, survivorship bias) and a Fidelity
-  operational-practicality gate that hard-rejects anything requiring
-  high-frequency execution — and a single promotion function, gated on
-  four independently-required conditions including a named human
-  approver, that the Strategy Research Agent has no import path to call.
-  What's still missing to make any of these three layers a real,
-  continuously-running system rather than a function a test or a
-  fixture drives by hand: Phase 0 foundations (a real database in place
+  `PaperBroker`, Portfolio, Database); `src/backtest/` replays
+  historical days against that same fill-price math; `src/research/`
+  discovers and tracks hypotheses without authority to act on any of
+  them; `src/workflows/` is the thirteenth, the layer that actually
+  calls the other two into a single reviewable report ending in either
+  an `AWAITING_HUMAN` Fidelity ticket or an explicit `NO TRADE` — never
+  a trade manufactured because the command was run. What's still
+  missing to make any of these four layers a real, continuously-running
+  system rather than a function a test, a fixture, or a human-supplied
+  input drives by hand: Phase 0 foundations (a real database in place
   of every `InMemory*` placeholder accumulated across Steps 8-14,
-  config, CI), a scheduler to drive market data updates and expiration
-  settlement on a clock instead of by explicit calls, something that
-  persists and re-loads `Portfolio` between pipeline runs instead of
-  each call starting fresh, a real caller that builds `PipelineRequest`
-  from live market data instead of hand-constructed fixtures, a real
-  historical options-data vendor behind `HistoricalOptionChainProvider`,
-  a Strategy Screener to generate real `EntrySignal`s instead of
-  hand-built test fixtures for the pipeline/backtest engine to consume,
-  a real caller for `evaluate_hypothesis`/`promote_strategy`, and the
-  human-approval workflow that would actually authenticate a
-  `human_approver` rather than accept a hardcoded string. Also still
-  open: the `app/` prototype disposition, the accumulating
-  layout/config-duplication/untested-real-adapter questions above, the
-  four Step 9 gaps, the three Step 10 gaps, the two remaining Step 11
-  gaps, the five Step 12 gaps (in-memory database, Portfolio not
-  persisted between runs, no expiration scheduler, the two Risk Engine
-  calls not sharing one atomic market snapshot, no automated
-  subsequent-price capture), the three Step 13 gaps (no Strategy
-  Screener, no clock-driven backtest caller, survivorship bias only
-  preventable "where possible" pending a real vendor), and the three new
-  Step 14 gaps (in-memory hypothesis registry, no real caller for either
+  config, CI), a scheduler to drive market data updates, expiration
+  settlement, and `/morning-scan` itself on a clock instead of by
+  explicit calls, something that persists and re-loads `Portfolio`
+  between runs instead of each call starting fresh, real
+  `MarketDataProvider` calls (and a human-confirmation flow for Fidelity
+  positions) feeding `run_morning_scan`'s inputs instead of
+  hand-assembled fixtures, a real historical options-data vendor behind
+  `HistoricalOptionChainProvider`, an `src.llm.market_regime`
+  orchestration module (today `/morning-scan` takes a
+  `MarketRegimeAssessment` as a caller-supplied input), a
+  portfolio-level Greeks aggregator (today rendered honestly as "not
+  tracked" rather than fabricated), a real caller for
+  `evaluate_hypothesis`/`promote_strategy`, and the human-approval
+  workflow that would actually authenticate a `human_approver` rather
+  than accept a hardcoded string. Also still open: the `app/` prototype
+  disposition, the accumulating layout/config-duplication/
+  untested-real-adapter questions above, the four Step 9 gaps, the three
+  Step 10 gaps, the two remaining Step 11 gaps, the five Step 12 gaps
+  (in-memory database, Portfolio not persisted between runs, no
+  expiration scheduler, the two Risk Engine calls not sharing one atomic
+  market snapshot, no automated subsequent-price capture), the three
+  Step 13 gaps (no Strategy Screener at the backtest-engine level, no
+  clock-driven backtest caller, survivorship bias only preventable
+  "where possible" pending a real vendor), the three Step 14 gaps
+  (in-memory hypothesis registry, no real caller for either
   `evaluate_hypothesis` or `promote_strategy`, no human-approval
-  workflow) above.
+  workflow), and the four new Step 15 gaps (no Market Regime
+  orchestration module, no real feed/reconciliation caller for
+  `run_morning_scan`, no portfolio-level Greeks aggregation, the
+  screener's provisional closest-to-target-delta/richest-credit-first
+  heuristics standing in for a real Opportunity Scanner) above.
