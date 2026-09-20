@@ -2254,3 +2254,225 @@ Full suite: 1650 passed, 4 skipped (up from 1531 at the end of Step
   authentication of any kind in front of the FastAPI app, appropriate
   only because this is explicitly a local, single-user dashboard, not
   something meant to be exposed beyond localhost) above.
+
+## 2026-09-20 (cont'd) — 90-Day Paper-Trading Validation Protocol (Step 19)
+
+**Read first, per Step 19's own instructions**: `ARCHITECTURE.md`,
+`IMPLEMENTATION_PLAN.md`, this file, `SECURITY_AUDIT.md`, and the source
+for `PaperBroker` (`src/brokers/paper.py`), `src.llm.portfolio_manager`,
+the Risk Engine (`src/risk/engine.py` + `src/risk/portfolio_risk.py`),
+the Quant Engine (`src/orchestration/pipeline.py::default_quant_stage`),
+the backtesting system (`src/backtest/{metrics,benchmark,simulator}.py`),
+and "the database" (`InMemoryDatabase`/`SqliteDatabase` in
+`src/orchestration/pipeline.py`, the only durable-storage pattern this
+codebase has — reused directly rather than invented a second time).
+`CLAUDE.md` does not exist in this repository; every other named
+document does.
+
+**Purpose, stated explicitly and enforced structurally, not just in
+prose**: this protocol does not exist to prove the ~12-15% research
+target achievable. `src/validation/gates.py`'s 90-day gate never reads
+`config/validation.yaml`'s `research_targets` section — classification
+depends only on sample adequacy, drawdown, rule compliance, and
+risk-adjusted expectancy sign. The strongest classification a run can
+receive, `PASS_FOR_EXTENDED_VALIDATION`, names its own next step as
+*more* validation, never live trading — `ARCHITECTURE.md` §4's
+"`LIVE` is not built in this phase" remains untouched; nothing in this
+package could wire into a live path even if it tried.
+
+**New package `src/validation/`** (11 modules, `config/validation.yaml`,
+`reports/validation/`):
+
+- `protocol.py` — `ValidationConfig` (same YAML-plus-env-override
+  pattern as `src.risk.limits`), `ValidationPeriod` (start/end date,
+  checkpoint-day membership), `SampleSizeStatus`
+  (`INSUFFICIENT_SAMPLE`/`MINIMUM_SAMPLE`/`PREFERRED_SAMPLE`), and
+  strategy-version freezing: `StrategyVersionManifest` sha256-hashes
+  every strategy-relevant config file
+  (`risk_limits.yaml`/`brokers.yaml`/`validation.yaml`) at freeze time,
+  and `verify_manifest_integrity` re-hashes them later, raising
+  `ManifestDriftError` — loudly, not silently — if any changed. This is
+  detection, not prevention: nothing stops a config edit mid-run: what
+  this guarantees is that it cannot pass unnoticed by whoever reads the
+  report afterward.
+- `session.py` — `ValidationStore` (`InMemoryValidationStore` +
+  `SqliteValidationStore`, the same "each operation opens/closes its own
+  connection" durability pattern as Step 17B's `SqliteDatabase`) storing
+  four append-only record types: closed trades (`TradeRecord`, reused
+  unmodified — a closed options trade's P&L fields describe a backtest,
+  paper, or validation trade identically), immutable `DailySnapshot`s,
+  `HypotheticalOutcome`s (rejected-trade tracking, reused from Step 16),
+  and `RuleViolationRecord`s.
+- `benchmarks.py` — SPY/risk-free/cash comparison, wrapping
+  `src.backtest.benchmark` and adding the cash (flat 0%) comparison Step
+  19 explicitly asks for alongside it.
+- `statistics.py` — bootstrap confidence intervals (percentile
+  resampling, seeded for determinism), a Monte Carlo forward NAV
+  projection built by resampling the run's own observed trade P&Ls
+  (deliberately not `src.quant.monte_carlo`'s lognormal single-option
+  model — a portfolio of discretionary trade outcomes has no assumed
+  distribution), VaR/CVaR (thin wrappers over
+  `src.backtest.metrics.historical_var`/`historical_cvar`, never a
+  second implementation), and the OBSERVED/ESTIMATED/PROJECTED labeling
+  discipline: OBSERVED requires the sample to meet the protocol's own
+  minimum, ESTIMATED is a real-but-thin sample, PROJECTED is any
+  extrapolation beyond the observed window (annualizing a 90-day return
+  is always PROJECTED, regardless of trade count).
+- `decision_quality.py` — combined-and-per-strategy (never blended)
+  wrapping of Step 16's unchanged four-quadrant classifier
+  (`src.workflows.decision_quality`) and rejected-trade statistics
+  (`src.workflows.rejected_trade_review`), scoped to a whole validation
+  run instead of one week.
+- `execution_quality.py` — validation-scoped Fidelity slippage (reuses
+  `src.workflows.execution_quality.summarize_slippage` unmodified) plus
+  genuinely new options-execution metrics (`fill_rate`,
+  `assignment_rate`, `early_close_rate`, `expiration_otm_rate`) that a
+  single week rarely has enough closed trades to make meaningful but a
+  90-day run does; `fill_rate` is honestly `None` unless a caller
+  supplies an attempted-trade count, never fabricated.
+- `regime_analysis.py` — a 5-value `ValidationRegime`
+  (`bull_trending`/`bear_trending`/`range_bound_low_vol`/
+  `range_bound_high_vol`/`crisis_tail_event`), an explicit,
+  flagged interpretation call: Step 19 asked for "5 regimes" without
+  naming them, and the existing `src.llm.schemas.MarketRegimeLabel` only
+  has 4 (it collapses direction into volatility level, insufficient for
+  a short-premium-strategy regime taxonomy). Bucketing reuses
+  `src.research.performance_breakdown.breakdown_by` directly.
+  `RegimeCoverageSummary` honestly reports which of the 5 regimes a
+  90-day window actually saw and flags single-regime dominance (>80% of
+  trades in one regime) — the same "don't claim more than the sample
+  supports" discipline `src.workflows.rejected_trade_review`'s
+  `meaningful_sample` already established.
+- `consistency.py` — weekly consistency (win rate/P&L stdev/losing-week
+  streaks, bucketed in 7-day windows anchored on the validation period's
+  own start date), correlation analysis (thin wrapper over
+  `src.quant.correlations.flag_highly_correlated_pairs`), and
+  `check_rule_compliance` — an **audit**, not an enforcement mechanism
+  (the Risk Engine's veto is already unconditional): flags any trade in
+  the run's own record lacking an APPROVE/RESIZE Risk Engine decision as
+  a compliance gap, combined with whatever was separately logged as a
+  `RuleViolationRecord`.
+- `scorecard.py` — `ValidationScorecard`: seven named categories
+  (RETURN, RISK, TRADE_QUALITY, EXECUTION, CONSISTENCY, COMPLIANCE,
+  SAMPLE_ADEQUACY), **structurally incapable of collapsing into one
+  number** — neither dataclass has an `overall_score`-shaped field at
+  all, proven directly by a test that inspects the dataclasses' own
+  field names rather than just checking behavior.
+- `gates.py` — `evaluate_checkpoint` (30/60-day:
+  `CONTINUE`/`CONTINUE_WITH_WARNING`/`HALT_FOR_INVESTIGATION` — no
+  PASS-shaped value exists in the type at all) and
+  `evaluate_90_day_gate` (5 classifications:
+  `PASS_FOR_EXTENDED_VALIDATION`/`CONDITIONAL_PASS`/
+  `EXTEND_VALIDATION`/`FAIL_RESEARCH_REVIEW`/`HALT`). **"Never PASS
+  before day 90" is structural**: `evaluate_90_day_gate` takes `day: int`
+  and raises `ValueError` if `day < 90` — the only function capable of
+  returning `PASS_FOR_EXTENDED_VALIDATION` refuses to run at all before
+  day 90, rather than trusting every caller to remember. Evaluation
+  order is a strict hard-gate cascade, never a blended score: rule
+  violations/halt-level drawdown -> `HALT`; `INSUFFICIENT_SAMPLE` ->
+  `EXTEND_VALIDATION` regardless of how good performance looks (proven
+  directly with a Sharpe=3.0/return=25% fixture that still extends);
+  negative Sharpe with a loss -> `FAIL_RESEARCH_REVIEW`; `MINIMUM_SAMPLE`
+  clean run -> `CONDITIONAL_PASS`; `PREFERRED_SAMPLE` clean run ->
+  `PASS_FOR_EXTENDED_VALIDATION`. Drawdown thresholds are read from the
+  live `RiskLimitsConfig`, never redeclared in `config/validation.yaml`
+  — the same numbers the Risk Engine itself enforces.
+- `alerts.py` — a closed `AlertCode` enum (drawdown warning/critical,
+  consecutive losses, weekly loss threshold, rule violation, manifest
+  drift, insufficient-sample-at-90) and `generate_alerts`, a pure
+  per-day evaluation with no cross-call state (de-duplicating repeat
+  fires is left to the caller, the same division of responsibility
+  `src.risk.engine` leaves for "what to do with a REJECT").
+
+**`config/validation.yaml`** — duration (90 days), checkpoint days
+(30/60), sample-size thresholds (min 50, preferred 100), default
+starting NAV ($100k), the 12-15% research targets (explicitly read only
+by reporting code, never by `gates.py`), bootstrap/Monte Carlo
+parameters with a fixed random seed, and alert thresholds. Deliberately
+does **not** redeclare drawdown-zone thresholds — `alerts.py`/`gates.py`
+take the live `RiskLimitsConfig` as an explicit parameter instead, so
+the validation protocol's drawdown checks can never drift from the Risk
+Engine's own numbers (previously flagged as a recurring anti-pattern in
+this codebase — three independently-declared 15-minute freshness
+placeholders — deliberately not repeated a fourth time here).
+
+**Database**: no new database technology — `SqliteValidationStore`
+follows the exact `SqliteDatabase`/`SqliteIdempotencyStore` pattern from
+Step 17B (one file, each operation opens/closes its own connection, so
+the store itself holds no in-process state a crash could lose). No
+schema migration framework exists yet in this codebase (still a Phase 0
+item); this is the fourth standalone sqlite-backed store built ahead of
+that infrastructure, consistent with the pattern every other package in
+this codebase has followed since Step 8.
+
+**Tests**: `tests/unit/validation/` — 130 new tests across 11 files,
+covering every module's calculations plus the four scenario categories
+Step 19 explicitly named:
+- **Validation-gate scenarios**: the full `evaluate_90_day_gate` cascade
+  (HALT/EXTEND_VALIDATION/FAIL_RESEARCH_REVIEW/CONDITIONAL_PASS/
+  PASS_FOR_EXTENDED_VALIDATION), plus the "never before day 90"
+  structural guarantee and a direct assertion that `GateClassification`
+  contains nothing LIVE/EXECUTE-shaped.
+- **Insufficient-sample scenarios**: `sample_size_status` boundary tests
+  at 0/49/50/99/100, and the gate test proving `INSUFFICIENT_SAMPLE`
+  extends even a Sharpe=3.0, +25%-return fixture.
+- **Version-change (manifest drift) scenarios**: a config file hashed at
+  freeze time, then modified, correctly raises `ManifestDriftError` both
+  directly (`test_protocol.py`) and via the alerting layer
+  (`test_alerts.py`'s `TestManifestDriftAlert`).
+- **Rule-violation scenarios**: `check_rule_compliance` catching a trade
+  with a `REJECT` risk decision or a missing one, the checkpoint/90-day
+  gate both halting on any violation regardless of every other metric,
+  and each logged violation producing its own critical alert.
+
+Full repo suite: **1780 passed, 4 skipped** (up from 1650 at the end of
+Step 18; the 4 skips are the same pre-existing IBKR live-adapter skips).
+
+## Open decisions carried forward (updated a seventh time)
+
+- [ ] **New from Step 19**: nothing yet actually *runs* a 90-day
+      validation session end to end — `src/validation/` is a fully
+      tested calculation/reporting library over caller-supplied
+      `TradeRecord`s/snapshots/outcomes, the same "isolated but tested"
+      status every other package in this codebase carried at its own
+      introduction (Steps 9-18 all say some version of this). No
+      scheduler drives daily snapshot capture, no code path feeds real
+      `PaperBroker`/Fidelity-confirmed fills into a `ValidationStore`,
+      and no report-rendering function (a `render_validation_report`
+      analogous to `render_morning_scan_report`/
+      `render_weekly_review_report`) exists yet — this step built the
+      engine, not the daily driver.
+- [ ] **New from Step 19**: `RegimeCoverageSummary`'s 5-regime taxonomy
+      is a documented interpretation call (Step 19 said "5 regimes"
+      without naming them), independent of and not reconciled with
+      `src.llm.schemas.MarketRegimeLabel`'s existing 4-value taxonomy —
+      two regime vocabularies now exist in this codebase for two
+      different purposes, flagged rather than silently merged.
+  - `weekly_pnl` is a caller-supplied parameter to
+      `src.validation.alerts.generate_alerts` rather than computed from
+      the store itself — mirrors the same "caller assembles the input"
+      gap every other workflow module in this codebase already carries.
+- [ ] **New from Step 19**: `config/validation.yaml`'s
+      `min_probability_of_profit`/`rejected_trade_min_sample_size`
+      intentionally mirror `src.workflows.decision_quality`'s and
+      `src.workflows.rejected_trade_review`'s existing default constants
+      rather than being independently re-derived — still two places the
+      same starting value is spelled out, now config-overridable in one
+      of them; not fully unified.
+
+## Next up
+
+Per Step 19's explicit instruction: **do not proceed to Step 20.**
+`src/validation/` closes the "how would we know if this actually works"
+gap every prior step's "Next up" section implicitly deferred — Steps
+9-18 built a fully wired PAPER-mode pipeline, a human-execution
+dashboard, and weekly/backtest reporting, but nothing before this step
+could answer "is 90 days of it any good" in a way that couldn't be
+gamed by a lucky sample, a silently-edited risk limit, or judging
+decisions by P&L alone. What remains before a real validation run could
+start end to end: a scheduler or CLI entry point that actually drives
+one (feeding real `PaperBroker`/confirmed-Fidelity fills into a
+`ValidationStore` day by day), a report renderer analogous to
+`render_morning_scan_report`, and — unrelated to this step but still
+open — every Phase 0 foundation item and cross-step gap already
+carried forward above.

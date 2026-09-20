@@ -1,0 +1,66 @@
+# Configuration for the 90-day forward paper-trading validation protocol
+# (src/validation/). Same pattern as config/risk_limits.yaml: application
+# code never hard-codes one of these numbers — every check reads it from
+# here, with an optional per-value environment variable override.
+#
+# Drawdown-zone thresholds (warning/risk-reduction/halt) are deliberately
+# NOT redeclared here — src/validation/alerts.py and src/validation/gates.py
+# take the live src.risk.limits.RiskLimitsConfig as an explicit parameter
+# and read those thresholds from there, so the validation protocol's
+# "is this drawdown a problem" question always uses the exact same numbers
+# the Risk Engine itself enforces, never a second, independently-tuned set.
+
+validation_period:
+  # The protocol's length. Not a risk limit; changing it does not touch
+  # config/risk_limits.yaml.
+  duration_days: 90
+  duration_days_env: OPTIONS_AGENT_VALIDATION_DURATION_DAYS
+  checkpoint_days: [30, 60]
+
+sample_size:
+  # "Purpose is explicitly NOT to prove 12-15% is achievable" — the
+  # sample-size gate is what keeps a lucky 90 days from being read as
+  # proof of anything. Below minimum_completed_trades at day 90, the
+  # 90-day gate can never classify PASS, regardless of how good the
+  # numbers look.
+  minimum_completed_trades: 50
+  minimum_completed_trades_env: OPTIONS_AGENT_VALIDATION_MIN_TRADES
+  preferred_completed_trades: 100
+  preferred_completed_trades_env: OPTIONS_AGENT_VALIDATION_PREFERRED_TRADES
+
+starting_capital:
+  default_nav: 100000.0
+  default_nav_env: OPTIONS_AGENT_VALIDATION_STARTING_NAV
+
+# Aspirational RESEARCH TARGETS ONLY — see ARCHITECTURE.md Section 1
+# ("12-15% is a target the strategy is designed around, not a promise").
+# These are NOT guarantees, NOT pass/fail criteria by themselves, and
+# must NEVER be used to justify modifying src/risk or src/quant rules.
+# src/validation/gates.py's 90-day gate does not read this section at
+# all — see that module's own docstring for why.
+research_targets:
+  annual_return_low_pct: 0.12
+  annual_return_high_pct: 0.15
+  reference_min_sharpe: 1.0
+  reference_max_acceptable_drawdown_pct: 0.15
+
+statistics:
+  bootstrap_iterations: 2000
+  bootstrap_iterations_env: OPTIONS_AGENT_VALIDATION_BOOTSTRAP_ITERATIONS
+  bootstrap_confidence_pct: 0.90
+  monte_carlo_iterations: 2000
+  monte_carlo_iterations_env: OPTIONS_AGENT_VALIDATION_MONTE_CARLO_ITERATIONS
+  var_confidence_pct: 0.95
+  random_seed: 20260101
+
+decision_quality:
+  # Mirrors src.workflows.decision_quality.DEFAULT_MIN_PROBABILITY_OF_PROFIT
+  # and src.workflows.rejected_trade_review.MIN_SAMPLE_SIZE_FOR_CONCLUSIONS —
+  # the same starting values, made config-overridable here rather than
+  # redeclared as a third independent literal.
+  min_probability_of_profit: 0.50
+  rejected_trade_min_sample_size: 20
+
+alerts:
+  consecutive_loss_alert_count: 5
+  weekly_loss_alert_pct: 0.05
