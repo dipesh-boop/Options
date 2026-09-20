@@ -1,0 +1,222 @@
+"""The Fidelity human-execution dashboard's FastAPI application (Step 18).
+
+**This application never submits a securities/options order to
+Fidelity, and never can.** Every route below is read-only, or one of
+the five explicitly-allowed human actions (REFRESH PRICE, COPY FIDELITY
+ORDER, MARK ORDER ENTERED, recording a FILLED/PARTIALLY_FILLED/
+CANCELLED outcome, REJECT TRADE) — implemented entirely on top of
+`src.dashboard.service`, which is itself built entirely on
+`src.brokers.fidelity`'s transition/confirm_fill state machine and the
+existing, deterministic Quant/Risk Engines. There is no route here
+named (or shaped like) AUTO TRADE, EXECUTE, or SEND TO FIDELITY, no
+route that accepts a broker order-submission payload, and no import
+anywhere in this module of a network client capable of reaching
+Fidelity. See `tests/unit/dashboard/test_app_security.py` for the
+structural proof, including a route-inventory test that fails if any
+future change adds an execution-shaped endpoint.
+
+**Security:** no route, request model, or response model anywhere in
+this package has a field for a Fidelity username, password, MFA code,
+or session cookie — this dashboard identifies a human action only by a
+free-text `actor`/`confirmed_by`/`entered_by` name (an audit-trail
+label, not a credential), never an authentication secret of any kind.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+from src.brokers.order_validator import build_occ_symbol
+from src.data.option_chain import OptionChain, OptionContract
+from src.data.quotes import UnderlyingQuote
+from src.risk.broker_constraints import BrokerCapabilities
+from src.risk.reason_codes import RiskDecision
+
+from src.dashboard import schemas, service
+from src.dashboard.models import DashboardState
+from src.dashboard.risk_state import build_risk_panel
+from src.dashboard.service import DashboardActionError, OpportunityNotFoundError
+
+app = FastAPI(title="Fidelity Human-Execution Dashboard", version="1.0.0")
+
+_STATIC_DIR = __file__.rsplit("/", 1)[0] + "/static"
+app.mount("/static", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> RedirectResponse:
+    return RedirectResponse(url="/static/index.html")
+
+# Manual-execution capability the dashboard re-runs the Risk Engine
+# against on every REFRESH PRICE -- identical to what `/morning-scan`
+# already uses to produce the very ticket this dashboard displays.
+_MANUAL_CAPABILITIES = BrokerCapabilities(
+    broker_name="fidelity", execution_mode="MANUAL", account_alias="OPTIONS_ACCOUNT",
+    options_enabled=True, allowed_strategies=["CASH_SECURED_PUT", "COVERED_CALL", "PUT_CREDIT_SPREAD"],
+)
+
+# The whole dashboard session's state. A local, single-user dashboard
+# has exactly one of these; tests override this dependency to inject a
+# fixture-built state without touching this module-level default.
+_dashboard_state: DashboardState | None = None
+
+
+def get_state() -> DashboardState:
+    if _dashboard_state is None:
+        raise HTTPException(status_code=503, detail="dashboard has no loaded portfolio/opportunities yet")
+    return _dashboard_state
+
+
+def set_state(state: DashboardState) -> None:
+    """Called by whatever loads a `/morning-scan` run (or a test) into
+    this process — the only place `_dashboard_state` is ever assigned."""
+    global _dashboard_state
+    _dashboard_state = state
+
+
+def get_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _handle(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except OpportunityNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DashboardActionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------- read views
+
+
+@app.get("/api/portfolio-header", response_model=schemas.PortfolioHeaderView)
+def portfolio_header(state: DashboardState = Depends(get_state)) -> schemas.PortfolioHeaderView:
+    return schemas.build_portfolio_header_view(state)
+
+
+@app.get("/api/risk-panel", response_model=schemas.RiskPanelResponseView)
+def risk_panel(state: DashboardState = Depends(get_state)) -> schemas.RiskPanelResponseView:
+    return schemas.build_risk_panel_view(build_risk_panel(state.portfolio, state.limits))
+
+
+@app.get("/api/opportunities", response_model=list[schemas.OpportunityView])
+def list_opportunities(
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> list[schemas.OpportunityView]:
+    views = []
+    for trade_id in state.opportunities:
+        record = _handle(service.check_and_apply_staleness, state, trade_id, now)
+        views.append(schemas.build_opportunity_view(record, now))
+    return views
+
+
+@app.get("/api/opportunities/{trade_id}", response_model=schemas.OpportunityView)
+def get_opportunity(
+    trade_id: str, state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    """VIEW ANALYSIS: a pure read of everything already computed for
+    this candidate — no audit event is recorded for a view, per Step
+    18's own audit list (refresh/approval/rejection/copy/order-entered/
+    fill/partial-fill/cancellation — a view is not among them)."""
+    record = _handle(service.check_and_apply_staleness, state, trade_id, now)
+    return schemas.build_opportunity_view(record, now)
+
+
+@app.get("/api/audit", response_model=list[schemas.AuditEventView])
+def audit_log(state: DashboardState = Depends(get_state)) -> list[schemas.AuditEventView]:
+    return [schemas.build_audit_event_view(e) for e in state.audit_log.all()]
+
+
+@app.get("/api/audit/{trade_id}", response_model=list[schemas.AuditEventView])
+def audit_log_for_trade(trade_id: str, state: DashboardState = Depends(get_state)) -> list[schemas.AuditEventView]:
+    return [schemas.build_audit_event_view(e) for e in state.audit_log.for_trade(trade_id)]
+
+
+# ---------------------------------------------------------------- actions
+
+
+@app.post("/api/opportunities/{trade_id}/refresh", response_model=schemas.OpportunityView)
+def refresh_price(
+    trade_id: str, request: schemas.RefreshPriceRequest,
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    record = _handle(service.get_opportunity, state, trade_id)
+    ticket = record.ticket
+    contracts = [
+        OptionContract(
+            underlying=ticket.ticker,
+            option_symbol=build_occ_symbol(ticket.ticker, ticket.expiration, leg.put_call, leg.strike),
+            expiration=ticket.expiration, strike=leg.strike, right=leg.put_call,
+            bid=q.bid, ask=q.ask, last=(q.bid + q.ask) / 2, volume=q.volume, open_interest=q.open_interest, iv=q.iv,
+            underlying_price=request.underlying_price, timestamp=request.quote_timestamp, source="dashboard_refresh",
+        )
+        for leg in ticket.legs
+        for q in request.leg_quotes
+        if q.strike == leg.strike and q.right == leg.put_call
+    ]
+    fresh_market_data = OptionChain(
+        underlying=UnderlyingQuote(
+            symbol=ticket.ticker, bid=request.underlying_bid, ask=request.underlying_ask,
+            last=request.underlying_price, volume=0, timestamp=request.quote_timestamp, source="dashboard_refresh",
+        ),
+        contracts=contracts, timestamp=request.quote_timestamp, source="dashboard_refresh",
+    )
+    record = _handle(
+        service.refresh_price, state, trade_id, fresh_market_data=fresh_market_data, now=now,
+        manual_broker_capabilities=_MANUAL_CAPABILITIES, actor="dashboard_user",
+    )
+    return schemas.build_opportunity_view(record, now)
+
+
+@app.post("/api/opportunities/{trade_id}/copy")
+def copy_fidelity_order(
+    trade_id: str, state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> dict[str, str]:
+    text = _handle(service.copy_fidelity_order, state, trade_id, now, actor="dashboard_user")
+    return {"text": text}
+
+
+@app.post("/api/opportunities/{trade_id}/mark-order-entered", response_model=schemas.OpportunityView)
+def mark_order_entered(
+    trade_id: str, request: schemas.MarkOrderEnteredRequest,
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    record = _handle(
+        service.mark_order_entered, state, trade_id, actual_limit_entered=request.actual_limit_entered,
+        contracts=request.contracts, entered_at=request.entered_at or now, entered_by=request.entered_by,
+    )
+    return schemas.build_opportunity_view(record, now)
+
+
+@app.post("/api/opportunities/{trade_id}/fill", response_model=schemas.OpportunityView)
+def record_fill(
+    trade_id: str, request: schemas.RecordFillRequest,
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    record = _handle(
+        service.record_fill, state, trade_id, status=request.status, fill_price=request.fill_price,
+        contracts_filled=request.contracts_filled, confirmed_at=request.confirmed_at or now, confirmed_by=request.confirmed_by,
+    )
+    return schemas.build_opportunity_view(record, now)
+
+
+@app.post("/api/opportunities/{trade_id}/cancel", response_model=schemas.OpportunityView)
+def cancel_order(
+    trade_id: str, request: schemas.CancelOrderRequest,
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    record = _handle(service.cancel_order, state, trade_id, reason=request.reason, at=now, actor=request.actor)
+    return schemas.build_opportunity_view(record, now)
+
+
+@app.post("/api/opportunities/{trade_id}/reject", response_model=schemas.OpportunityView)
+def reject_trade(
+    trade_id: str, request: schemas.RejectTradeRequest,
+    state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),
+) -> schemas.OpportunityView:
+    record = _handle(service.reject_trade, state, trade_id, reason=request.reason, at=now, actor=request.actor)
+    return schemas.build_opportunity_view(record, now)

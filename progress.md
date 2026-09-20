@@ -2079,6 +2079,107 @@ the summary table gained a Status column; the 20 remaining MEDIUM/LOW
 findings are explicitly marked OPEN and still describe real, unremediated
 gaps.
 
+## 2026-09-20 (cont'd) — Fidelity human-execution dashboard (Step 18)
+
+A local FastAPI + vanilla-JS web dashboard for portfolio monitoring and
+human-controlled Fidelity execution, built entirely on top of already-
+existing, already-tested machinery — no new risk math, no new state
+machine invented, no new market-data path. **The dashboard cannot submit
+a securities/options order to Fidelity; this is verified structurally by
+tests, not just asserted.**
+
+**One deliberate change to existing machinery first:** extended
+`src.brokers.fidelity._ALLOWED_TRANSITIONS` so `AWAITING_HUMAN` and
+`REPRICE_REQUIRED` can both reach `REJECTED` (previously reachable only
+from the pre-ticket pipeline stages). REJECTED is Step 18's "I'm not
+taking this trade" pre-entry decision, kept structurally distinct from
+CANCELLED ("this order was entered into Fidelity and is now being
+pulled back") — the two never overlap in the transition graph. 3 new
+tests in `tests/unit/brokers/test_fidelity_state_machine.py`.
+
+**`src/dashboard/` (new package):**
+- `models.py` — `DashboardState` (the whole in-memory session: current
+  `Portfolio`, `RiskLimitsConfig`, tracked opportunities, append-only
+  `AuditLog`), `OpportunityRecord`, `OrderEntryRecord`. Process-local,
+  no persistence — the same honestly-flagged Phase-0 gap every other
+  `InMemory*` placeholder in this codebase carries.
+- `risk_state.py` — the RISK PANEL's `NORMAL`/`WARNING`/`REDUCE_RISK`/
+  `HALT` state (`src.risk.drawdown.DrawdownZone` + `src.risk.kill_switch
+  .check_kill_switch`, composed, never re-derived), capital utilization,
+  underlying/sector concentration (`src.risk.portfolio_risk`), and
+  correlation clusters (`src.quant.correlations`, honestly reporting
+  "not tracked" rather than fabricating a value when `price_history`
+  isn't populated for 2+ held tickers — the same QF-001 gap the Step 17
+  audit already named).
+- `ticket_format.py` — `render_dashboard_order_text`, the exact "COPY
+  FIDELITY ORDER" template Step 18 specifies (verified byte-for-byte
+  against its own worked example), built from `FidelityTradeTicket`
+  fields only — a second, dashboard-specific presentation of the same
+  ticket `src.brokers.fidelity.render_ticket_text` already renders for
+  `/morning-scan`'s report, not a competing computation.
+- `service.py` — the five allowed actions (REFRESH PRICE, COPY FIDELITY
+  ORDER, MARK ORDER ENTERED, record a FILLED/PARTIALLY_FILLED/CANCELLED
+  outcome, REJECT TRADE), each built entirely on
+  `src.brokers.fidelity.transition`/`confirm_fill`, plus
+  `src.orchestration.pipeline.default_quant_stage` and
+  `src.risk.engine.evaluate_trade_proposal` for the REPRICE flow's
+  "rerun Quant Engine, Risk Engine" requirement. The deterministic Risk
+  Engine's veto is absolute even on a refresh: if it no longer approves
+  at the new price, the ticket is rejected outright, never left showing
+  a stale approval. Portfolio is updated only after a real
+  `ExecutionConfirmation` (mirrors `default_portfolio_update_stage`'s
+  own SY-005 cash/capital_at_risk bookkeeping, applied to a confirmed
+  Fidelity fill instead of a PaperBroker fill), and fails closed
+  (explicit `ValueError`, not a silently-invalid Portfolio) if a fill
+  would drive cash negative.
+- `schemas.py` — API request/response shapes, reusing existing domain
+  types directly (`DevilsAdvocateReview`, `RiskDecision`, `ReasonCode`,
+  `TicketStatus`) as field types rather than re-declaring their fields.
+- `app.py` — the FastAPI application: 6 read routes, 6 action routes,
+  zero routes named or shaped like AUTO TRADE / EXECUTE / SEND TO
+  FIDELITY. `execution_mode="MANUAL"` is a hardcoded literal, never
+  sourced from a request.
+- `static/` — a single-page vanilla-JS/HTML/CSS dashboard (no build
+  step, no framework dependency): portfolio header, risk panel,
+  opportunity cards with the full field set Step 18 specifies, a
+  REPRICE REQUIRED banner that disables the COPY button, modals for
+  every write action, and a live audit-log table. Manually verified
+  end to end in a real headless-Chromium browser against a real
+  running `uvicorn` server (not just FastAPI's in-process TestClient):
+  loaded the page, clicked COPY FIDELITY ORDER (confirmed the exact
+  rendered ticket text), clicked MARK ORDER ENTERED through a real
+  form submission, and confirmed the UI correctly re-rendered with the
+  new ORDER ENTERED status, the FILLED/PARTIALLY FILLED/CANCELLED
+  button set, COPY now disabled, and all three audit events listed —
+  zero console errors, zero failed network requests.
+
+**Security tests** (`tests/unit/dashboard/test_app_security.py`, 24
+tests): no credential-shaped identifier (password/username/mfa/cookie/
+session_token/api_key/secret/otp) anywhere in `src/dashboard/`'s source
+or its static frontend, checked the same way
+`test_fidelity_no_execution.py` already checks `fidelity.py` itself —
+against actual identifiers (assignment targets, parameter names,
+Pydantic field names, HTML id/name attributes, JS declarations) via
+regex, not a naive substring-anywhere-in-prose check (which would
+wrongly flag this package's own docstrings explaining the absence,
+exactly as `fidelity.py`'s module docstring already does); no forbidden
+network/browser-automation import (`selenium`, `playwright`, `requests`,
+`aiohttp`, `urllib3`) anywhere; a route-inventory test that fails if any
+future change registers a route not on the explicit Step 18 allowlist;
+proof that only `transition()`/`confirm_fill()` ever change a ticket's
+status (no direct `model_copy(update={"status": ...})` bypass); proof
+that `execution_mode` is hardcoded and appears on no request schema;
+and a parametrized check that every one of the six action functions
+actually calls the audit-log recorder.
+
+New test files: `tests/unit/dashboard/{test_models,test_risk_state,
+test_ticket_format,test_service,test_app_routes,test_app_security}.py`
+(116 tests total). `fastapi`/`uvicorn`/`httpx` (already pinned in
+`requirements.txt`/`requirements-dev.txt` since the original Step 1
+scaffold, but never actually installed until now) were installed.
+Full suite: 1650 passed, 4 skipped (up from 1531 at the end of Step
+17B) — no existing test touched.
+
 ## Next up
 
 - Two slash commands now exist in `.claude/commands/`: `/morning-scan`
@@ -2142,4 +2243,14 @@ gaps.
   gather `/weekly-review`'s trade/rejection/confirmation inputs, and two
   newly-introduced-not-yet-researched thresholds — the 0.50 minimum
   probability of profit for a "good decision" and the 20-sample
-  threshold for a "meaningful" rejected-trade conclusion) above.
+  threshold for a "meaningful" rejected-trade conclusion), and the new
+  Step 18 gaps (`DashboardState` is process-local with no persistence —
+  a server restart loses every tracked opportunity and the audit log
+  with it; REFRESH PRICE has no real market-data connection, a human
+  must type in the fresh quote by hand via the modal form; nothing yet
+  loads a `MorningScanReport` into the dashboard automatically —
+  `build_state_from_morning_scan`/`register_opportunity` exist and are
+  tested, but no scheduler or CLI entry point calls them; no
+  authentication of any kind in front of the FastAPI app, appropriate
+  only because this is explicitly a local, single-user dashboard, not
+  something meant to be exposed beyond localhost) above.

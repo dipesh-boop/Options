@@ -93,6 +93,29 @@ class TestTransitionHappyPaths:
         updated = transition(ticket, TicketStatus.CANCELLED, at=LATER)
         assert updated.status == TicketStatus.CANCELLED
 
+    def test_awaiting_human_to_rejected(self):
+        """Step 18: a human may decline an already-approved ticket
+        before ever entering it into Fidelity -- distinct from
+        CANCELLED, which is reserved for an order that was entered and
+        is now being pulled back."""
+        ticket = _ticket_at(TicketStatus.AWAITING_HUMAN)
+        updated = transition(ticket, TicketStatus.REJECTED, at=LATER)
+        assert updated.status == TicketStatus.REJECTED
+        assert updated.is_terminal is True
+
+    def test_reprice_required_to_rejected(self):
+        ticket = _ticket_at(TicketStatus.REPRICE_REQUIRED)
+        updated = transition(ticket, TicketStatus.REJECTED, at=LATER)
+        assert updated.status == TicketStatus.REJECTED
+
+    def test_order_entered_cannot_be_rejected_only_cancelled(self):
+        """REJECTED is reserved for the pre-entry decision; once a human
+        has entered an order into Fidelity, pulling it back is always
+        CANCELLED, never REJECTED."""
+        ticket = _ticket_at(TicketStatus.ORDER_ENTERED)
+        with pytest.raises(InvalidTransitionError):
+            transition(ticket, TicketStatus.REJECTED, at=LATER)
+
     def test_transition_returns_a_new_object_original_unchanged(self):
         ticket = _ticket_at(TicketStatus.AWAITING_HUMAN)
         updated = transition(ticket, TicketStatus.ORDER_ENTERED, at=LATER)

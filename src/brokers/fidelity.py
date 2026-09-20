@@ -102,8 +102,13 @@ _ALLOWED_TRANSITIONS: dict[TicketStatus, frozenset[TicketStatus]] = {
     TicketStatus.QUANT_APPROVED: frozenset({TicketStatus.LLM_REVIEWED, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
     TicketStatus.LLM_REVIEWED: frozenset({TicketStatus.RISK_APPROVED, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
     TicketStatus.RISK_APPROVED: frozenset({TicketStatus.AWAITING_HUMAN, TicketStatus.REJECTED, TicketStatus.EXPIRED}),
+    # REJECTED here (Step 18) is distinct from CANCELLED: REJECTED is a
+    # human declining an already-approved ticket before ever entering it
+    # into Fidelity ("I'm not taking this trade"); CANCELLED (below) is
+    # reserved for an order that WAS entered and is now being pulled
+    # back. Both are terminal and neither is reachable from the other.
     TicketStatus.AWAITING_HUMAN: frozenset(
-        {TicketStatus.ORDER_ENTERED, TicketStatus.REPRICE_REQUIRED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+        {TicketStatus.ORDER_ENTERED, TicketStatus.REPRICE_REQUIRED, TicketStatus.CANCELLED, TicketStatus.REJECTED, TicketStatus.EXPIRED}
     ),
     TicketStatus.ORDER_ENTERED: frozenset(
         {TicketStatus.REPRICE_REQUIRED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
@@ -111,9 +116,11 @@ _ALLOWED_TRANSITIONS: dict[TicketStatus, frozenset[TicketStatus]] = {
     TicketStatus.PARTIALLY_FILLED: frozenset({TicketStatus.CANCELLED, TicketStatus.EXPIRED}),  # FILLED: confirm_fill() only
     # A repriced ticket must be regenerated (a fresh generate_trade_ticket
     # call from current market data) before a human re-attempts entry —
-    # it goes back to AWAITING_HUMAN, never straight to ORDER_ENTERED.
+    # it goes back to AWAITING_HUMAN, never straight to ORDER_ENTERED. A
+    # human may also simply decline it outright from here (REJECTED),
+    # without first waiting for it to be regenerated.
     TicketStatus.REPRICE_REQUIRED: frozenset(
-        {TicketStatus.AWAITING_HUMAN, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+        {TicketStatus.AWAITING_HUMAN, TicketStatus.CANCELLED, TicketStatus.REJECTED, TicketStatus.EXPIRED}
     ),
     TicketStatus.FILLED: frozenset(),
     TicketStatus.CANCELLED: frozenset(),
