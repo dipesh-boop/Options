@@ -1666,8 +1666,123 @@ don't rewrite history.
   `confirm_fill` — every ticket it can produce comes from the existing,
   already-tested MANUAL pipeline path and defaults to `AWAITING_HUMAN`.
 
-## Open decisions carried forward (updated a fifth time)
+## 2026-09-20 (cont'd) — Weekly Investment Committee (Step 16)
 
+- **Read first**: `src.orchestration.execution_audit.ExecutionQualityRecord`
+  (confirmed it stores pre-execution figures only — the platform's only
+  source of a real *confirmed* Fidelity fill is `ExecutionConfirmation`,
+  attached via `src.brokers.fidelity.confirm_fill`), `FidelityTradeTicket`'s
+  own `limit_price`/`net_mid` fields (already exactly "recommended limit"
+  and "market midpoint when recommended" — no new schema needed),
+  `src.backtest.metrics`/`benchmark` and `src.research.performance_breakdown`
+  (all reused directly rather than reimplemented against a live trade
+  journal).
+- **`src/workflows/performance_review.py`**: PORTFOLIO PERFORMANCE, RISK,
+  TRADE STATISTICS, and BREAK DOWN PERFORMANCE — all four sections are
+  thin wrappers over `src.backtest.metrics` (`cagr`, `sharpe_ratio`,
+  `sortino_ratio`, `max_drawdown`, `trade_statistics`),
+  `src.backtest.benchmark.compare_to_benchmarks`, and
+  `src.research.performance_breakdown.breakdown_by` (the exact 8 of the
+  12 dimensions Step 16 names), applied to a real trade journal instead
+  of a backtest run. `src.backtest.simulator.TradeRecord` is reused
+  unmodified as that journal's record shape — a closed trade's P&L
+  fields describe a backtest trade and a live trade identically, so a
+  second, parallel "live trade record" type would only be a second
+  place for the same shape to drift. Weekly/MTD/YTD returns anchor to
+  whichever equity-curve point is on or before each period boundary,
+  resolving to `None` (never an interpolated guess) when no such point
+  exists yet.
+- **`src/workflows/decision_quality.py`**: the four-quadrant classifier.
+  "Do NOT judge decision quality solely by P&L" is enforced structurally
+  — `was_good_decision` reads only ex-ante facts (Risk Engine decision,
+  Devil's Advocate verdict, stated probability of profit), never
+  `realistic_pnl`; `was_good_outcome` is the only function that reads
+  P&L. A trade can be `good_decision_bad_outcome` (sound process, bad
+  luck within its own stated odds) or `bad_decision_good_outcome`
+  (a Risk-Engine-rejected trade that would have won) — both are
+  first-class, intentionally preserved findings, not collapsed into "it
+  made money, so it must have been right."
+- **`src/workflows/rejected_trade_review.py`**: "determine what would
+  have happened if taken" reuses `src.backtest.execution`/`assignment`
+  exactly as `src.backtest.engine` does (a thin `TradeProposal` ->
+  `BacktestLeg` adapter, never a second execution model) to price a
+  rejected proposal's hypothetical round trip against real subsequent
+  quotes or a real settlement price. "Do NOT automatically conclude a
+  rejected winning trade should have been accepted" and "evaluate
+  statistically over meaningful samples" are the same guarantee,
+  implemented the same way `src.research.overfitting_guards`' small-
+  sample check already is: `summarize_rejected_outcomes` always reports
+  `meaningful_sample=False` plus an explicit warning below a named
+  20-sample threshold, so a single rejected winner can never be read as
+  proof without the report itself saying it isn't.
+- **`src/workflows/execution_quality.py`**: no new schema needed —
+  "recommended limit" and "market midpoint when recommended" are already
+  `FidelityTradeTicket.limit_price`/`net_mid`, captured at
+  ticket-generation time; "actual fill" and "execution time" are
+  `ExecutionConfirmation.fill_price`/`confirmed_at`, the only evidence
+  this codebase ever accepts for a real fill. `build_slippage_record` is
+  a pure aggregator over an already-confirmed `(ticket, confirmation)`
+  pair — it captures no new data and confirms nothing itself.
+  `summarize_slippage` reports average/median and breaks down by
+  strategy, underlying, and time of day.
+- **`src/workflows/weekly_review.py`**: `build_weekly_review_report`
+  assembles all of the above plus `NEXT WEEK` (earnings/expiration risk
+  from open `Portfolio.positions`, reusing `src.data.earnings
+  .is_within_earnings_window`; portfolio risk warnings compared against
+  the same `config/risk_limits.yaml` thresholds the Risk Engine itself
+  enforces — never a second set of numbers) and `RESEARCH`
+  (`register_committee_hypotheses` — "send hypotheses to Strategy
+  Research Agent" is literally registering them into the same
+  `src.research.hypothesis.HypothesisRegistry` Step 14's agent reads
+  from). **This module cannot modify production strategy**: it never
+  imports `src.research.promotion`, proven the same way Step 14 proved
+  the Research Agent itself can't. `render_weekly_review_report`
+  produces the exact nine-section order the spec names, MODEL/PAPER/
+  ACTUAL-FIDELITY performance kept as three distinct lines rather than
+  blended into one number, per the command's own instructions to its
+  Portfolio-Manager-chair.
+- **`.claude/commands/weekly-review.md`**: the second slash command in
+  `.claude/commands/`, instructing the Portfolio-Manager-chaired
+  narrative never to restate a number differently than the report
+  computed it, never to draw a conclusion from a rejected-trade sample
+  the report itself flags as too small, and never to forecast market
+  direction as certainty in the NEXT WEEK section.
+- **Full repo test suite: 1485 passing, 4 skipped** (same pre-existing
+  IBKR skips). New: 61 tests across five files — portfolio performance
+  period-boundary anchoring and benchmark wiring; risk-section Greeks
+  honesty; trade statistics and breakdown pass-through; decision-quality
+  quadrant classification proving a loss alone can't flip a good
+  decision bad and a win alone can't flip a bad decision good, plus
+  configurable-threshold and summary-fraction tests; rejected-trade
+  hypothetical pricing for both a market-order close and an expiration
+  settlement (OTM and assigned), and the small-sample warning firing on
+  exactly one sample and clearing at the named threshold; execution-
+  quality slippage math, confirmation-before-recommendation rejection,
+  and all five time-of-day buckets; and an end-to-end weekly report
+  covering every section, the research hand-off actually landing in the
+  shared `HypothesisRegistry`, and the structural
+  cannot-modify-production-strategy proof (no `src.research.promotion`
+  import, no filesystem write, source-inspection mirroring the Step
+  11/14 independence-test technique).
+
+## Open decisions carried forward (updated a sixth time)
+
+- [ ] **New from Step 16**: no persisted equity ledger exists yet —
+      `WeeklyReviewInputs.equity_curve` is a caller-supplied series, the
+      same gap `/morning-scan`'s `fetch_results` already carries for
+      market data; a real one is still a Phase 0 database item
+- [ ] **New from Step 16**: there is no automated way yet to gather the
+      inputs `/weekly-review` needs — the week's closed `TradeRecord`s,
+      the rejected-proposal sample and its subsequent market data, and
+      confirmed `(FidelityTradeTicket, ExecutionConfirmation)` pairs all
+      have to be assembled by a caller today, mirroring the same gap
+      `run_morning_scan`'s `fetch_results`/confirmed-positions inputs
+      already carry
+- [ ] **New from Step 16**: `decision_quality.DEFAULT_MIN_PROBABILITY_OF_PROFIT`
+      (0.50) and `rejected_trade_review.MIN_SAMPLE_SIZE_FOR_CONCLUSIONS`
+      (20) are reasonable starting thresholds, not researched policy
+      values — same status as `src.research.overfitting_guards`'
+      thresholds when they were first introduced in Step 14
 - [ ] **New from Step 15**: no `src.llm.market_regime` orchestration
       module exists yet — `/morning-scan` stage 6 ("analyze current
       market regime") currently takes a `MarketRegimeAssessment` as a
@@ -1852,55 +1967,65 @@ don't rewrite history.
 
 ## Next up
 
-- Thirteen standalone pieces now exist, and for the first time one of
-  them is a command a human actually runs: `/morning-scan`
-  (`.claude/commands/morning-scan.md`) drives the daily research cycle
-  end to end via `src.workflows.run_morning_scan`, which supplies
-  stages 1-13 (feed/freshness verification, Fidelity reconciliation,
-  cash/capital reporting, and this platform's first deterministic
-  Strategy Screener) and hands stages 14-21 to `run_order_pipeline`
-  completely unchanged, one candidate at a time. `src/orchestration/`
-  still connects the live paper-trading pipeline (Quant Engine, Devil's
-  Advocate, Portfolio Manager, Python Risk Engine, Order Validator,
-  `PaperBroker`, Portfolio, Database); `src/backtest/` replays
-  historical days against that same fill-price math; `src/research/`
-  discovers and tracks hypotheses without authority to act on any of
-  them; `src/workflows/` is the thirteenth, the layer that actually
-  calls the other two into a single reviewable report ending in either
-  an `AWAITING_HUMAN` Fidelity ticket or an explicit `NO TRADE` — never
-  a trade manufactured because the command was run. What's still
-  missing to make any of these four layers a real, continuously-running
-  system rather than a function a test, a fixture, or a human-supplied
-  input drives by hand: Phase 0 foundations (a real database in place
-  of every `InMemory*` placeholder accumulated across Steps 8-14,
-  config, CI), a scheduler to drive market data updates, expiration
-  settlement, and `/morning-scan` itself on a clock instead of by
-  explicit calls, something that persists and re-loads `Portfolio`
-  between runs instead of each call starting fresh, real
+- Two slash commands now exist in `.claude/commands/`: `/morning-scan`
+  (Step 15) drives the daily research cycle, and `/weekly-review`
+  (Step 16) convenes a Portfolio-Manager-chaired Investment Committee
+  over portfolio performance, risk, decision quality, rejected trades,
+  and Fidelity execution quality — both built the same way, a thin
+  slash-command prompt over a real, fully-tested `src/workflows/`
+  Python engine that does the actual computation. `/weekly-review`
+  leans almost entirely on reuse rather than new math: `src.backtest
+  .metrics`/`benchmark` for every performance and risk number,
+  `src.research.performance_breakdown` for the dimension breakdowns,
+  and `src.research.hypothesis.HypothesisRegistry` as the literal
+  hand-off target for "send hypotheses to Strategy Research Agent" —
+  the only genuinely new machinery this step added is the
+  decision-quality quadrant classifier (built entirely from ex-ante
+  facts, never P&L) and the rejected-trade hypothetical-outcome pricer
+  (replaying a rejected proposal through the same `src.backtest
+  .execution`/`assignment` a backtest itself uses). `src/orchestration/`
+  still connects the live paper-trading pipeline; `src/backtest/`
+  replays historical days; `src/research/` discovers and tracks
+  hypotheses without authority to act on any of them; `src/workflows/`
+  is the layer that calls all three into reviewable reports a human
+  actually runs. What's still missing to make any of these four layers
+  a real, continuously-running system rather than a function a test, a
+  fixture, or a human-supplied input drives by hand: Phase 0
+  foundations (a real database in place of every `InMemory*` placeholder
+  accumulated across Steps 8-14, config, CI, and specifically a
+  persisted equity ledger and trade journal `/weekly-review` still takes
+  as caller-supplied input), a scheduler to drive market data updates,
+  expiration settlement, and both slash commands themselves on a clock
+  instead of by explicit calls, something that persists and re-loads
+  `Portfolio` between runs instead of each call starting fresh, real
   `MarketDataProvider` calls (and a human-confirmation flow for Fidelity
-  positions) feeding `run_morning_scan`'s inputs instead of
+  positions and fills) feeding both commands' inputs instead of
   hand-assembled fixtures, a real historical options-data vendor behind
   `HistoricalOptionChainProvider`, an `src.llm.market_regime`
-  orchestration module (today `/morning-scan` takes a
-  `MarketRegimeAssessment` as a caller-supplied input), a
-  portfolio-level Greeks aggregator (today rendered honestly as "not
-  tracked" rather than fabricated), a real caller for
-  `evaluate_hypothesis`/`promote_strategy`, and the human-approval
-  workflow that would actually authenticate a `human_approver` rather
-  than accept a hardcoded string. Also still open: the `app/` prototype
-  disposition, the accumulating layout/config-duplication/
-  untested-real-adapter questions above, the four Step 9 gaps, the three
-  Step 10 gaps, the two remaining Step 11 gaps, the five Step 12 gaps
-  (in-memory database, Portfolio not persisted between runs, no
-  expiration scheduler, the two Risk Engine calls not sharing one atomic
-  market snapshot, no automated subsequent-price capture), the three
-  Step 13 gaps (no Strategy Screener at the backtest-engine level, no
-  clock-driven backtest caller, survivorship bias only preventable
-  "where possible" pending a real vendor), the three Step 14 gaps
-  (in-memory hypothesis registry, no real caller for either
-  `evaluate_hypothesis` or `promote_strategy`, no human-approval
-  workflow), and the four new Step 15 gaps (no Market Regime
+  orchestration module (today both commands take a `MarketRegimeAssessment`
+  as a caller-supplied input), a portfolio-level Greeks aggregator
+  (today rendered honestly as "not tracked" rather than fabricated), a
+  real caller for `evaluate_hypothesis`/`promote_strategy`, and the
+  human-approval workflow that would actually authenticate a
+  `human_approver` rather than accept a hardcoded string. Also still
+  open: the `app/` prototype disposition, the accumulating
+  layout/config-duplication/untested-real-adapter questions above, the
+  four Step 9 gaps, the three Step 10 gaps, the two remaining Step 11
+  gaps, the five Step 12 gaps (in-memory database, Portfolio not
+  persisted between runs, no expiration scheduler, the two Risk Engine
+  calls not sharing one atomic market snapshot, no automated
+  subsequent-price capture), the three Step 13 gaps (no Strategy
+  Screener at the backtest-engine level, no clock-driven backtest
+  caller, survivorship bias only preventable "where possible" pending a
+  real vendor), the three Step 14 gaps (in-memory hypothesis registry,
+  no real caller for either `evaluate_hypothesis` or `promote_strategy`,
+  no human-approval workflow), the four Step 15 gaps (no Market Regime
   orchestration module, no real feed/reconciliation caller for
   `run_morning_scan`, no portfolio-level Greeks aggregation, the
   screener's provisional closest-to-target-delta/richest-credit-first
-  heuristics standing in for a real Opportunity Scanner) above.
+  heuristics standing in for a real Opportunity Scanner), and the three
+  new Step 16 gaps (no persisted equity ledger, no automated caller to
+  gather `/weekly-review`'s trade/rejection/confirmation inputs, and two
+  newly-introduced-not-yet-researched thresholds — the 0.50 minimum
+  probability of profit for a "good decision" and the 20-sample
+  threshold for a "meaningful" rejected-trade conclusion) above.
