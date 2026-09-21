@@ -233,6 +233,27 @@ def price_satisfies_limit(fill_quote: FillQuote, limit_price: float) -> bool:
     return fill_quote.net_price >= -limit_price
 
 
+def _is_credit_pairing(short: OrderLeg, long: OrderLeg) -> bool:
+    """Whether a same-right short+long pair (one strike each, the only
+    shape `_required_collateral`'s pairing branch ever pairs) is a
+    credit spread or a debit spread — determined purely from strike
+    order, no premium lookup needed, since for a same-right vertical the
+    relationship between the two strikes alone fixes which side is worth
+    more. Mirrors the exact strike-ordering rule
+    `src.llm.schemas.TradeProposal`'s own leg validators already enforce
+    for `CALL_CREDIT_SPREAD`/`BULL_CALL_SPREAD`/`PUT_CREDIT_SPREAD`/
+    `BEAR_PUT_SPREAD`, so the two places can never silently disagree
+    about which shape is which:
+
+    - CALL: short strike < long strike -> credit (call credit spread).
+      short strike > long strike -> debit (bull call spread).
+    - PUT: short strike > long strike -> credit (put credit spread).
+      short strike < long strike -> debit (bear put spread)."""
+    if short.right == OptionRight.CALL:
+        return short.strike < long.strike
+    return short.strike > long.strike
+
+
 @dataclass(frozen=True)
 class ExpirationSettlement:
     symbol: str
@@ -398,6 +419,26 @@ class PaperBroker(Broker):
         if qty <= 0:
             return order  # priced fine, but no liquidity right now
 
+        # `_required_collateral` runs before any fill price is known, so
+        # it cannot verify an unpaired long leg's (or a debit vertical's)
+        # own debit is actually affordable -- that check belongs here,
+        # once `fill_quote`/`qty` exist, computed by the exact same
+        # per-leg formula `_apply_fill` below is about to apply, so the
+        # preflight check and the real cash movement can never diverge.
+        prospective_cash_delta = sum(
+            -(qty if leg.action == OrderAction.BUY else -qty) * leg_price * (_CONTRACT_MULTIPLIER if leg.right is not None else 1)
+            - self._config.commission_per_contract * qty
+            for leg, leg_price in zip(order.legs, fill_quote.leg_prices)
+        )
+        if self._cash + prospective_cash_delta < 0:
+            rejected = order.model_copy(update={"status": OrderStatus.REJECTED})
+            self._idempotency.save(rejected)
+            self._rejection_reasons[client_order_id] = (
+                f"insufficient cash to cover this fill's net debit: cash ${self._cash:,.2f} plus "
+                f"prospective cash delta ${prospective_cash_delta:,.2f} would go negative"
+            )
+            return rejected
+
         self._apply_fill(order, fill_quote, qty)
         new_filled = order.filled_quantity + qty
         new_status = OrderStatus.FILLED if new_filled >= order.legs[0].quantity else OrderStatus.PARTIALLY_FILLED
@@ -469,14 +510,26 @@ class PaperBroker(Broker):
             )
 
     def _required_collateral(self, legs: list[OrderLeg]) -> float:
-        """A simplified, per-order collateral estimate for this
-        platform's three strategies:
+        """A simplified, per-order collateral estimate covering this
+        platform's Tier1 (order-eligible) strategy shapes:
 
         - A short leg paired with a same-right, opposite-strike long leg
-          in the *same* order (a put credit spread) is defined-risk
-          margin: the strike width x 100 x qty, never the full
-          cash-secured amount — netting against the long leg is the
-          entire point of trading a spread instead of a naked put.
+          in the *same* order is either a credit spread (put credit
+          spread, call credit spread) or a debit spread (bull call
+          spread, bear put spread) — see `_is_credit_pairing` for the
+          strike-ordering rule (the same one
+          `src.llm.schemas.TradeProposal`'s leg validators already
+          enforce) that tells them apart. Only the credit shape needs
+          defined-risk margin (the strike width x 100 x qty, never the
+          full cash-secured amount — netting against the long leg is
+          the entire point of trading a spread instead of a naked
+          short). A debit spread needs none: its maximum loss is
+          already the premium paid, realized through the fill's own
+          cash settlement, so charging it strike-width collateral on
+          top would be an outright over-reservation, not caution — it
+          reserves capital that isn't actually at risk and can wrongly
+          reject a trade the account can afford. Step 14B's own
+          capital-requirement review caught this; see progress.md.
         - An unpaired short put requires strike x 100 x qty cash-secured
           (a cash-secured put).
         - An unpaired short call requires 100 x qty shares already held
@@ -485,8 +538,13 @@ class PaperBroker(Broker):
           amount as a conservative stand-in (this platform never
           proposes a naked call; this is a defensive fallback, not an
           endorsement of one).
-        - A long leg needs only its own debit, already realized through
-          the fill's cash settlement — never collateral."""
+        - A long leg with no paired short (long call/put, long straddle/
+          strangle, the long leg of a protective put/collar) needs only
+          its own debit — no collateral reservation here, but see
+          `attempt_fill`'s own preflight cash check, which verifies the
+          account can actually afford that debit at the moment it
+          would be paid (this function runs before a fill price is even
+          known, so it cannot check that itself)."""
         short_legs = [leg for leg in legs if leg.action == OrderAction.SELL and leg.right is not None and leg.strike is not None]
         long_legs = [leg for leg in legs if leg.action == OrderAction.BUY and leg.right is not None and leg.strike is not None]
 
@@ -504,7 +562,8 @@ class PaperBroker(Broker):
             if paired_long is not None:
                 long = long_legs[paired_long]
                 paired_long_ids.add(paired_long)
-                total += abs(short.strike - long.strike) * _CONTRACT_MULTIPLIER * short.quantity
+                if _is_credit_pairing(short, long):
+                    total += abs(short.strike - long.strike) * _CONTRACT_MULTIPLIER * short.quantity
                 continue
             if short.right == OptionRight.CALL and self._has_covering_shares(short):
                 continue

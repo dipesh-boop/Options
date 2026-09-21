@@ -14,6 +14,7 @@ from src.backtest.engine import (
     BacktestConfig,
     DEFAULT_TARGET_HIGH,
     DEFAULT_TARGET_LOW,
+    _estimate_capital_at_risk,
     _match_quotes_for_legs,
     build_backtest_result,
     evaluate_target,
@@ -314,3 +315,65 @@ class TestBuildBacktestResultWiring:
         assert result.slippage_cost_per_year == 0.0
         assert result.slippage_pct_of_gross_profit == 0.0
         assert result.average_bid_ask_spread_pct == 0.0
+
+
+class TestEstimateCapitalAtRiskAllStrategyShapes:
+    """Step 14B regression tests: `_estimate_capital_at_risk` previously
+    (a) charged a debit vertical (bull call/bear put spread) the full
+    strike width -- the same figure a credit spread of that width needs
+    -- and (b) returned exactly 0 for any position with no short legs
+    at all (long call/put, long straddle/strangle, a fresh protective
+    put), silently under-reporting capital at risk for every
+    long-premium Step 19A strategy. Both are fixed via the same
+    `_is_credit_pairing` rule `src.brokers.paper` uses and a new
+    `entry_credit_total` parameter."""
+
+    def _leg(self, right: OptionRight, strike: float, side: str) -> BacktestLeg:
+        return BacktestLeg(right=right, strike=strike, side=side)
+
+    def test_put_credit_spread_still_uses_the_strike_width(self):
+        legs = [self._leg(OptionRight.PUT, 95, "sell"), self._leg(OptionRight.PUT, 90, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=140.0) == pytest.approx(500.0)
+
+    def test_bull_call_spread_uses_only_the_debit_paid_not_the_width(self):
+        legs = [self._leg(OptionRight.CALL, 95, "buy"), self._leg(OptionRight.CALL, 105, "sell")]
+        # A $10-wide debit spread paid for at a $450 net debit.
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-450.0) == pytest.approx(450.0)
+
+    def test_bear_put_spread_uses_only_the_debit_paid(self):
+        legs = [self._leg(OptionRight.PUT, 100, "buy"), self._leg(OptionRight.PUT, 90, "sell")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-400.0) == pytest.approx(400.0)
+
+    def test_cash_secured_put_unchanged(self):
+        legs = [self._leg(OptionRight.PUT, 95, "sell")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=280.0) == pytest.approx(9500.0)
+
+    def test_covered_call_unchanged_uses_cost_basis(self):
+        legs = [self._leg(OptionRight.CALL, 105, "sell")]
+        assert _estimate_capital_at_risk(legs, 1, 90.0, entry_credit_total=230.0) == pytest.approx(9000.0)
+
+    def test_long_call_uses_the_debit_paid_never_zero(self):
+        legs = [self._leg(OptionRight.CALL, 100, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-350.0) == pytest.approx(350.0)
+
+    def test_long_straddle_uses_the_total_debit_paid_never_zero(self):
+        legs = [self._leg(OptionRight.CALL, 100, "buy"), self._leg(OptionRight.PUT, 100, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-620.0) == pytest.approx(620.0)
+
+    def test_protective_put_bought_fresh_uses_the_put_debit(self):
+        legs = [self._leg(OptionRight.PUT, 90, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-150.0) == pytest.approx(150.0)
+
+    def test_protective_put_against_held_shares_uses_cost_basis_plus_debit(self):
+        legs = [self._leg(OptionRight.PUT, 90, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 100.0, entry_credit_total=-150.0) == pytest.approx(10150.0)
+
+    def test_protective_collar_uses_cost_basis_not_the_short_calls_strike(self):
+        legs = [self._leg(OptionRight.CALL, 110, "sell"), self._leg(OptionRight.PUT, 90, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 100.0, entry_credit_total=20.0) == pytest.approx(10000.0)
+
+    def test_default_entry_credit_total_is_backward_compatible_zero_for_credit_spreads(self):
+        # Existing callers that never pass entry_credit_total still work
+        # unchanged for the two shapes that don't need it.
+        legs = [self._leg(OptionRight.PUT, 95, "sell"), self._leg(OptionRight.PUT, 90, "buy")]
+        assert _estimate_capital_at_risk(legs, 1, 0.0) == pytest.approx(500.0)

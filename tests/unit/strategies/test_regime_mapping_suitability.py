@@ -13,8 +13,20 @@ class TestRegimeMappingNeverOneToOne:
             candidates = candidate_strategies_for(view)
             assert len(candidates) >= 2, f"{view} mapped to fewer than 2 candidates"
 
-    def test_all_8_views_covered(self):
-        assert len(CANDIDATE_STRATEGIES_BY_VIEW) == 8
+    def test_all_9_views_covered(self):
+        # Step 19A's original 8 views, plus Step 14B's
+        # LOW_IV_EXPANSION_EXPECTED (distinct from LARGE_MOVE_EXPECTED:
+        # allowed to be directional, not just straddle/strangle).
+        assert len(CANDIDATE_STRATEGIES_BY_VIEW) == 9
+        assert MarketView.LOW_IV_EXPANSION_EXPECTED in CANDIDATE_STRATEGIES_BY_VIEW
+
+    def test_low_iv_expansion_expected_includes_directional_candidates(self):
+        candidates = candidate_strategies_for(MarketView.LOW_IV_EXPANSION_EXPECTED)
+        for expected in (
+            StrategyKind.LONG_STRADDLE, StrategyKind.LONG_STRANGLE, StrategyKind.LONG_CALL,
+            StrategyKind.LONG_PUT, StrategyKind.BULL_CALL_SPREAD, StrategyKind.BEAR_PUT_SPREAD,
+        ):
+            assert expected in candidates
 
     def test_moderately_bullish_matches_step_19a_example(self):
         candidates = candidate_strategies_for(MarketView.MODERATELY_BULLISH)

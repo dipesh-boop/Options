@@ -364,6 +364,120 @@ class TestInsufficientCash:
         assert order.status == OrderStatus.FILLED
 
 
+class TestDebitVerticalSpreadCollateral:
+    """Step 14B regression tests: a debit vertical spread (bull call
+    spread, bear put spread) was previously charged the full strike
+    width as collateral -- the exact same figure a *credit* spread of
+    the same width needs -- which is wrong: a debit spread's maximum
+    loss is already the premium paid, so it needs no additional
+    collateral at all. `_is_credit_pairing` now tells the two shapes
+    apart by strike order alone."""
+
+    CALL_SHORT_SYMBOL = "SPY261016C00650000"
+    CALL_LONG_SYMBOL = "SPY261016C00640000"
+
+    def _bull_call_chain(self) -> OptionChain:
+        underlying = make_underlying()
+        long_leg = make_contract(
+            option_symbol=self.CALL_LONG_SYMBOL, strike=640.0, right=OptionRight.CALL,
+            bid=6.8, ask=7.0, last=6.9, volume=500, open_interest=1000,
+        )
+        short_leg = make_contract(
+            option_symbol=self.CALL_SHORT_SYMBOL, strike=650.0, right=OptionRight.CALL,
+            bid=2.3, ask=2.5, last=2.4, volume=500, open_interest=1000,
+        )
+        return OptionChain(underlying=underlying, contracts=[long_leg, short_leg], timestamp=NOW, source="mock")
+
+    def _bull_call_request(self, **overrides) -> PlaceOrderRequest:
+        base = dict(
+            client_order_id="bcs-1",
+            legs=[
+                OrderLeg(symbol=self.CALL_LONG_SYMBOL, right=OptionRight.CALL, strike=640.0, expiration=EXPIRATION, action=OrderAction.BUY, quantity=1),
+                OrderLeg(symbol=self.CALL_SHORT_SYMBOL, right=OptionRight.CALL, strike=650.0, expiration=EXPIRATION, action=OrderAction.SELL, quantity=1),
+            ],
+            limit_price=10.0,
+        )
+        base.update(overrides)
+        return PlaceOrderRequest(**base)
+
+    @pytest.mark.asyncio
+    async def test_bull_call_spread_needs_only_its_debit_not_the_full_strike_width(self):
+        # $10-wide spread would previously demand $1,000 collateral on
+        # top of the ~$450 debit -- an account with $600 (enough for the
+        # debit, not the old over-collateralized figure) must now fill.
+        broker = await _broker(cash=600.0, fill_model=FillModel.MID)
+        broker.update_market_data(self._bull_call_chain())
+        order = await broker.place_order(self._bull_call_request())
+        assert order.status == OrderStatus.FILLED
+
+    @pytest.mark.asyncio
+    async def test_required_collateral_is_zero_for_a_debit_pairing(self):
+        broker = await _broker()
+        legs = self._bull_call_request().legs
+        assert broker._required_collateral(legs) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_required_collateral_is_still_the_full_width_for_a_credit_pairing(self):
+        # A call CREDIT spread (short the lower strike, long the higher)
+        # must still reserve the full width -- only the debit shape
+        # changed.
+        broker = await _broker()
+        legs = [
+            OrderLeg(symbol=self.CALL_SHORT_SYMBOL, right=OptionRight.CALL, strike=640.0, expiration=EXPIRATION, action=OrderAction.SELL, quantity=1),
+            OrderLeg(symbol=self.CALL_LONG_SYMBOL, right=OptionRight.CALL, strike=650.0, expiration=EXPIRATION, action=OrderAction.BUY, quantity=1),
+        ]
+        assert broker._required_collateral(legs) == pytest.approx(1000.0)
+
+
+class TestDebitAffordabilityPreflightCheck:
+    """A pure-long position (no short legs at all -- long call, long
+    straddle/strangle, or now a correctly-zero-collateral debit
+    spread) was never checked for whether the account could actually
+    afford its own debit before this step: `_required_collateral`
+    correctly returns 0 for these shapes, but nothing then verified 0
+    plus the account's own cash could cover the fill. `attempt_fill`'s
+    own preflight cash check now closes that gap directly."""
+
+    LONG_CALL_SYMBOL = "SPY261016C00640000"
+
+    def _long_call_chain(self) -> OptionChain:
+        underlying = make_underlying()
+        contract = make_contract(
+            option_symbol=self.LONG_CALL_SYMBOL, strike=640.0, right=OptionRight.CALL,
+            bid=6.8, ask=7.0, last=6.9, volume=500, open_interest=1000,
+        )
+        return OptionChain(underlying=underlying, contracts=[contract], timestamp=NOW, source="mock")
+
+    def _long_call_request(self, **overrides) -> PlaceOrderRequest:
+        base = dict(
+            client_order_id="lc-1",
+            legs=[OrderLeg(symbol=self.LONG_CALL_SYMBOL, right=OptionRight.CALL, strike=640.0, expiration=EXPIRATION, action=OrderAction.BUY, quantity=1)],
+            limit_price=10.0,
+        )
+        base.update(overrides)
+        return PlaceOrderRequest(**base)
+
+    @pytest.mark.asyncio
+    async def test_a_debit_that_would_exceed_available_cash_is_rejected_not_silently_filled(self):
+        # Ask ~7.0 x 100 = ~$700 debit; $100 cash cannot cover it, and
+        # required_collateral is (correctly) 0 for a lone long leg, so
+        # only the new preflight cash check can catch this.
+        broker = await _broker(cash=100.0, fill_model=FillModel.MID)
+        broker.update_market_data(self._long_call_chain())
+        order = await broker.place_order(self._long_call_request())
+        assert order.status == OrderStatus.REJECTED
+        assert "debit" in (broker.get_rejection_reason("lc-1") or "").lower()
+        account = await broker.get_account()
+        assert account.cash_balance == pytest.approx(100.0)  # never went negative
+
+    @pytest.mark.asyncio
+    async def test_an_affordable_debit_still_fills_normally(self):
+        broker = await _broker(cash=50_000.0, fill_model=FillModel.MID)
+        broker.update_market_data(self._long_call_chain())
+        order = await broker.place_order(self._long_call_request())
+        assert order.status == OrderStatus.FILLED
+
+
 class TestPositionClosing:
     @pytest.mark.asyncio
     async def test_closing_a_put_credit_spread_releases_collateral_and_positions(self):

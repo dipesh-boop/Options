@@ -1,18 +1,12 @@
 """The Strategy Comparison Engine: a full metrics table across every
-candidate, and a risk-adjusted ranking that deliberately does NOT
-optimize for maximum theoretical profit.
-
-`risk_adjusted_score` is expected value per dollar of defined risk
-(`expected_value / maximum_loss`), not raw expected return — this is
-the literal antidote to Step 19A's own example (a 25%-return/
-30%-drawdown-contribution candidate must not automatically beat a
-14%-return/6%-drawdown-contribution one): a strategy with a much larger
-maximum loss needs a proportionally larger expected value to rank
-above one with a small, defined loss. `rank_candidates` never collapses
-the full comparison table into this one number for reporting — the
-table (`ComparisonRow`, one per candidate) is preserved alongside the
-ranking, the same "never collapsed" discipline `src.validation
-.scorecard` already applies to the 90-day report.
+candidate. The risk-adjusted ranking rule itself lives in
+`src.strategies.ranking` (Step 14B split this into its own module) — this
+module only builds `ComparisonRow`, so a table row and the ranking
+formula it feeds can be read, tested, and changed independently. Neither
+collapses the full comparison table into just the winning score for
+reporting — the table (`ComparisonRow`, one per candidate) is always
+preserved alongside a ranking, the same "never collapsed" discipline
+`src.validation.scorecard` already applies to the 90-day report.
 """
 from __future__ import annotations
 
@@ -20,6 +14,9 @@ from dataclasses import dataclass
 
 from src.strategies.base import StrategyEvaluation, StrategyKind
 from src.strategies.portfolio_fit import PortfolioFitResult
+from src.strategies.ranking import rank_candidates, risk_adjusted_score
+
+__all__ = ["ComparisonRow", "build_comparison_row", "build_comparison_table", "rank_candidates", "risk_adjusted_score"]
 
 
 @dataclass(frozen=True)
@@ -55,16 +52,6 @@ def _nearest_breakeven_distance_pct(evaluation: StrategyEvaluation, spot: float)
         return 0.0
     nearest = min(evaluation.breakeven_points, key=lambda b: abs(b - spot))
     return abs(nearest - spot) / spot
-
-
-def risk_adjusted_score(evaluation: StrategyEvaluation) -> float:
-    """Expected value per dollar of defined risk. `maximum_loss <= 0`
-    (a theoretical zero-risk structure) returns the raw expected value
-    unscaled rather than dividing by zero -- a documented edge case, not
-    expected to occur for any of this platform's approved strategies."""
-    if evaluation.maximum_loss <= 0:
-        return evaluation.expected_value
-    return evaluation.expected_value / evaluation.maximum_loss
 
 
 def build_comparison_row(evaluation: StrategyEvaluation, fit: PortfolioFitResult, *, spot: float) -> ComparisonRow:
@@ -103,11 +90,3 @@ def build_comparison_table(
     evaluations: list[StrategyEvaluation], fits: dict[StrategyKind, PortfolioFitResult], *, spot: float
 ) -> list[ComparisonRow]:
     return [build_comparison_row(ev, fits[ev.strategy_kind], spot=spot) for ev in evaluations]
-
-
-def rank_candidates(evaluations: list[StrategyEvaluation]) -> list[StrategyEvaluation]:
-    """Highest `risk_adjusted_score` first. This ranking alone is never
-    the final selection -- `src.strategies.selector.select_best_or_no_trade`
-    still requires the top candidate to clear the NO_TRADE hurdle and to
-    have actually cleared the Risk Engine before it can be chosen."""
-    return sorted(evaluations, key=risk_adjusted_score, reverse=True)

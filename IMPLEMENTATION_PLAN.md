@@ -485,3 +485,21 @@ backward compatibility. The 3 Tier2-only strategies
 (`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`)
 touch none of those five files at all — see `ARCHITECTURE.md` §13 for
 the full Tier1/Tier2 boundary and why it was drawn there.
+
+**Step 14B follow-up, same package, no rebuild.** `src/strategies/`
+gained one new file, `ranking.py` (`risk_adjusted_score`/
+`rank_candidates`, split out of `comparison.py`), and
+`src/validation/` gained one new file, `strategy_attribution.py`
+(per-strategy performance tracking, reusing
+`src.research.performance_breakdown` directly rather than a second
+grouping implementation). Neither is a new top-level package. Step 14B
+also found and fixed two real capital-requirement bugs that pre-date
+it — present since the original 3-strategy platform's
+`src.brokers.paper.PaperBroker._required_collateral`, only becoming
+reachable once Step 19A's spread strategies existed to trigger them —
+see `ARCHITECTURE.md` §13's "Step 14B refinements" for the full
+writeup; `src.backtest.engine` now imports `_is_credit_pairing`
+directly from `src.brokers.paper` rather than re-deriving the same
+credit-vs-debit rule a second time, the same "import the existing
+answer, don't reimplement it" discipline `src.backtest.slippage`
+already established for `src.brokers.paper.compute_fill`.

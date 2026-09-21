@@ -93,39 +93,56 @@ def strategy_type_for(kind: StrategyKind) -> StrategyType | None:
 
 
 class StrategyFamily(str, Enum):
+    """The 8 families Step 14B names verbatim, plus one additional value
+    (`TAIL_RISK_HEDGE`) this codebase already carried from Step 19A and
+    keeps rather than discarding: protective put/collar are more than
+    generically `PORTFOLIO_PROTECTION` (a covered call is arguably
+    "protective" of nothing) -- they specifically hedge tail risk, a
+    distinction worth keeping queryable on its own. Neither step's
+    instructions said the classification must be *exactly* these 8 and
+    no more, only that these 8 must exist; `TAIL_RISK_HEDGE` never
+    substitutes for `PORTFOLIO_PROTECTION`, it is additive to it (see
+    `STRATEGY_FAMILIES` below, where every `TAIL_RISK_HEDGE` entry also
+    carries `PORTFOLIO_PROTECTION`)."""
+
     INCOME = "income"
-    BULLISH = "bullish"
-    BEARISH = "bearish"
-    NEUTRAL = "neutral"
+    DIRECTIONAL_BULLISH = "directional_bullish"
+    DIRECTIONAL_BEARISH = "directional_bearish"
     VOLATILITY_EXPANSION = "volatility_expansion"
     VOLATILITY_CONTRACTION = "volatility_contraction"
     PORTFOLIO_PROTECTION = "portfolio_protection"
-    TAIL_RISK_HEDGE = "tail_risk_hedge"
+    NEUTRAL_RANGE = "neutral_range"
     CAPITAL_PRESERVATION = "capital_preservation"
+    TAIL_RISK_HEDGE = "tail_risk_hedge"
 
 
 # Classification is intentionally multi-valued per strategy (a covered
-# call is both INCOME and mildly BULLISH-capped; a protective put is
-# both PORTFOLIO_PROTECTION and a TAIL_RISK_HEDGE) -- "classify into one
-# or more" per Step 19A, never collapsed to a single label.
+# call is both INCOME and mildly DIRECTIONAL_BULLISH-capped; a
+# protective put is both PORTFOLIO_PROTECTION and a TAIL_RISK_HEDGE) --
+# "classify into one or more" per Step 19A/14B, never collapsed to a
+# single label.
 STRATEGY_FAMILIES: dict[StrategyKind, tuple[StrategyFamily, ...]] = {
-    StrategyKind.CASH_SECURED_PUT: (StrategyFamily.INCOME, StrategyFamily.BULLISH),
-    StrategyKind.COVERED_CALL: (StrategyFamily.INCOME, StrategyFamily.NEUTRAL),
-    StrategyKind.PUT_CREDIT_SPREAD: (StrategyFamily.INCOME, StrategyFamily.BULLISH),
-    StrategyKind.CALL_CREDIT_SPREAD: (StrategyFamily.INCOME, StrategyFamily.BEARISH),
-    StrategyKind.BULL_CALL_SPREAD: (StrategyFamily.BULLISH,),
-    StrategyKind.BEAR_PUT_SPREAD: (StrategyFamily.BEARISH,),
+    StrategyKind.CASH_SECURED_PUT: (StrategyFamily.INCOME, StrategyFamily.DIRECTIONAL_BULLISH),
+    StrategyKind.COVERED_CALL: (StrategyFamily.INCOME, StrategyFamily.NEUTRAL_RANGE),
+    StrategyKind.PUT_CREDIT_SPREAD: (StrategyFamily.INCOME, StrategyFamily.DIRECTIONAL_BULLISH),
+    StrategyKind.CALL_CREDIT_SPREAD: (StrategyFamily.INCOME, StrategyFamily.DIRECTIONAL_BEARISH),
+    StrategyKind.BULL_CALL_SPREAD: (StrategyFamily.DIRECTIONAL_BULLISH,),
+    StrategyKind.BEAR_PUT_SPREAD: (StrategyFamily.DIRECTIONAL_BEARISH,),
     StrategyKind.PROTECTIVE_PUT: (StrategyFamily.PORTFOLIO_PROTECTION, StrategyFamily.TAIL_RISK_HEDGE),
     StrategyKind.PROTECTIVE_COLLAR: (
         StrategyFamily.PORTFOLIO_PROTECTION, StrategyFamily.TAIL_RISK_HEDGE, StrategyFamily.CAPITAL_PRESERVATION,
     ),
-    StrategyKind.LONG_STRADDLE: (StrategyFamily.VOLATILITY_EXPANSION, StrategyFamily.NEUTRAL),
-    StrategyKind.LONG_STRANGLE: (StrategyFamily.VOLATILITY_EXPANSION, StrategyFamily.NEUTRAL),
-    StrategyKind.LONG_CALL: (StrategyFamily.BULLISH,),
-    StrategyKind.LONG_PUT: (StrategyFamily.BEARISH,),
-    StrategyKind.LONG_CALL_BUTTERFLY: (StrategyFamily.NEUTRAL, StrategyFamily.VOLATILITY_CONTRACTION),
-    StrategyKind.SHORT_IRON_CONDOR: (StrategyFamily.INCOME, StrategyFamily.NEUTRAL, StrategyFamily.VOLATILITY_CONTRACTION),
-    StrategyKind.SHORT_IRON_BUTTERFLY: (StrategyFamily.INCOME, StrategyFamily.NEUTRAL, StrategyFamily.VOLATILITY_CONTRACTION),
+    StrategyKind.LONG_STRADDLE: (StrategyFamily.VOLATILITY_EXPANSION, StrategyFamily.NEUTRAL_RANGE),
+    StrategyKind.LONG_STRANGLE: (StrategyFamily.VOLATILITY_EXPANSION, StrategyFamily.NEUTRAL_RANGE),
+    StrategyKind.LONG_CALL: (StrategyFamily.DIRECTIONAL_BULLISH,),
+    StrategyKind.LONG_PUT: (StrategyFamily.DIRECTIONAL_BEARISH,),
+    StrategyKind.LONG_CALL_BUTTERFLY: (StrategyFamily.NEUTRAL_RANGE, StrategyFamily.VOLATILITY_CONTRACTION),
+    StrategyKind.SHORT_IRON_CONDOR: (
+        StrategyFamily.INCOME, StrategyFamily.NEUTRAL_RANGE, StrategyFamily.VOLATILITY_CONTRACTION,
+    ),
+    StrategyKind.SHORT_IRON_BUTTERFLY: (
+        StrategyFamily.INCOME, StrategyFamily.NEUTRAL_RANGE, StrategyFamily.VOLATILITY_CONTRACTION,
+    ),
 }
 
 MarketOutlook = Literal[

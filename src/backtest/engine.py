@@ -67,7 +67,7 @@ from src.backtest.simulator import (
     assert_no_lookahead_options,
 )
 from src.backtest.slippage import NoFillError, mark_to_market
-from src.brokers.paper import PaperBrokerConfig
+from src.brokers.paper import PaperBrokerConfig, _is_credit_pairing
 from src.data.historical import HistoricalBar
 
 _CONTRACT_MULTIPLIER = 100
@@ -75,25 +75,62 @@ _CONTRACT_MULTIPLIER = 100
 QuoteLookup = Callable[[str, date], list[HistoricalOptionQuote]]
 
 
-def _estimate_capital_at_risk(legs, contracts: int, underlying_cost_basis: float) -> float:
+def _estimate_capital_at_risk(
+    legs, contracts: int, underlying_cost_basis: float, entry_credit_total: float = 0.0
+) -> float:
     """A simplified, strategy-agnostic collateral estimate — the same
-    "net a same-right short/long pair to the strike width, otherwise
-    charge the short leg's full strike" reasoning
-    `src.brokers.paper.PaperBroker._required_collateral` already uses,
-    reduced to the two-leg-or-fewer shapes this backtest engine's three
-    supported strategies actually produce. For a covered call
-    (single short call leg with `underlying_cost_basis` set), capital at
-    risk is the covering shares' cost basis, not the call's own strike."""
+    reasoning `src.brokers.paper.PaperBroker._required_collateral` uses
+    (and, for a same-right short/long pair, the exact same
+    `_is_credit_pairing` rule, imported directly rather than
+    re-implemented, so the two can never silently disagree about which
+    strike order is a credit spread and which is a debit spread).
+
+    `entry_credit_total` is `realistic_entry_credit_total` (dollars,
+    whole position, signed — negative for a debit) — Step 14B added
+    this parameter because a debit spread or a pure long position
+    (no short legs at all: long call/put, long straddle/strangle, a
+    protective put's own long-put leg) previously fell through to
+    either the credit-spread-width formula (wrong for a debit vertical:
+    it isn't at risk beyond the debit already paid) or a short-strikes
+    sum that is empty — and therefore *zero* — for any position with no
+    short legs, silently under-reporting capital at risk for every
+    long-premium strategy Step 19A added. Every branch below now uses
+    the debit actually paid instead of either mistake."""
     shorts = [leg for leg in legs if leg.side == "sell"]
     longs = [leg for leg in legs if leg.side == "buy"]
+    debit_paid = max(-entry_credit_total, 0.0)
+
+    if len(shorts) == 1 and len(longs) == 1 and shorts[0].right != longs[0].right and underlying_cost_basis > 0:
+        # Protective collar: one short call (covered by the held
+        # shares) + one long put. Capital at risk is the covering
+        # shares' cost basis, same as covered call/protective put below
+        # — the short call carries no naked risk, and the put's own
+        # small debit is already reflected in cash.
+        return underlying_cost_basis * _CONTRACT_MULTIPLIER * contracts + debit_paid
+
     if len(shorts) == 1 and len(longs) == 1 and shorts[0].right == longs[0].right:
-        return abs(shorts[0].strike - longs[0].strike) * _CONTRACT_MULTIPLIER * contracts
+        if _is_credit_pairing(shorts[0], longs[0]):
+            return abs(shorts[0].strike - longs[0].strike) * _CONTRACT_MULTIPLIER * contracts
+        # Bull call spread / bear put spread: a debit vertical's maximum
+        # loss is already the premium paid — no additional collateral.
+        return debit_paid
+
     if len(shorts) == 1 and not longs:
         if underlying_cost_basis > 0:
-            return underlying_cost_basis * _CONTRACT_MULTIPLIER * contracts
-        return shorts[0].strike * _CONTRACT_MULTIPLIER * contracts
-    # Not one of this platform's three supported shapes — fall back to
-    # the sum of short strikes as a conservative (never an
+            return underlying_cost_basis * _CONTRACT_MULTIPLIER * contracts  # covered call
+        return shorts[0].strike * _CONTRACT_MULTIPLIER * contracts  # cash-secured put
+
+    if not shorts:
+        # Pure long/debit shape: long call, long put, long straddle,
+        # long strangle, or a protective put bought fresh (shares' cost
+        # basis, when set, dominates the same way it does above).
+        if underlying_cost_basis > 0:
+            return underlying_cost_basis * _CONTRACT_MULTIPLIER * contracts + debit_paid
+        return debit_paid
+
+    # Not one of this platform's supported 2-leg shapes (e.g. a Tier2
+    # iron condor/butterfly backtest, per ARCHITECTURE.md §13) — fall
+    # back to the sum of short strikes as a conservative (never an
     # under-estimate for a credit strategy) stand-in.
     return sum(leg.strike for leg in shorts) * _CONTRACT_MULTIPLIER * contracts
 
@@ -346,7 +383,9 @@ def run_backtest(
                 profit_target_pct=entry.profit_target_pct,
                 realistic_entry_credit_total=realistic_credit_total,
                 theoretical_entry_credit_total=theoretical_credit_total,
-                capital_at_risk=_estimate_capital_at_risk(entry.legs, result.filled_contracts, entry.underlying_cost_basis),
+                capital_at_risk=_estimate_capital_at_risk(
+                    entry.legs, result.filled_contracts, entry.underlying_cost_basis, realistic_credit_total,
+                ),
                 entry_spread_pct=result.max_leg_spread_pct,
                 entry_commission=result.commission,
                 underlying_shares_held=entry.underlying_shares_held,

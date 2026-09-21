@@ -32,6 +32,11 @@ class MarketView(str, Enum):
     LARGE_MOVE_EXPECTED = "large_move_expected"  # volatility expansion, direction uncertain
     PORTFOLIO_PROTECTION = "portfolio_protection"
     HIGH_IV_CONTRACTION_EXPECTED = "high_iv_contraction_expected"
+    # Step 14B addition: distinct from LARGE_MOVE_EXPECTED (direction
+    # uncertain) -- "low IV with expected expansion" is explicitly
+    # allowed to be directional (long call/put, debit spreads), not just
+    # the non-directional straddle/strangle pair.
+    LOW_IV_EXPANSION_EXPECTED = "low_iv_expansion_expected"
 
 
 # Order within each tuple is not a ranking -- src.strategies.comparison
@@ -49,6 +54,11 @@ CANDIDATE_STRATEGIES_BY_VIEW: dict[MarketView, tuple[StrategyKind, ...]] = {
     # acceptable" -- that acceptability check is the Devil's Advocate's
     # and Risk Engine's job downstream, never decided by this table.
     MarketView.HIGH_IV_CONTRACTION_EXPECTED: (_IC, _IB, _PCS, _CCS),
+    # "Long Straddle, Long Strangle, Long Call, Long Put, appropriate
+    # debit spreads" per Step 14B -- deliberately broader than
+    # LARGE_MOVE_EXPECTED above, since low-IV expansion setups are
+    # explicitly allowed to be directional.
+    MarketView.LOW_IV_EXPANSION_EXPECTED: (_STRD, _STRN, _LC, _LP, _BCS, _BPS),
 }
 
 # Strategies that require existing shares before they can even be

@@ -26,7 +26,8 @@ from dataclasses import dataclass
 
 from src.risk.reason_codes import RiskDecision
 from src.strategies.base import StrategyEvaluation, StrategyKind
-from src.strategies.comparison import ComparisonRow, build_comparison_table, rank_candidates, risk_adjusted_score
+from src.strategies.comparison import ComparisonRow, build_comparison_table
+from src.strategies.ranking import rank_candidates, risk_adjusted_score
 from src.strategies.portfolio_fit import PortfolioFitResult, evaluate_portfolio_fit
 from src.risk.limits import RiskLimitsConfig
 from src.risk.portfolio_risk import Portfolio

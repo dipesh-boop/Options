@@ -601,3 +601,63 @@ actually proven is "every defined-risk strategy's `maximum_loss` bound
 holds against every simulated terminal price in every regime," never a
 P&L-sign or win-rate requirement in any regime — no strategy is
 required to win everywhere.
+
+**Step 14B refinements** (same system, no rebuild — every change below
+is additive or a targeted bug fix over the §13 architecture above):
+
+- `StrategyFamily` renamed to Step 14B's own exact vocabulary
+  (`DIRECTIONAL_BULLISH`/`DIRECTIONAL_BEARISH`/`NEUTRAL_RANGE` replacing
+  `BULLISH`/`BEARISH`/`NEUTRAL`), keeping `TAIL_RISK_HEDGE` as a
+  documented 9th value beyond the 8 Step 14B names, since neither step
+  said the classification must be *exactly* 8 and no more.
+- The ranking rule (`risk_adjusted_score`/`rank_candidates`) moved into
+  its own module, `src.strategies.ranking` — the file Step 14B names
+  explicitly, separate from `src.strategies.comparison`'s metrics-table
+  builder, so the ranking formula is independently testable.
+- A 9th `MarketView`, `LOW_IV_EXPANSION_EXPECTED`, added alongside the
+  original 8: distinct from `LARGE_MOVE_EXPECTED` (direction uncertain)
+  by explicitly allowing directional candidates (long call/put, debit
+  spreads), matching Step 14B's own "low IV, expecting expansion" list.
+- **Two capital-requirement bugs found and fixed**, both pre-dating
+  Step 14B (present since the original 3-strategy platform, only
+  becoming reachable in practice once Step 19A's spread strategies
+  existed to trigger them): (1) `PaperBroker._required_collateral` and
+  `src.backtest.engine._estimate_capital_at_risk` both charged a debit
+  vertical spread (bull call spread, bear put spread) the same
+  full-strike-width collateral a *credit* spread of that width needs —
+  wrong, since a debit spread's maximum loss is already the premium
+  paid; both now use the same strike-ordering rule
+  (`_is_credit_pairing`, imported into the backtest engine rather than
+  reimplemented) `TradeProposal`'s own leg validators already encode.
+  (2) Both also silently reported **zero** capital at risk for any
+  pure-long position (long call/put, long straddle/strangle, a fresh
+  protective put) — fixed by using the actual debit paid instead of an
+  empty short-strikes sum. `PaperBroker` additionally gained a
+  preflight cash-affordability check in `attempt_fill` (a debit that
+  would take the account's cash negative is now rejected, never
+  silently filled) — a gap that existed for every debit-only strategy
+  and was closed at the same time as the collateral fix.
+- `src/validation/strategy_attribution.py` (new): per-strategy
+  performance tracking — trades/wins/losses/win rate/net P&L/return on
+  capital/expectancy/profit factor/a per-trade Sharpe-like ratio
+  (explicitly documented as an approximation, not the rigorous
+  equity-curve Sharpe `src.backtest.metrics` computes portfolio-wide)/a
+  drawdown-*contribution* figure/average holding period/average
+  slippage/performance by regime — reusing
+  `src.research.performance_breakdown.breakdown_by` directly rather
+  than a second grouping implementation. Answers Step 14B's six named
+  attribution questions (which strategies generated profit, reduced
+  losses, consumed capital without value, are regime-specific, improved
+  drawdown, increased tail risk, generated excessive trading costs)
+  with plain deterministic threshold rules over those numbers — never
+  an LLM judgment call. Hedge strategies (protective put/collar) are
+  judged by their family classification, never standalone P&L sign,
+  per Step 19A's own rule.
+- A final system test (`tests/unit/strategies/test_final_system_scenarios.py`)
+  runs the full MARKET DATA → REGIME → CANDIDATES → QUANT → COMPARISON
+  → verdicts (supplied) → SELECTION-OR-NO_TRADE pipeline across the 8
+  scenarios Step 14B names (STRONG/MODERATE BULL, SIDEWAYS LOW
+  VOL/HIGH IV, STRONG BEAR, VOLATILITY EXPANSION/CONTRACTION, PORTFOLIO
+  CRASH), asserting only that a valid outcome exists and every
+  candidate's own defined-risk bound holds against that scenario's
+  simulated terminal prices — never which strategy wins.

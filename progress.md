@@ -2832,3 +2832,261 @@ whether/when to widen `TradeProposal`'s leg cap to bring the 3 Tier2
 strategies into Tier1; and, unrelated to this step but still open,
 every Phase 0 foundation item and cross-step gap already carried
 forward above.
+
+## 2026-09-21 (cont'd) — Complete Options Strategy Selection Engine (Step 14B)
+
+**Explicit instruction for this step:** build the "complete" strategy
+selection engine — the same 16-item library and Strategy Competition
+Engine concept Step 19A already delivered, now specified with its own
+exact vocabulary (family names, market-view labels, a `ranking.py`
+module named explicitly) and, critically, three new concrete asks
+Step 19A had not yet covered: (1) a dedicated strategy-attribution
+report answering six named questions per strategy, (2) a final system
+test across 8 named market scenarios proving the pipeline can select a
+candidate or NO_TRADE in each without ever requiring one winner, and
+(3) an explicit re-inspection of the Quant Engine, Risk Engine, Market
+Regime Agent, Strategy Research Agent, Fidelity constraints,
+PaperBroker, and Backtesting Engine — "do not duplicate existing
+functionality." Given how much Step 19A had already built, this step's
+real work was threefold: (a) align existing code to this step's own
+naming where it differs without breaking anything, (b) find and close
+genuine gaps the re-inspection surfaces rather than re-describing
+already-complete work, and (c) build the two named modules that
+genuinely didn't exist yet (`ranking.py`, `strategy_attribution.py`)
+plus the final system test. Nothing from Step 19A was rebuilt, reset,
+or weakened — every change below is additive or a targeted, tested bug
+fix, verified by running the full suite after each change.
+
+**Re-inspection findings, before writing anything new:**
+
+- `src.backtest.simulator.BacktestLeg`/`EntrySignal.legs` carry no leg-
+  count cap at all, and `src.brokers.base.PlaceOrderRequest.legs` is
+  already `Field(min_length=1, max_length=4)` — the backtest engine and
+  PaperBroker were never the reason Tier2's 3-4 leg strategies can't
+  become a real order; that boundary is `TradeProposal`'s 1-2 leg cap
+  and the Risk Engine's Tier1-only dispatch tables alone, unchanged
+  from Step 19A's own documented decision (`ARCHITECTURE.md` §13).
+- **Two real capital-requirement bugs**, both pre-dating this step
+  (present since the original 3-strategy platform; only reachable in
+  practice once Step 19A's spread strategies existed to trigger them),
+  caught by directly testing `PaperBroker._required_collateral` and
+  `src.backtest.engine._estimate_capital_at_risk` against a bull call
+  spread rather than assuming their existing "3 supported strategies"
+  docstrings still described the platform accurately: (1) a debit
+  vertical spread (bull call spread, bear put spread) was charged the
+  full strike-width collateral a *credit* spread of that width needs —
+  a real over-collateralization that could reject an affordable debit
+  trade, since a debit spread's maximum loss is already the premium
+  paid, nothing more. (2) Both functions also returned **zero**
+  capital at risk for any pure-long position with no short legs at all
+  (long call, long put, long straddle, long strangle, a freshly-bought
+  protective put) — the short-strikes-sum fallback is empty when there
+  are no short legs, silently under-reporting capital at risk for
+  every long-premium strategy Step 19A added, and (in `PaperBroker`'s
+  case) leaving nothing else to check that a debit trade's cash was
+  actually affordable before filling it.
+- `Strategy Research` agent persona (`.claude/agents/strategy_research.md`)
+  still describes "the platform's three approved strategies" — now
+  stale relative to the 16-item library. Not rewritten this step (its
+  own scope, `src.research.performance_breakdown`'s 12-dimension
+  breakdown machinery, was never asked to expand to the new strategies
+  either) — flagged below rather than silently left inaccurate or
+  silently rewritten without being asked.
+
+**Fixes**, both mirroring the exact strike-ordering rule
+`src.llm.schemas.TradeProposal`'s own leg validators already enforce
+for `CALL_CREDIT_SPREAD`/`BULL_CALL_SPREAD`/`PUT_CREDIT_SPREAD`/
+`BEAR_PUT_SPREAD`, so the pricing/collateral/execution layers can never
+silently disagree about which strike order is a credit spread and
+which is a debit spread:
+
+- **`src/brokers/paper.py`** — new module-level `_is_credit_pairing(short,
+  long)` helper (pure strike-order check, no premium lookup needed);
+  `_required_collateral`'s pairing branch now skips width-collateral
+  entirely for a debit pairing. `attempt_fill` gained a preflight
+  cash-affordability check, computed by the exact same per-leg signed-
+  cash formula `_apply_fill` uses (so the two can never diverge):
+  a debit that would take `self._cash` negative is now rejected with a
+  clear reason, never silently filled. 5 new regression tests in
+  `tests/unit/brokers/test_paper_broker.py`
+  (`TestDebitVerticalSpreadCollateral`,
+  `TestDebitAffordabilityPreflightCheck`).
+- **`src/backtest/engine.py`** — `_estimate_capital_at_risk` imports
+  `_is_credit_pairing` directly from `src.brokers.paper` rather than
+  re-deriving the same rule a second time; gained a new
+  `entry_credit_total` parameter (the signed entry credit/debit,
+  already computed at the one call site in `run_backtest`) used by
+  every branch that previously fell back to zero or an incorrect
+  width. A protective-collar-shaped pair (short call + long put,
+  different rights) now correctly uses the covering shares' cost
+  basis instead of falling through to the generic short-strikes-sum
+  fallback. 12 new tests in `tests/unit/backtest/test_engine.py`
+  (`TestEstimateCapitalAtRiskAllStrategyShapes`), covering all 12
+  Tier1 shapes plus the Tier2 fallback and default-parameter backward
+  compatibility.
+
+**`src/strategies/base.py`** — `StrategyFamily` renamed to Step 14B's
+own exact 8-value vocabulary (`DIRECTIONAL_BULLISH`/
+`DIRECTIONAL_BEARISH`/`NEUTRAL_RANGE` replacing `BULLISH`/`BEARISH`/
+`NEUTRAL`), keeping `TAIL_RISK_HEDGE` as a documented 9th value — a
+protective put/collar is more than generically "portfolio protection,"
+and neither step said the classification must be exactly 8 and no
+more. `STRATEGY_FAMILIES` updated to match; no strategy's
+classification set changed, only the label vocabulary.
+
+**`src/strategies/ranking.py`** (new) — `risk_adjusted_score`/
+`rank_candidates` moved out of `comparison.py` into their own module,
+the file Step 14B names explicitly, separate from the metrics-table
+builder. `comparison.py` re-exports both names for the one caller that
+still imports them that way (`tests/unit/strategies
+/test_comparison_portfolio_fit_selector.py`); `selector.py` now
+imports directly from `ranking.py`. 6 new tests in
+`tests/unit/strategies/test_ranking.py`, including a same-object
+identity check proving the re-export never drifts into a second
+implementation.
+
+**`src/strategies/regime_mapping.py`** — a 9th `MarketView`,
+`LOW_IV_EXPANSION_EXPECTED` (long straddle/strangle/call/put plus
+"appropriate debit spreads"), added alongside the original 8:
+deliberately broader than `LARGE_MOVE_EXPECTED` (direction uncertain),
+since Step 14B's own low-IV-expansion list explicitly allows
+directional candidates. `CANDIDATE_STRATEGIES_BY_VIEW`'s existing 8
+entries verified unchanged against Step 14B's own worked examples
+(moderately bullish, strongly bullish, moderately bearish, neutral/
+range-bound, high-vol/large-move, portfolio protection, high-IV-
+contraction) — all matched exactly, confirming Step 19A's original
+table already satisfied this step's spec rather than needing a rebuild.
+
+**`src/validation/strategy_attribution.py`** (new) — the module this
+step's "reporting system must answer" section asks for.
+`per_strategy_performance` tracks each strategy independently ("do NOT
+judge only the combined portfolio"): trades, wins, losses, win rate,
+net P&L, dollar-weighted return on capital, expectancy, profit factor
+(`None` with zero losing trades, never a fabricated ratio), a
+per-trade Sharpe-like ratio (explicitly documented as an
+approximation — mean/stdev of each trade's own `pnl/capital_at_risk`,
+gated behind a minimum-sample-size threshold the same way
+`src.workflows.rejected_trade_review` already gates "meaningful
+sample," and never conflated with the rigorous equity-curve Sharpe
+`src.backtest.metrics.compute_metrics` computes portfolio-wide, which
+has no per-strategy equivalent to compute from), a drawdown-
+*contribution* figure (peak-to-trough on a pseudo equity curve built
+from that strategy's own trades' chronological P&L, not a true
+portfolio percentage), average holding period, and average slippage
+(the identical `theoretical - realistic - commission` definition
+`src.backtest.engine.build_backtest_result` already uses). Reuses
+`src.research.performance_breakdown.breakdown_by` directly for the
+strategy and regime groupings rather than a second bucketing
+implementation. `answer_attribution_questions` answers the six named
+questions with plain deterministic threshold rules over those numbers
+— generated profit (net P&L > 0), reduced losses / improved drawdown
+(hedge-family strategies present, judged by family classification per
+Step 19A's own rule, never by standalone P&L sign), consumed capital
+without value (non-hedge, net P&L <= 0), regime-specific (>80% of a
+strategy's own trades concentrated in one regime, the same threshold
+`src.validation.regime_analysis.RegimeCoverageSummary` already uses),
+increased tail risk (worst single loss > 3x that strategy's own
+average loss magnitude), generated excessive trading costs (average
+slippage exceeding 25% of expectancy). 23 new tests in
+`tests/unit/validation/test_strategy_attribution.py`.
+
+**`tests/unit/strategies/test_final_system_scenarios.py`** (new) — the
+final system test this step asks for, across the 8 named scenarios
+(STRONG BULL, MODERATE BULL, SIDEWAYS LOW VOL, SIDEWAYS HIGH IV,
+STRONG BEAR, VOLATILITY EXPANSION, VOLATILITY CONTRACTION, PORTFOLIO
+CRASH — the latter three run against a shares-holding portfolio,
+since `NEUTRAL_RANGE_BOUND`'s own candidate list is mostly Tier2
+(iron condor/butterfly) plus a shares-requiring covered call).
+Contracts are priced by the real quant engine (`src.quant
+.black_scholes.price`) at each scenario's own spot/sigma, not
+hand-picked numbers, so all 8 scenarios' differing volatility levels
+produce internally consistent premiums. Per scenario: generates every
+suitable candidate for that scenario's `MarketView`, prices each via
+the real `evaluate_*` functions, supplies Devil's Advocate/Risk Engine
+verdicts (same "no real API key needed" pattern
+`test_system_integration.py` already established), runs the real
+`select_best_or_no_trade`, and asserts only that a valid outcome exists
+(a real candidate that was actually generated, or NO_TRADE with a
+reason) — **never which strategy wins**, per this step's own explicit
+instruction. Cross-checks every scenario's actually-generated
+candidates against `src.backtest.regime_scenarios.generate_regime_path`
+the same way `test_regime_scenarios.py` already does for one hand-picked
+position, now against real Strategy-Competition-Engine output. A 9th
+test proves NO_TRADE is reachable, not merely representable (an
+artificially impossible hurdle forces it). 9 tests total.
+
+**Everything already satisfying Step 14B's spec without any change**,
+confirmed by direct inspection rather than assumed: all 16 library
+items (§Step 19A); the common strategy-evaluation contract
+(`StrategyEvaluation`'s ~30 fields, computed exclusively by
+`build_strategy_evaluation` from `src.quant` outputs — the "no method
+calls, a frozen dataclass of pre-computed fields instead" design
+choice from Step 19A stands, since every value Step 14B's own
+`interface` section lists is present as data, just never invoked as
+`.capital_requirement()`); the comparison methodology
+(`risk_adjusted_score`, never raw return, directly tested against this
+step's own 25%/40%-drawdown vs. 12%/6%-drawdown framing); Fidelity
+compatibility (`fidelity_compatible`/`fidelity_incompatibility_reason`
+on every evaluation, unknown capability already treated as
+non-order-eligible for the 3 Tier2 kinds); position-aware suitability
+(`src.strategies.suitability`, unchanged); portfolio-level controls
+(`src.strategies.portfolio_fit`, unchanged); NO_TRADE as a first-class,
+structurally-representable outcome (unchanged); position management
+rules and roll-as-close-plus-open (Step 19A's per-strategy
+entry/exit/adjustment/invalidation rule tuples, unchanged); backtesting
+support for every Tier1 shape (now fully correct after this step's two
+collateral fixes); paper-trading support (now with the debit-
+affordability check closing the one real gap found).
+
+Full repo suite: **2021 passed, 4 skipped** (up from 1966 at the end of
+Step 19A; +55 new tests, 0 regressions, 0 weakened or deleted existing
+tests, 4 skips unchanged — the same pre-existing IBKR live-adapter
+skips).
+
+## Open decisions carried forward (updated a ninth time)
+
+- [ ] **New from Step 14B**: `.claude/agents/strategy_research.md`
+      still describes "the platform's three approved strategies" —
+      genuinely stale relative to the 16-item library, not rewritten
+      this step since neither this step nor Step 19A asked for the
+      Strategy Research Agent's own scope (or
+      `src.research.performance_breakdown`'s dimension list) to expand,
+      and doing so unprompted risked silently changing a role's
+      contract. Flagged rather than silently left inaccurate.
+- [ ] **New from Step 14B**: the per-trade Sharpe-like ratio in
+      `src.validation.strategy_attribution` is a documented
+      approximation (mean/stdev of per-trade returns, not annualized,
+      no per-strategy equity curve exists to compute the rigorous
+      version from) — two different "Sharpe" computations now exist in
+      this codebase for two different purposes and granularities,
+      flagged rather than silently conflated.
+- [ ] **New from Step 14B**: the six attribution questions'
+      "reduced losses" / "improved drawdown" answers are the same
+      hedge-family-membership set for both questions — this codebase
+      has no true portfolio-level hedge-effectiveness counterfactual
+      (replaying the same period with and without the hedge) to
+      actually distinguish them; both are currently qualitative
+      (family classification), not the drawdown-reduction dollar
+      figure a real counterfactual would produce. A real answer would
+      extend `src.validation.counterfactual` with a hedge-specific
+      replay, not attempted here.
+- Every open decision Step 19A carried forward (candidate generation
+  still needs live-chain wiring, the 90-day daily driver still doesn't
+  exist, the Tier2 leg-cap question still isn't decided, `src.strategies`
+  still has no verified architecture-boundary test) remains open,
+  unchanged by this step.
+
+## Next up
+
+Per this step's own instruction, mirrored from Step 19/19A: **do not
+proceed further without direction.** The concrete gaps this step
+leaves open, in likely priority order: (1) everything Step 19A's own
+"Next up" already named (live-chain candidate generation, the 90-day
+daily driver, the Tier2 leg-cap decision); (2) a true portfolio-level
+hedge-effectiveness counterfactual, so "reduced losses" and "improved
+drawdown" become independently-computed dollar figures rather than the
+same family-membership flag; (3) deciding whether
+`.claude/agents/strategy_research.md` and
+`src.research.performance_breakdown`'s dimension list should expand to
+the full 16-strategy library, or remain deliberately scoped to the
+original 3 — not decided here.
