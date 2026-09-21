@@ -4,10 +4,12 @@ leg-builder around this shared assembler — no strategy module derives
 its own max-profit/max-loss/breakeven/Greeks/EV math; all of it comes
 from `src.quant` (`src.quant.monte_carlo.payoff_profile`, `net_greeks`,
 `monte_carlo_pop_and_ev`, `stress_test`), reused identically across all
-16 strategy kinds, both the 9 wired all the way to a real order
-(`StrategyKind` values that also exist in `src.llm.schemas.StrategyType`)
-and the 3 evaluation-only ones (butterfly / iron condor / iron
-butterfly — see `StrategyKind`'s own docstring).
+16 strategy kinds. As of Step 20A, all 15 `StrategyKind` members are
+wired all the way to a real order (`TradeProposal`/`ApprovedOrder`/
+`FidelityTradeTicket`) — the butterfly/iron condor/iron butterfly trio
+was evaluation-only through Step 19A/14B (see `progress.md`'s Step 20A
+entry) but is no longer; `TRADE_PROPOSAL_ELIGIBLE` below now equals
+the full `StrategyKind` set.
 
 This module never places, sizes-for-execution, or approves anything —
 `StrategyEvaluation` is comparison/reporting data. A candidate that
@@ -84,9 +86,13 @@ TRADE_PROPOSAL_ELIGIBLE: frozenset[StrategyKind] = frozenset(k for k in Strategy
 
 
 def strategy_type_for(kind: StrategyKind) -> StrategyType | None:
-    """`None` for the 3 evaluation-only kinds -- never raises, since
-    "not yet order-eligible" is an expected, first-class outcome here,
-    not an error."""
+    """As of Step 20A, `StrategyType` has a matching member for every
+    `StrategyKind`, so this never actually returns `None` today -- the
+    `try/except` is kept as a structural guard (never raises) rather
+    than removed, in case a future `StrategyKind` addition is again
+    evaluation-only before being wired to a real order, the same
+    staged rollout this platform already used once for the butterfly/
+    iron condor/iron butterfly trio."""
     try:
         return StrategyType(kind.value)
     except ValueError:

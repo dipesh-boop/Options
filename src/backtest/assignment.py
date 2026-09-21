@@ -39,7 +39,20 @@ def settle_leg(leg: BacktestLeg, contracts: int, settlement_price: float) -> Leg
     assigned (buys shares for a put, sells shares for a call); a long
     leg's is exercised (the mirror image). An OTM leg (`intrinsic == 0`)
     expires worthless with no further cash or share impact — the
-    premium already changed hands at entry."""
+    premium already changed hands at entry.
+
+    ACCEPT-003 (Step 21 acceptance-test finding): this leg's actual
+    contract count is `contracts * leg.quantity_ratio`, not `contracts`
+    alone — `BacktestLeg.quantity_ratio`'s own docstring notes the
+    ratio is applied on the ENTRY fill path (`_to_order_leg` ->
+    `compute_fill`), but settlement is a separate code path that never
+    went through that conversion, so `LONG_CALL_BUTTERFLY`'s 2x middle
+    leg was previously settled at expiration as if it were only 1x —
+    understating its assignment cash/share impact by half. Every other
+    strategy in the library uses `quantity_ratio=1` on every leg (see
+    `src.llm.schemas`'s own structural validators), so this is a no-op
+    everywhere except the butterfly."""
+    leg_contracts = contracts * leg.quantity_ratio
     intrinsic = intrinsic_value(leg.right, leg.strike, settlement_price)
     was_itm = intrinsic > 0
     if not was_itm:
@@ -49,8 +62,8 @@ def settle_leg(leg: BacktestLeg, contracts: int, settlement_price: float) -> Leg
     # short put -> assigned -> buy shares; long put -> exercised -> sell shares
     # short call -> assigned -> sell shares; long call -> exercised -> buy shares
     buys_shares = (leg.right == OptionRight.PUT) == is_short
-    share_impact = _CONTRACT_MULTIPLIER * contracts * (1 if buys_shares else -1)
-    cash_impact = -leg.strike * _CONTRACT_MULTIPLIER * contracts * (1 if buys_shares else -1)
+    share_impact = _CONTRACT_MULTIPLIER * leg_contracts * (1 if buys_shares else -1)
+    cash_impact = -leg.strike * _CONTRACT_MULTIPLIER * leg_contracts * (1 if buys_shares else -1)
     return LegSettlement(leg=leg, intrinsic_value=intrinsic, was_itm=True, assigned_or_exercised=True, cash_impact=cash_impact, share_impact=share_impact)
 
 
@@ -87,12 +100,17 @@ def realized_settlement_pnl(
     for settlement in settlements:
         if not settlement.assigned_or_exercised:
             continue
+        # ACCEPT-003: this leg's own quantity_ratio (see `settle_leg`'s
+        # docstring) -- a flat `contracts` here would understate a
+        # 2x-ratio leg's (e.g. LONG_CALL_BUTTERFLY's middle leg)
+        # realized settlement P&L by half.
+        leg_contracts = contracts * settlement.leg.quantity_ratio
         is_short = settlement.leg.side == "sell"
         disposes_shares = settlement.share_impact < 0
         if is_short and disposes_shares and underlying_shares_held > 0:
-            total += (settlement.leg.strike - underlying_cost_basis) * _CONTRACT_MULTIPLIER * contracts
+            total += (settlement.leg.strike - underlying_cost_basis) * _CONTRACT_MULTIPLIER * leg_contracts
         elif is_short:
-            total -= settlement.intrinsic_value * _CONTRACT_MULTIPLIER * contracts
+            total -= settlement.intrinsic_value * _CONTRACT_MULTIPLIER * leg_contracts
         else:
-            total += settlement.intrinsic_value * _CONTRACT_MULTIPLIER * contracts
+            total += settlement.intrinsic_value * _CONTRACT_MULTIPLIER * leg_contracts
     return total

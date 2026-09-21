@@ -251,6 +251,9 @@ def fillable_quantity(requested: int, fill_quote: FillQuote, config: PaperBroker
     return max(min(requested, by_volume), 0)
 
 
+_LIMIT_PRICE_EPSILON = 1e-6  # dollars; absorbs floating-point summation-order noise only, never real economics
+
+
 def price_satisfies_limit(fill_quote: FillQuote, limit_price: float) -> bool:
     """A net-credit order fills only at or above its limit (a floor on
     credit received); a net-debit order fills only at or below its limit
@@ -258,10 +261,23 @@ def price_satisfies_limit(fill_quote: FillQuote, limit_price: float) -> bool:
     to the whole combo's net price. `net_price` is negative for a debit
     (cash paid out), so "pay no more than limit_price" is
     `net_price >= -limit_price` (e.g. paying $0.50 against a $0.60 max
-    is -0.50 >= -0.60, true) — not the other way around."""
+    is -0.50 >= -0.60, true) — not the other way around.
+
+    Step 21 acceptance-test finding: `limit_price` (built once, from
+    `ApprovedOrder`'s own `net_bid`/`net_ask` average) and `net_price`
+    (recomputed independently here from the same underlying quotes, via
+    a different summation order across `weighted_signs`) are two
+    floating-point evaluations of the *same* economic quantity — for a
+    3-4 leg combo they can differ by a single ULP (e.g. 1.3649999999999998
+    vs. 1.365), which a strict `>=` treats as "doesn't satisfy the
+    limit" even though the real market exactly matches the requested
+    price. `_LIMIT_PRICE_EPSILON` is far below any real cent-level
+    price difference (the smallest meaningful option price move) --
+    this closes only the floating-point gap, never a genuine pricing
+    concession."""
     if fill_quote.is_credit:
-        return fill_quote.net_price >= limit_price
-    return fill_quote.net_price >= -limit_price
+        return fill_quote.net_price >= limit_price - _LIMIT_PRICE_EPSILON
+    return fill_quote.net_price >= -limit_price - _LIMIT_PRICE_EPSILON
 
 
 def _is_credit_pairing(short: OrderLeg, long: OrderLeg) -> bool:

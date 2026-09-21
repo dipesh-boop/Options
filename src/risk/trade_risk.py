@@ -196,6 +196,16 @@ def check_liquidity(contract: OptionContract, limits: RiskLimitsConfig) -> None:
         )
     if contract.bid <= 0 or contract.ask <= 0:
         raise LiquidityError(f"{contract.option_symbol}: no two-sided market (bid={contract.bid}, ask={contract.ask})")
+    if not (math.isfinite(contract.bid) and math.isfinite(contract.ask)):
+        # Step 21 acceptance-test finding (ACCEPT-002): `OptionContract`
+        # only enforces bid/ask >= 0, so +inf is constructible; an
+        # infinite spread's spread_pct is NaN, and `NaN > threshold` is
+        # always False in Python, so the check below would otherwise
+        # silently pass an infinite quote as liquid. The rest of the
+        # pipeline already fails closed on an infinite premium via a
+        # later, less specific exception -- this makes the rejection
+        # happen here instead, with a clear reason.
+        raise LiquidityError(f"{contract.option_symbol}: non-finite bid/ask (bid={contract.bid}, ask={contract.ask})")
     mid = contract.mid
     spread_pct = (contract.ask - contract.bid) / mid if mid > 0 else math.inf
     if spread_pct > limits.max_bid_ask_spread_pct:

@@ -3617,3 +3617,98 @@ eventually generates protective put/collar candidates; (4) persisting
 reports/validation data to disk across restarts (README.md's
 "Where reports/validation results are stored" sections describe this
 honestly as not yet built).
+
+## Step 21 — Final system integration & acceptance test
+
+**Commit tested:** `3909862` (Step 20A). **Purpose:** verification and
+hardening only, per the instruction's own explicit constraints — no
+new features, no strategy-logic changes, no risk-limit changes, no
+live trading, no automated Fidelity execution, and the 12-15%
+aspirational target never treated as an acceptance criterion.
+
+**What was built:** a new `tests/acceptance/` suite (186 tests across
+14 files: `test_end_to_end_happy_path.py`, `test_market_data_
+failures.py`, `test_strategy_integrity.py`, `test_risk_veto.py`,
+`test_llm_boundary.py`, `test_multileg_integrity.py`, `test_quant_
+integrity.py`, `test_paper_broker.py`, `test_accounting_
+reconciliation.py`, `test_assignment_expiration.py`, `test_order_
+state_machine.py`, `test_fidelity_manual_only.py`, `test_validation_
+pipeline.py`, `test_operational_resilience.py`), each described in
+detail in the new `ACCEPTANCE_TEST_REPORT.md` at the repo root. The
+suite deliberately reuses the REAL, unmocked `evaluate_trade_proposal`
+(Risk Engine), `validate_and_build_order_request` (Order Validator),
+`PaperBroker`, and `default_quant_stage` throughout — only the two LLM
+stages are scripted with a fake `LLMClient` — which is a stronger form
+of proof than testing against mocks of the security-critical
+components, and never makes a live Anthropic API call or touches live
+market data.
+
+**Bugs found and fixed** (full detail, reproduction, and severity
+classification in `ACCEPTANCE_TEST_REPORT.md` §28):
+
+1. **ACCEPT-003 (HIGH)** — `src/backtest/assignment.py`'s expiration-
+   settlement math (`settle_leg`/`realized_settlement_pnl`) ignored
+   `BacktestLeg.quantity_ratio`, understating `LONG_CALL_BUTTERFLY`'s
+   2x middle leg's assignment cash/share impact by half whenever a
+   butterfly was held to expiration ITM in a backtest (a $700-per-
+   combo-unit error in the reproduction case, verified against the
+   platform's own independently-correct `payoff_at_expiration` engine).
+   Backtest-only — never reachable in the live PaperBroker/Fidelity
+   path, since `PaperBroker.settle_expiration` uses each position's
+   own already-ratio-correct tracked quantity. Fixed by multiplying
+   every leg's settlement impact by its own `quantity_ratio`; no-op
+   for every other strategy (all use ratio=1 on every leg). Regression
+   tests in `tests/acceptance/test_assignment_expiration.py`.
+2. **ACCEPT-001 (MEDIUM)** — `src/brokers/paper.py`'s
+   `price_satisfies_limit` used a strict `>=` comparison between two
+   independent floating-point evaluations of the same net-price
+   quantity (`ApprovedOrder.limit_price` vs. `PaperBroker`'s own
+   recomputed `net_price`, summed in a different leg order) — for a
+   3-4 leg combo these could differ by a single ULP, silently stalling
+   a correctly-priced order in `SUBMITTED` status forever. Fixed with
+   a `1e-6`-dollar epsilon tolerance.
+3. **ACCEPT-002 (LOW)** — `src/risk/trade_risk.py`'s `check_liquidity`
+   let an infinite (`+inf`) bid/ask quote pass its spread-percentage
+   check (`NaN > threshold` is always `False` in Python), though the
+   pipeline still failed closed one stage later via a less-specific
+   exception. Fixed with an explicit `math.isfinite()` guard.
+4. Two stale-documentation findings (LOW): `src/strategies/base.py`'s
+   module docstring and `strategy_type_for`'s docstring still described
+   the pre-Step-20A "9 wired / 3 evaluation-only" split — caught by a
+   purpose-built grep-based regression test
+   (`TestNoStaleEvaluationOnlyLanguage`); fixed. `SECURITY_AUDIT.md`'s
+   OP-003 entry made factually stale claims ("only leg 0's quantity is
+   consulted," "every leg always shares the same quantity") that
+   Step 20A's butterfly deliberately contradicts — corrected in place
+   with an accurate, narrower description of the remaining real
+   (pre-existing, MEDIUM, defense-in-depth, no live exploit path) gap.
+
+No CRITICAL issue was found. No fix touched Risk Engine decision logic,
+any `config/risk_limits.yaml` value, or `config/brokers.yaml`'s
+`allowed_strategies`. No test was deleted, weakened, or bypassed.
+
+**Full suite after all fixes:** `python -m pytest -q tests/` →
+**2311 passed, 4 skipped** (2125 pre-existing + 186 new acceptance
+tests, 0 regressions; the 4 skips are the same pre-existing, documented
+false positives from `test_no_hardcoded_limits.py`, unrelated to this
+step).
+
+**Unresolved issues:** `SECURITY_AUDIT.md`'s pre-existing OPEN
+MEDIUM/LOW findings (OP-003 as corrected above, OP-005, SY-007, SY-008,
+LM-001, LM-002, QF-001, MD-007, MD-008, FS-005) remain open — none
+CRITICAL or HIGH, none introduced or worsened by this step, fixing them
+was outside this step's verification/hardening mandate. No market-
+hours/trading-calendar/DST module exists yet (a known, already-
+documented gap per `ARCHITECTURE.md`'s own risk list, not a new
+finding). No export functionality exists yet (confirmed N/A, not
+fabricated as tested).
+
+**Acceptance decision: READY_WITH_NON_BLOCKING_WARNINGS.** Full
+rationale in `ACCEPTANCE_TEST_REPORT.md` §30. This is a statement
+about codebase readiness, not an instruction to proceed — **Step 22
+has NOT been started, V1.0 has NOT been frozen, and the 90-day
+validation has NOT begun.** All three remain the user's decision; the
+formal validation cohort's own `has_cohort_started` check (re-verified
+in `tests/acceptance/test_validation_pipeline.py`, including a check
+against the real repository filesystem, not just a fresh in-memory
+object) confirms it did not accidentally start during this pass either.
