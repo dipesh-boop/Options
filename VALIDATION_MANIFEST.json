@@ -1,0 +1,135 @@
+{
+  "manifest_version": "1.0.0",
+  "freeze_name": "PAPER_TRADING_V1.0",
+  "freeze_timestamp": "2026-09-21T17:26:28.140767Z",
+  "git_commit": "ca86e33fa07e9d04ee55ec9ee350e6a90f3f5532",
+  "git_branch": "claude/options-trading-agent-2b4yi8",
+  "repository_state": "clean",
+  "python_version": "3.11.15 (CPython)",
+  "dependency_requirements_hash": "09ca9d12dbe2e7a1b3d9eb5bce852a234db8af82d2335b23efe9fb9213ff2214",
+  "strategy_library_version": "72068d1290ad3c4357af05bb18e63a32cd2eb235cb6758df086af11c7fdcd31b",
+  "approved_strategies_by_broker": {
+    "fidelity": [
+      "CASH_SECURED_PUT",
+      "COVERED_CALL",
+      "PUT_CREDIT_SPREAD",
+      "CALL_CREDIT_SPREAD",
+      "BULL_CALL_SPREAD",
+      "BEAR_PUT_SPREAD",
+      "PROTECTIVE_PUT",
+      "PROTECTIVE_COLLAR",
+      "LONG_STRADDLE",
+      "LONG_STRANGLE",
+      "LONG_CALL",
+      "LONG_PUT",
+      "LONG_CALL_BUTTERFLY",
+      "SHORT_IRON_CONDOR",
+      "SHORT_IRON_BUTTERFLY"
+    ],
+    "ibkr_paper": [
+      "CASH_SECURED_PUT",
+      "COVERED_CALL",
+      "PUT_CREDIT_SPREAD",
+      "CALL_CREDIT_SPREAD",
+      "BULL_CALL_SPREAD",
+      "BEAR_PUT_SPREAD",
+      "PROTECTIVE_PUT",
+      "PROTECTIVE_COLLAR",
+      "LONG_STRADDLE",
+      "LONG_STRANGLE",
+      "LONG_CALL",
+      "LONG_PUT",
+      "LONG_CALL_BUTTERFLY",
+      "SHORT_IRON_CONDOR",
+      "SHORT_IRON_BUTTERFLY"
+    ],
+    "internal_paper": [
+      "CASH_SECURED_PUT",
+      "COVERED_CALL",
+      "PUT_CREDIT_SPREAD",
+      "CALL_CREDIT_SPREAD",
+      "BULL_CALL_SPREAD",
+      "BEAR_PUT_SPREAD",
+      "PROTECTIVE_PUT",
+      "PROTECTIVE_COLLAR",
+      "LONG_STRADDLE",
+      "LONG_STRANGLE",
+      "LONG_CALL",
+      "LONG_PUT",
+      "LONG_CALL_BUTTERFLY",
+      "SHORT_IRON_CONDOR",
+      "SHORT_IRON_BUTTERFLY"
+    ]
+  },
+  "config_file_hashes": {
+    "risk_limits.yaml": "e502d64800785ffd9d21980f250f9822ac287850a798d6e935d26acd4894c8b9",
+    "brokers.yaml": "99a3d9dddb0ca1c8a425ac0bee6f18cf4ee0c468e451f0689450720bb5b9fed9",
+    "validation.yaml": "d5f3bfe9eb951362bd050d20a6f08301f5db7707689e72c932a0801732445f52",
+    "llm.yaml": "625e965b04ea0cca2718ec7d0b7b0fda957cde2949d94a732d0ce408fea16838",
+    "strategies.yaml": null,
+    "universe.yaml": null
+  },
+  "claude_md_hash": "96ef52aa02f7a2a990c48c2bfa704c9d3f3db13f8284d6162419e4a0280451bf",
+  "prompt_file_hashes": {
+    "devil_advocate.md": "f9376c2ef23fd96a265c2ee5c1207e963cb073d35509ad0e2f94030ae2f281ab",
+    "market_regime.md": "907e475b1a27ebc8afc3ac5928d05d9b0e596160b2477b3e6ce1d7c2d383c3c1",
+    "opportunity_scanner.md": "357ebb615922687ab25c9a6ca860e564a546bca203f8e64b2190a0e55b192303",
+    "performance_auditor.md": "15e77635269675d0d36e52588de8c744615b88bec2abdf1a7deb921df1b2ca87",
+    "portfolio_manager.md": "a6200caff43eb5900e6cb7407e50976f46e2f801243bab9f751e75abeb0b0116",
+    "risk_reviewer.md": "5886195689bfdf9787aa09d398db8dfa43f346a51dccc4218b9f2d1584373bcc",
+    "strategy_analyst.md": "88951b684c1bbcab50b0b52db5e6f3565b901b24ce13abb8b07032fbdca7a921",
+    "strategy_research.md": "96c7553a719edf3d537ff0565a176fd42854ede15555d6ca787d413927af77c4",
+    "trade_manager.md": "a53693f0588a6a3b298bbff3292b869ff7be154ece4624aeaf7c41b49026125a"
+  },
+  "quant_module_hash": "fa2fc161544f71d482dc35e2e2b4a66020131ee6d6ae9bab3d70606936726d3f",
+  "risk_module_hash": "93211bfd8b86a27087f75021ea7e6125997474f2ebbeca5d2bfe4ce3a207afc3",
+  "paper_broker_module_hash": "d25c5bde4d0f74e0ef8fe60d094f20bc3ff808b49a5601b8cf7970b303979d6c",
+  "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
+  "market_data_provider_config_version": "n/a",
+  "market_data_provider_config_note": "no separate market-data-provider config file exists -- provider behavior (freshness thresholds, canonical quote shape) is defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py, which are covered by risk_module_hash's sibling code but not independently hashed here",
+  "fill_model_assumptions": {
+    "fill_model": "liquidity_adjusted",
+    "thin_volume_threshold": 50,
+    "thin_open_interest_threshold": 200,
+    "thin_liquidity_penalty_multiplier": 3.0,
+    "max_fill_fraction_of_volume": 0.1,
+    "min_guaranteed_fill_contracts": 10,
+    "max_quote_age_seconds": 900.0
+  },
+  "slippage_assumptions": {
+    "slippage_bps": 200.0,
+    "spread_capture_fraction": 0.25
+  },
+  "commission_assumptions": {
+    "per_contract": 0.65,
+    "per_leg_base": 0.0
+  },
+  "option_multiplier_assumption": 100,
+  "benchmark_definitions": [
+    "spy_return: src.backtest.benchmark.spy_total_return over the validation period's exact dates",
+    "risk_free_return: src.backtest.benchmark.risk_free_return, annualized rate over the same dates",
+    "cash_return: flat 0.0 (holding cash the whole period)"
+  ],
+  "starting_nav_default": 100000.0,
+  "validation_duration_days": 90,
+  "minimum_sample_size": 50,
+  "preferred_sample_size": 100,
+  "drawdown_thresholds": {
+    "warning_pct": 0.08,
+    "risk_reduction_pct": 0.1,
+    "halt_pct": 0.15
+  },
+  "research_targets": {
+    "annual_return_low_pct": 0.12,
+    "annual_return_high_pct": 0.15,
+    "reference_min_sharpe": 1.0,
+    "reference_max_acceptable_drawdown_pct": 0.15
+  },
+  "database_schema_version": "1.0.0",
+  "report_export_schema_version": "1.0.0",
+  "fidelity_execution_mode": "MANUAL_EXECUTION",
+  "live_trading_enabled": false,
+  "automatic_fidelity_execution": false,
+  "validation_cohort_started": false,
+  "manifest_hash": "f488c9c5c54b2026332eceacac45000106a10221ef0fef34bb42f3d24aaf3098"
+}

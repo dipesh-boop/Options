@@ -3712,3 +3712,149 @@ formal validation cohort's own `has_cohort_started` check (re-verified
 in `tests/acceptance/test_validation_pipeline.py`, including a check
 against the real repository filesystem, not just a fresh in-memory
 object) confirms it did not accidentally start during this pass either.
+
+## Step 22: Pre-Validation Hardening & PAPER_TRADING_V1.0 Freeze
+
+Closed the three operational gaps Step 21 left open (persistent
+validation storage, a market-hours/holiday calendar, and a reporting/
+export layer), fixed the two lowest-severity open `SECURITY_AUDIT.md`
+findings with straightforward low-risk remediations (OP-003, FS-005),
+then froze the result as **PAPER_TRADING_V1.0**. Full detail in the new
+`STEP_22_FREEZE_REPORT.md` at the repo root; summarized here.
+
+**Persistent storage** (`src/validation/session.py`'s
+`SqliteValidationStore`, `src/validation/records.py`): cohorts,
+opportunities (full decision trail — alternatives considered,
+Devil's Advocate review, Portfolio Manager decision, Risk Engine
+decision), trades, daily snapshots, rule violations, and a new
+`ReconciliationFailureRecord` type (a fill recorded but its portfolio
+update didn't complete — durable, never silently dropped) all persist
+to `data/options_agent.db` (configurable, gitignored, not
+pre-populated), idempotently (`INSERT OR IGNORE` on a natural-key
+`UNIQUE` constraint for append-only records; upsert for mutable ones),
+each write its own sqlite transaction. Proven via
+`tests/acceptance/test_persistence_restart_recovery.py`: populate a
+real store via the real pipeline, `del` the Python object (simulating a
+crash), construct a brand-new store against the same file, reconstruct
+everything, assert identical — twice, across two simulated restarts.
+Backup/restore: `make backup`/`make restore FILE=...`
+(`scripts/backup.sh`/`scripts/restore.sh`), 7 tests.
+
+**Market calendar** (`src/data/market_calendar.py`): a self-contained,
+stdlib-only deterministic NYSE calendar (floating federal holidays,
+Good Friday via Meeus/Jones/Butcher, the December-lookback New Year's
+edge case, early closes, DST-correct `zoneinfo` Eastern/UTC conversion)
+— deliberately not `pandas_market_calendars`, to avoid a first-ever
+`pandas` dependency for a need this platform can meet with published,
+stable observance rules. 51 deterministic tests against fixed named
+dates. Wired into `morning_scan.py` as an additive `market_open`/
+`market_status_detail` field pair plus a `*** MARKET CLOSED ***` banner
+— informational, not execution-blocking (blocking would incorrectly
+prevent legitimate pre-market research and break the existing Sunday-
+dated test fixtures for no real safety benefit, since the scan doesn't
+fetch a currently-executable quote itself).
+
+**Reporting/export layer** (`src/reporting/`): re-inspected the repo
+first per instruction rather than trusting Step 21's finding blindly —
+confirmed genuinely absent, then built a right-sized (not elaborate)
+layer: one `ValidationReportBundle` per export call
+(`build_report_bundle`), written out as CSV (9 flat tables), JSON (one
+versioned payload), XLSX (12-worksheet workbook, numeric cells kept
+numeric), and PDF (13-section owner/investment-committee report, zero
+LLM involvement). `tests/acceptance/test_export_reproducibility.py` (4
+tests): two export runs from one frozen store produce identical
+quantitative content; every exported figure cross-checks directly
+against its source record; an empty cohort exports honestly (zeroed/
+N/A, never fabricated).
+
+**Security fixes** (`SECURITY_AUDIT.md` OP-003, FS-005): a new
+`PlaceOrderRequest` validator (`src/brokers/base.py`) requires every
+leg's quantity to form one of this platform's own defined combo ratios
+(uniform, or 1:2:1 for `long_call_butterfly`'s 3 legs) — a no-op on
+every real call site, defense-in-depth against a hypothetical future
+malformed caller (8 new tests). A new `FidelityTradeTicket` validator
+(`src/brokers/fidelity.py`) requires direct construction to be at
+`AWAITING_HUMAN`, exploiting pydantic v2's own verified behavior that
+`model_copy()` — which `transition()`/`confirm_fill()` exclusively use
+— never re-runs `@model_validator` hooks, so the real state machine is
+untouched (3 pre-existing tests updated to use `model_copy()` instead
+of direct construction, matching how production code actually reaches
+those states). All other `SECURITY_AUDIT.md` OPEN items remain open —
+none CRITICAL/HIGH, unchanged from Step 21.
+
+**Safety-invariant re-verification** (Part 19): located the specific
+test(s) proving each of the 15 named invariants. 14 already had direct
+coverage; one gap was found (no direct test that `BrokerEnvironment` is
+a single-member, `PAPER`-only enum — only indirect/behavioral coverage
+existed) and closed with 2 new tests in `tests/unit/brokers/test_base.py`.
+
+**Freeze tooling** (`src/validation/freeze.py`, new): builds/verifies
+`VALIDATION_MANIFEST.json` — git commit/branch/state, Python version, a
+dependency-requirements hash, config-file hashes (with
+`strategies.yaml`/`universe.yaml` explicitly recorded not-applicable,
+since this repo never split those out separately), `CLAUDE.md` and
+every prompt file's hash, whole-directory hashes for `src/quant/`,
+`src/risk/`, `src/strategies/`, plus `src/brokers/paper.py` and
+`src/data/market_calendar.py`; fill-model/slippage/commission/
+multiplier assumptions; benchmark definitions; database/export schema
+versions; and the three explicit safety flags
+(`live_trading_enabled`, `automatic_fidelity_execution`,
+`validation_cohort_started`), all `false`. `make verify-freeze`
+(`scripts/verify_freeze.sh`) re-derives every one of these against the
+current tree and reports drift per-field, never silently. 14 new tests
+(`tests/unit/validation/test_freeze.py`), including explicit drift-
+detection and tampering-detection cases. Material-vs-non-material
+change is defined directly in `freeze.py`'s own module docstring: every
+hashed file/module is material by definition; anything not hashed
+(README prose, this file) is not; a reported drift is always a human
+decision, never auto-dismissed as cosmetic by the tooling.
+
+**Also fixed, unrelated to the freeze itself:** an unanchored `data/`
+pattern in `.gitignore` (added earlier this step for the runtime
+database directory) was silently excluding the unrelated source
+directories `src/data/` and `tests/unit/data/` from every `git add` —
+caught when `src/data/market_calendar.py` failed to appear in `git
+status` despite being written and passing tests. Fixed by anchoring the
+Step 22 `.gitignore` entries to the repository root (`/data/`,
+`/backups/`, `/exports/`).
+
+**Full suite:** `python -m pytest -q tests/` → **2404 passed, 4
+skipped, 0 failed** (2,311 Step-21 baseline + 93 new Step 22 tests; the
+4 skips are the same pre-existing documented false positives, unrelated
+to this step). No test was deleted, weakened, or bypassed; every
+pre-existing test a Step 22 change legitimately obsoleted was rewritten
+to assert the new correct behavior, never deleted outright.
+
+**README.md** updated for a non-technical owner: §11 ("How to restart
+it safely"), §12 ("Where reports and exports are stored"), §13 ("Where
+validation results — the database — are stored," including backup/
+restore instructions), and a new §14 ("Starting the 90-day validation
+— do this only when you're ready") that documents the install → verify
+freeze → open dashboard → verify market status sequence *without*
+performing the actual Day-1 initialization, which this release
+deliberately does not build (that is "Step 23," separately authorized).
+
+**Git commit (code freeze):** `ca86e33fa07e9d04ee55ec9ee350e6a90f3f5532`
+— "Step 22: pre-validation hardening (persistence, market calendar,
+reporting/export, security fixes)". `VALIDATION_MANIFEST.json`'s own
+`git_commit` field records exactly this SHA (the manifest was generated
+immediately after this commit, against a clean working tree).
+**Manifest hash:** `f488c9c5c54b2026332eceacac45000106a10221ef0fef34bb42f3d24aaf3098`.
+`make verify-freeze` reports all 28 checks passing.
+
+**Git commit (this entry, `STEP_22_FREEZE_REPORT.md`, and
+`VALIDATION_MANIFEST.json` together)** and **git tag `paper-trading-v1.0`**
+(applied to that same commit) are recorded by the commit that
+immediately follows this one in `git log` — necessarily one commit
+after the code-freeze commit above, since a manifest has to describe a
+tree before it can be added to that tree. Run `git log --oneline -1
+paper-trading-v1.0` or `git show paper-trading-v1.0:STEP_22_FREEZE_REPORT.md`
+to see it directly.
+
+**PAPER_TRADING_V1.0: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY.** No cohort
+was created, no Day 1 snapshot was recorded, no trades were generated
+as part of a formal validation cohort, starting NAV was not altered,
+and no scheduling was enabled. Per this step's own explicit
+instruction, work stops here — initializing the cohort and starting
+the 90-day clock is Step 23, to be separately authorized.
