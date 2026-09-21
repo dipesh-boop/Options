@@ -6,6 +6,12 @@ dependencies, and phased delivery. **The LLM orchestration layer
 ahead of the phase order below, at explicit request — see §6 and
 `progress.md` for what exists and what doesn't yet.**
 
+**§4's Phase 0-7 list below is the plan as originally written and was
+never updated to track actual delivery.** For what has actually been
+built (everything past Phase 1-3, delivered instead as a sequence of
+numbered Steps 8-21), see **§12 "Actual delivery history"** at the end
+of this document, and `progress.md` for the full record.
+
 ## 1. Proposed folder structure
 
 ```
@@ -520,3 +526,48 @@ fill/collateral logic; `src.backtest.engine`/`src.backtest.simulator`
 gained matching collateral-shape detection and a `BacktestLeg
 .quantity_ratio` field. See `ARCHITECTURE.md` §14 for the full writeup
 and `progress.md` for the test/commit record.
+
+## 12. Actual delivery history (Steps 8-21) — index
+
+§4's Phase 0-7 schedule was the plan as originally written; actual
+delivery after Phase 1-3 (§6-9) proceeded instead as a sequence of
+numbered "Steps" tracked in `progress.md`, each ahead of its nominal
+phase order and each closing with a full test run + `progress.md`
+entry (per this project's own standing convention — see `CLAUDE.md`'s
+"Conventions" section). §6-11 above capture the ones that changed §1's
+folder structure or a trusted-kernel invariant; every other Step is
+new functionality layered on an unchanged structure and was never
+individually appended here, which is a documentation gap in **this**
+file (§4 was never rewritten to track actual delivery), not a gap in
+what was actually built or tested. This index closes that gap: every
+Step exists, is committed, and is described in full in `progress.md`
+(search for its heading below) and, for the ones that changed the
+approved-strategy/order surface, in `ARCHITECTURE.md`.
+
+| Step | Delivered | `progress.md` heading |
+|---|---|---|
+| 8, 8A | Fidelity manual-execution provider (`src/brokers/fidelity.py`) | "Fidelity manual-execution provider (Steps 8, 8A)" |
+| 9 | Deterministic, Fidelity-aware Risk Engine (`src/risk/`) | "Deterministic Fidelity-aware Risk Engine implemented (Step 9)" |
+| 10 | Portfolio Manager Agent | "Portfolio Manager Agent implemented (Step 10)" |
+| 11 | Independent Devil's Advocate Agent | "Independent Devil's Advocate Agent implemented (Step 11)" |
+| 12 | Internal `PaperBroker` + first end-to-end order pipeline | "Internal PaperBroker and the first real end-to-end pipeline (Step 12)" |
+| 13 | Institutional-quality backtesting engine | "Institutional-quality backtesting engine (Step 13)" |
+| 14 | Strategy Research Agent | "Strategy Research Agent (Step 14)" |
+| 15 | Daily `/morning-scan` workflow | "Daily /morning-scan workflow (Step 15)" |
+| 16 | Weekly Investment Committee (`/weekly-review`) | "Weekly Investment Committee (Step 16)" |
+| 17, 17B | Hostile system audit and remediation — produced `SECURITY_AUDIT.md` | "Hostile system audit and remediation (Steps 17-17B)" |
+| 18 | Fidelity human-execution dashboard (`src/dashboard/`) | "Fidelity human-execution dashboard (Step 18)" |
+| 19 | 90-day paper-trading validation protocol (`src/validation/`) | "90-Day Paper-Trading Validation Protocol (Step 19)" |
+| 19A | Strategy library expansion to 16 strategies + Strategy Competition Engine — see §10 above | "Strategy library expansion and Strategy Competition Engine (Step 19A)" |
+| 14B | Strategy Selection Engine completed — vocabulary alignment, capital-requirement fixes, attribution — see §10 above | "Complete Options Strategy Selection Engine (Step 14B)" |
+| 19A gap-check | Re-verified 19A coverage against a follow-up instruction; added `ManagementConditionType` + funnel counts | "Step 19A gap-check re-ask" |
+| — | Multi-Strategy Attribution, Strategy Selection, and Hedge Effectiveness reports | "Multi-Strategy Attribution, Selection, and Hedge Effectiveness Reports" |
+| **20A** | **Multi-leg strategy integration — `LONG_CALL_BUTTERFLY`/`SHORT_IRON_CONDOR`/`SHORT_IRON_BUTTERFLY` wired to real orders — see §11 above** | **"Step 20A: Multi-Leg Strategy Integration"** |
+| 21 | Final system integration & acceptance test — `tests/acceptance/`, `ACCEPTANCE_TEST_REPORT.md` | "Step 21 — Final system integration & acceptance test" |
+
+`progress.md` is the authoritative, chronological record of what was
+built, tested (with counts), and fixed at every Step; this table is
+only an index into it. When in doubt about whether something was
+"planned," check `progress.md` before assuming §4's original Phase
+list is current — it is not, and is kept here only for historical
+context on the original phase sequencing intent.
