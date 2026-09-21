@@ -3858,3 +3858,114 @@ as part of a formal validation cohort, starting NAV was not altered,
 and no scheduling was enabled. Per this step's own explicit
 instruction, work stops here — initializing the cohort and starting
 the 90-day clock is Step 23, to be separately authorized.
+
+## Step 22.1: Pre-Validation Controlled Amendment — Alpaca OPRA Market Data
+
+A controlled amendment to the frozen PAPER_TRADING_V1.0 state: added
+Alpaca (`alpaca-py` SDK) as a third `MarketDataProvider` implementation
+(alongside `mock`/`ibkr`) so the 90-day validation can use real current
+U.S. equity and options market data, preferably OPRA, without requiring
+an IBKR account — then re-froze the result as **PAPER_TRADING_V1.1**.
+Full detail in the new `STEP_22_1_FREEZE_REPORT.md`; summarized here.
+**The original V1.0 artifacts (`STEP_22_FREEZE_REPORT.md`, the
+`paper-trading-v1.0` tag) were preserved untouched, not overwritten.**
+
+**Architecture audit first** (per instruction): traced how market data
+actually flows in this codebase before writing anything. Two findings
+that shaped the implementation: (1) `app/` (an early `app/data
+/mock_provider.py`/`app/config.py` prototype) is dead code — nothing
+under `src/` imports it, `scripts/start.sh` runs `src.dashboard.app:app`
+exclusively; documented in `ARCHITECTURE.md`, left in place. (2) No
+production code path anywhere previously selected a market-data
+provider at runtime — `src.dashboard.service`/`src.workflows.feed_health`
+both take already-fetched `OptionChain`s as plain parameters, and
+`/morning-scan` is a Claude Code skill whose runner is expected to
+construct a provider directly. `src/data/factory.py` (new) is the
+first explicit `OPTIONS_AGENT_DATA_PROVIDER -> provider instance`
+construction point in this codebase.
+
+**Alpaca is structurally market-data-only** (`src/data/alpaca_provider.py`,
+`src/data/alpaca_historical.py`): `AlpacaMarketDataProvider` implements
+only `MarketDataProvider`'s two read methods, is not a `Broker`
+subclass, defines no order-submission/cancellation/modification method,
+and never imports `alpaca.trading` (Alpaca's separate order-submission
+client) anywhere. Enforced by 20 dedicated acceptance tests
+(`tests/acceptance/test_alpaca_market_data_only.py`) — a repo-wide
+`alpaca.trading` import grep, a public-surface-equals-
+`MarketDataProvider` check, `config/brokers.yaml`/`BrokerEnvironment`/
+Risk-Engine untouched checks, credential-leakage checks, and a
+socket-patched runtime proof that a faked call never opens a socket —
+plus a new standing check inside `src.validation.freeze.verify_freeze()`
+itself (`_verify_alpaca_is_market_data_only`), independent of the test
+suite.
+
+**Official SDK, verified endpoints**: `alpaca-py==0.44.0` (current
+version confirmed via PyPI/GitHub source directly, since `alpaca.markets`
+itself is blocked by this environment's egress policy). Only
+`StockHistoricalDataClient.get_stock_latest_quote`,
+`OptionHistoricalDataClient.get_option_chain`, and
+`StockHistoricalDataClient.get_stock_bars` are called — every field
+name (`Quote.bid_price`, `OptionsSnapshot.greeks`, `OptionsGreeks.delta`,
+etc.) was verified directly against the installed package
+(`Model.model_fields`), not assumed from memory or documentation.
+Standard OCC option symbols (root+expiration+right+strike) are parsed
+directly from Alpaca's chain-response keys rather than calling the
+*trading* API's separate contract-metadata endpoint — keeping this
+module strictly market-data-only architecturally, not just by
+omission.
+
+**OPRA vs indicative, never silently substituted**: `AlpacaConfig
+.options_feed` (`"opra"`/`"indicative"`) is explicit, validated config;
+`AlpacaFeedEntitlementError` raises immediately if the account isn't
+entitled to the configured feed rather than falling back to the other
+one. Every canonical quote/contract's own `source` field records
+exactly which feed served it (`alpaca_opra`, `alpaca_indicative`,
+`alpaca_sip`, `alpaca_iex`) — reusing the pre-existing, deliberately
+open-string `source` field rather than adding a new canonical-schema
+field.
+
+**Provider health check** (`src/data/provider_health.py`, new):
+REAL_DATA_CONNECTED / MOCK_DATA / REAL_DATA_UNAVAILABLE, auth status,
+feed type, OPRA entitlement (when determinable), market-open state
+(reusing Step 22's `src.data.market_calendar` unmodified), and
+freshness — surfaced via a new read-only `GET /api/data-provider-health`
+dashboard route and a small "Market Data" panel, so the owner never has
+to guess what kind of data the system is using. The dashboard's route
+allowlist test was updated to include exactly this one new GET route.
+
+**Freeze tooling extended** (`src/validation/freeze.py`): added
+`freeze_version`, `alpaca_provider_module_hash`,
+`data_provider_at_freeze_time`, `required_options_feed_for_validation`
+fields plus the standing structural check above — `FREEZE_NAME` bumped
+to `PAPER_TRADING_V1.1` (manifest schema `1.1.0`) without touching the
+original V1.0 fields' shape.
+
+**Full suite:** `python -m pytest -q tests/` → **2492 passed, 4
+skipped, 0 failed** (84 new tests across 7 files; the 4 skips are the
+same pre-existing documented false positives). No test was deleted,
+weakened, or bypassed.
+
+**Git commit (code amendment):** `a33c7ba7358e31d66463252097ae9a5ea26d0a8f`
+— "Step 22.1: add Alpaca as a market-data-ONLY provider (pre-validation
+amendment)". `VALIDATION_MANIFEST.json`'s own `git_commit` field
+records exactly this SHA (manifest generated immediately after this
+commit, against a clean working tree).
+**Manifest hash:** `62bef508f4aa99996bd84a5b3b044bab4dca3b49e3f8e65cd7937cd91050f0d9`.
+`make verify-freeze` reports all 29 checks passing (28 from V1.0 plus
+the new `alpaca_market_data_only` structural check).
+
+**Git commit (this entry, `STEP_22_1_FREEZE_REPORT.md`, and
+`VALIDATION_MANIFEST.json` together)** and **git tag `paper-trading-v1.1`**
+(applied to that same commit) are recorded by the commit that
+immediately follows this one in `git log` — one commit after the code
+commit above, for the same reason as V1.0. Run `git log --oneline -1
+paper-trading-v1.1` or `git show paper-trading-v1.1:STEP_22_1_FREEZE_REPORT.md`
+to see it directly.
+
+**PAPER_TRADING_V1.1: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. ALPACA:
+MARKET_DATA_ONLY.** No cohort was created, no Day 1 snapshot was
+recorded, no trades were generated, starting NAV was not altered, and
+no scheduling was enabled. Work stops here per this amendment's own
+explicit instruction — Step 23 remains separately authorized, not
+started.

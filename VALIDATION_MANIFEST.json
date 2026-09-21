@@ -1,12 +1,12 @@
 {
-  "manifest_version": "1.0.0",
-  "freeze_name": "PAPER_TRADING_V1.0",
-  "freeze_timestamp": "2026-09-21T17:26:28.140767Z",
-  "git_commit": "ca86e33fa07e9d04ee55ec9ee350e6a90f3f5532",
+  "manifest_version": "1.1.0",
+  "freeze_name": "PAPER_TRADING_V1.1",
+  "freeze_timestamp": "2026-09-21T20:11:22.988612Z",
+  "git_commit": "a33c7ba7358e31d66463252097ae9a5ea26d0a8f",
   "git_branch": "claude/options-trading-agent-2b4yi8",
   "repository_state": "clean",
   "python_version": "3.11.15 (CPython)",
-  "dependency_requirements_hash": "09ca9d12dbe2e7a1b3d9eb5bce852a234db8af82d2335b23efe9fb9213ff2214",
+  "dependency_requirements_hash": "0082639eb60b5a3d1349e6d7e71cc4d1bb32c76cd143ca1e770ad892b5daec11",
   "strategy_library_version": "72068d1290ad3c4357af05bb18e63a32cd2eb235cb6758df086af11c7fdcd31b",
   "approved_strategies_by_broker": {
     "fidelity": [
@@ -86,7 +86,11 @@
   "paper_broker_module_hash": "d25c5bde4d0f74e0ef8fe60d094f20bc3ff808b49a5601b8cf7970b303979d6c",
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
-  "market_data_provider_config_note": "no separate market-data-provider config file exists -- provider behavior (freshness thresholds, canonical quote shape) is defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py, which are covered by risk_module_hash's sibling code but not independently hashed here",
+  "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
+  "freeze_version": "1.1",
+  "alpaca_provider_module_hash": "2cf7fbd0555847b0a2568b61cdeca1f24b1ea166774eea8c78255c8df0b92eaf",
+  "data_provider_at_freeze_time": "mock",
+  "required_options_feed_for_validation": "opra",
   "fill_model_assumptions": {
     "fill_model": "liquidity_adjusted",
     "thin_volume_threshold": 50,
@@ -131,5 +135,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "f488c9c5c54b2026332eceacac45000106a10221ef0fef34bb42f3d24aaf3098"
+  "manifest_hash": "62bef508f4aa99996bd84a5b3b044bab4dca3b49e3f8e65cd7937cd91050f0d9"
 }
