@@ -64,7 +64,6 @@ from src.risk.trade_risk import (
     check_collateral,
     compute_trade_economics,
     cross_check_quantitative_analysis,
-    resolve_credit,
     resolve_leg_contracts,
     size_trade,
 )
@@ -98,6 +97,15 @@ _STRATEGY_DISPLAY = {
     StrategyType.CASH_SECURED_PUT: "CASH SECURED PUT",
     StrategyType.COVERED_CALL: "COVERED CALL",
     StrategyType.PUT_CREDIT_SPREAD: "PUT CREDIT SPREAD",
+    StrategyType.CALL_CREDIT_SPREAD: "CALL CREDIT SPREAD",
+    StrategyType.BULL_CALL_SPREAD: "BULL CALL SPREAD",
+    StrategyType.BEAR_PUT_SPREAD: "BEAR PUT SPREAD",
+    StrategyType.PROTECTIVE_PUT: "PROTECTIVE PUT",
+    StrategyType.PROTECTIVE_COLLAR: "PROTECTIVE COLLAR",
+    StrategyType.LONG_STRADDLE: "LONG STRADDLE",
+    StrategyType.LONG_STRANGLE: "LONG STRANGLE",
+    StrategyType.LONG_CALL: "LONG CALL",
+    StrategyType.LONG_PUT: "LONG PUT",
 }
 
 
@@ -409,7 +417,7 @@ def _build_quant_position(proposal: TradeProposal, contracts, num_contracts: int
     ]
     underlying_shares = 0
     underlying_cost_basis = 0.0
-    if proposal.strategy == StrategyType.COVERED_CALL:
+    if proposal.strategy in (StrategyType.COVERED_CALL, StrategyType.PROTECTIVE_PUT, StrategyType.PROTECTIVE_COLLAR):
         holding = portfolio.underlying_holdings.get(proposal.ticker)
         if holding is not None:
             underlying_shares = holding.shares
@@ -425,7 +433,6 @@ def _build_approved_order(
     broker_capabilities: BrokerCapabilities,
     as_of: datetime,
 ) -> ApprovedOrder:
-    credit = resolve_credit(proposal, contracts)
     legs = [
         FidelityOrderLeg(
             action=FidelityLegAction.SELL_TO_OPEN if leg.side == LegSide.SELL else FidelityLegAction.BUY_TO_OPEN,
@@ -436,18 +443,37 @@ def _build_approved_order(
         )
         for leg in proposal.legs
     ]
-    if len(contracts) == 1:
-        net_bid, net_ask = contracts[0].bid, contracts[0].ask
-    else:
-        short_contract = next(c for leg, c in zip(proposal.legs, contracts) if leg.side == LegSide.SELL)
-        long_contract = next(c for leg, c in zip(proposal.legs, contracts) if leg.side == LegSide.BUY)
-        net_bid = short_contract.bid - long_contract.ask
-        net_ask = short_contract.ask - long_contract.bid
+    # Step 19A: generalized per-leg net bid/ask, replacing the original
+    # single-short-plus-single-long lookup (which raised StopIteration
+    # for a strategy with no short leg at all, e.g. long straddle/
+    # strangle). Each leg contributes to the combo's credit-received
+    # range: a short leg's own (bid, ask) directly; a long leg's own
+    # (bid, ask) negated (a debit paid reduces the combo's net credit).
+    # This exactly reproduces the original two-leg credit-spread formula
+    # (verified: short.bid - long.ask / short.ask - long.bid) and
+    # correctly extends to a net-debit result (a negative "credit") for
+    # every Tier-1 debit strategy and to two-long-leg strategies.
+    net_bid = sum(c.bid if leg.side == LegSide.SELL else -c.ask for leg, c in zip(proposal.legs, contracts))
+    net_ask = sum(c.ask if leg.side == LegSide.SELL else -c.bid for leg, c in zip(proposal.legs, contracts))
+    net_mid = (net_bid + net_ask) / 2.0
+    is_debit = net_mid < 0
+    limit_price = abs(net_mid)
 
-    minimum_acceptable_price = round(credit * 0.9, 2)
-    # dollar exit target implied by TradeProposal.profit_target (a
-    # fraction of the credit received to capture before closing).
-    profit_target_price = round(credit * (1.0 - proposal.profit_target), 2)
+    if is_debit:
+        # The worst (highest) debit a human would still accept paying —
+        # required to be >= limit_price by ApprovedOrder's own validator
+        # for a net-debit order (`estimated_credit_debit < 0`).
+        minimum_acceptable_price = round(limit_price * 1.1, 2)
+        # dollar exit target: close once the position is worth more than
+        # was paid for it by profit_target's fraction (an approximation
+        # for long-premium strategies, mirroring the credit-side formula
+        # below rather than a second, strategy-specific derivation).
+        profit_target_price = round(limit_price * (1.0 + proposal.profit_target), 2)
+    else:
+        minimum_acceptable_price = round(limit_price * 0.9, 2)
+        # dollar exit target implied by TradeProposal.profit_target (a
+        # fraction of the credit received to capture before closing).
+        profit_target_price = round(limit_price * (1.0 - proposal.profit_target), 2)
 
     return ApprovedOrder(
         risk_approval_id=str(uuid.uuid4()),
@@ -458,9 +484,9 @@ def _build_approved_order(
         expiration=proposal.expiration,
         legs=legs,
         quantity=num_contracts,
-        limit_price=credit,
+        limit_price=limit_price,
         minimum_acceptable_price=minimum_acceptable_price if minimum_acceptable_price > 0 else 0.01,
-        estimated_credit_debit=credit,
+        estimated_credit_debit=net_mid,
         net_bid=net_bid,
         net_ask=net_ask,
         max_profit=economics.max_profit,

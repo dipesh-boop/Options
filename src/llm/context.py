@@ -110,11 +110,37 @@ class MarketSnapshotContext:
 class MarketContext:
     """Qualitative/reference market context (index levels, known
     upcoming events). Never a source of new numeric truth for pricing —
-    that stays with Python Quant."""
+    that stays with Python Quant.
+
+    Step 19A addition: every field below `notable_events` is additive
+    (defaults to `None`/empty), so every existing construction of this
+    type keeps working unchanged. These are the Market Regime Agent's
+    expanded reference-data inputs (trend, momentum, realized/implied
+    vol, IV percentile/rank, term structure, skew, breadth, ATR,
+    support/resistance, Treasury yields, credit conditions) — still
+    exclusively Python-computed or vendor-sourced reference numbers the
+    agent reads, never originates; see `src.strategies.volatility_engine`
+    for the one piece of actual computation (comparing IV to realized
+    vol) built on top of this data."""
 
     as_of: datetime
     vix_level: float | None
     notable_events: list[str] = field(default_factory=list)
+
+    trend: str | None = None  # e.g. "up" / "down" / "sideways" -- caller-classified, never inferred here
+    momentum_score: float | None = None
+    realized_volatility: float | None = None  # annualized, e.g. trailing 20-day realized vol of the relevant index
+    implied_volatility: float | None = None  # ATM IV of the relevant index/underlying
+    iv_percentile: float | None = None  # 0-100, this IV's percentile rank over some caller-defined lookback
+    iv_rank: float | None = None  # 0-100, (IV - min)/(max - min) over the same lookback
+    volatility_term_structure: tuple[tuple[int, float], ...] = field(default_factory=tuple)  # (days_to_expiry, IV) pairs
+    volatility_skew: float | None = None  # e.g. 25-delta put IV minus 25-delta call IV
+    market_breadth: float | None = None  # e.g. % of index constituents above their 50-day moving average
+    atr: float | None = None
+    support_level: float | None = None
+    resistance_level: float | None = None
+    treasury_yield_10y: float | None = None
+    credit_conditions: str | None = None  # qualitative, e.g. "normal" / "tightening" / "stressed" -- caller-supplied
 
 
 @dataclass(frozen=True)

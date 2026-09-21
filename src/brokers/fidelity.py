@@ -40,6 +40,7 @@ backend function attempts.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import date, datetime, timedelta
 from enum import Enum
@@ -427,6 +428,17 @@ _ACTION_LABELS = {
 }
 
 
+def _format_max_profit(max_profit: float) -> str:
+    """Step 19A: `max_profit` is the one `ApprovedOrder`/`FidelityTradeTicket`
+    field allowed to be `+inf` (an unbounded-upside long strategy — see
+    `src.risk.trade_risk.QuantitativeAnalysis._max_profit_finite_or_positive_infinity`).
+    `f"${inf:.0f}"` would otherwise render the confusing literal text
+    "$inf" on a ticket a human is about to read."""
+    if math.isinf(max_profit):
+        return "UNLIMITED"
+    return f"${max_profit:.0f}"
+
+
 def render_ticket_text(ticket: FidelityTradeTicket) -> str:
     """Formats a ticket to closely match what Fidelity Trader+'s order
     entry screen asks for, so a human can transcribe it field by field.
@@ -474,19 +486,19 @@ def render_ticket_text(ticket: FidelityTradeTicket) -> str:
         ticket.time_in_force,
         "",
         "CURRENT NET BID:",
-        f"${ticket.net_bid:.2f}",
+        f"${abs(ticket.net_bid):.2f}",
         "",
         "CURRENT NET ASK:",
-        f"${ticket.net_ask:.2f}",
+        f"${abs(ticket.net_ask):.2f}",
         "",
         "CURRENT MID:",
-        f"${ticket.net_mid:.2f}",
+        f"${abs(ticket.net_mid):.2f}",
         "",
         "QUOTE TIME:",
         ticket.market_data_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "",
         "MAX PROFIT:",
-        f"${ticket.max_profit:.0f}",
+        _format_max_profit(ticket.max_profit),
         "",
         "MAX LOSS:",
         f"${ticket.max_loss:.0f}",

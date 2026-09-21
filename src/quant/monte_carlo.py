@@ -158,3 +158,135 @@ def stress_test(
                 )
             )
     return scenarios
+
+
+# --------------------------------------------- Step 19A: payoff profile --
+
+
+@dataclass(frozen=True)
+class PayoffProfile:
+    """Exact at-expiration payoff shape for any `Position` (any number
+    of legs, any quantity ratio, with or without underlying shares) —
+    the generic engine every `src.strategies.*` module builds on,
+    instead of each strategy re-deriving its own max-profit/max-loss/
+    breakeven formula by hand.
+
+    Exact, not approximate: `payoff_at_expiration` is piecewise LINEAR
+    in the terminal price, with kinks only at the position's own option
+    strikes (a fixed, finite set) and two unbounded rays beyond the
+    lowest and highest strike. A piecewise-linear function's extrema can
+    only occur at a kink or on one of the two unbounded rays — so
+    evaluating payoff at every strike, at zero, and at the two rays'
+    slopes is an EXACT computation, not a grid-search approximation.
+    Breakevens (where payoff crosses zero) are found the same way: exact
+    linear interpolation within whichever segment actually crosses zero,
+    not a numeric root-finder.
+    """
+
+    max_profit: float  # math.inf if the upside ray has positive slope
+    max_loss: float  # math.inf only if a disallowed/naked structure has negative downside slope
+    breakeven_points: tuple[float, ...]  # sorted ascending; may be empty (never profitable) or have >2 entries
+    upside_unbounded: bool
+    downside_unbounded: bool
+
+
+def _upside_tail_slope(position: Position) -> float:
+    """Per-$1 slope of payoff as terminal price -> +infinity: each call
+    leg contributes its full signed notional (a long call's slope is
+    +100*quantity; a short call's is -100*quantity); puts contribute
+    nothing this far OTM; each underlying share contributes +1."""
+    slope = float(position.underlying_shares)
+    for leg in position.legs:
+        if leg.right == OptionRight.CALL:
+            sign = 1 if leg.side == Side.BUY else -1
+            slope += sign * 100 * leg.quantity
+    return slope
+
+
+def payoff_profile(position: Position) -> PayoffProfile:
+    if not position.legs and position.underlying_shares == 0:
+        raise ValueError("position has no legs and no underlying shares -- nothing to profile")
+
+    strikes = sorted({leg.strike for leg in position.legs})
+    candidate_prices = [0.0, *strikes]
+    candidate_payoffs = [payoff_at_expiration(position, p) for p in candidate_prices]
+
+    tail_slope = _upside_tail_slope(position)
+    upside_unbounded_profit = tail_slope > 0
+    upside_unbounded_loss = tail_slope < 0
+    # The payoff value anywhere beyond the highest strike (or at 0 if
+    # there are no strikes at all, e.g. shares alone) -- a flat plateau
+    # when tail_slope == 0.
+    tail_reference_price = (strikes[-1] + 1.0) if strikes else 1.0
+    tail_payoff = payoff_at_expiration(position, tail_reference_price)
+
+    all_payoffs = list(candidate_payoffs)
+    if not upside_unbounded_profit and not upside_unbounded_loss:
+        all_payoffs.append(tail_payoff)
+
+    if upside_unbounded_profit:
+        max_profit = math.inf
+    else:
+        max_profit = max(all_payoffs) if not upside_unbounded_loss else max(candidate_payoffs)
+    if upside_unbounded_loss:
+        max_loss = math.inf
+    else:
+        max_loss = -min(all_payoffs) if not upside_unbounded_profit else -min(candidate_payoffs)
+    max_loss = max(max_loss, 0.0) if math.isfinite(max_loss) else max_loss
+    max_profit = max(max_profit, 0.0) if math.isfinite(max_profit) else max_profit
+
+    breakevens = _find_breakevens(position, candidate_prices, candidate_payoffs, tail_slope, tail_reference_price, tail_payoff)
+
+    return PayoffProfile(
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakeven_points=tuple(breakevens),
+        upside_unbounded=upside_unbounded_profit,
+        downside_unbounded=upside_unbounded_loss,
+    )
+
+
+def _find_breakevens(
+    position: Position,
+    candidate_prices: list[float],
+    candidate_payoffs: list[float],
+    tail_slope: float,
+    tail_reference_price: float,
+    tail_payoff: float,
+) -> list[float]:
+    """Exact linear interpolation for every zero-crossing segment,
+    including the unbounded upside ray (if it has nonzero slope)."""
+    points = list(zip(candidate_prices, candidate_payoffs))
+    breakevens: list[float] = []
+
+    for (p0, y0), (p1, y1) in zip(points, points[1:]):
+        if y0 == 0.0:
+            breakevens.append(p0)
+        if (y0 < 0.0 < y1) or (y1 < 0.0 < y0):
+            # exact root of the line segment between (p0,y0) and (p1,y1)
+            root = p0 + (0.0 - y0) * (p1 - p0) / (y1 - y0)
+            breakevens.append(root)
+
+    if points:
+        last_p, last_y = points[-1]
+        if last_y == 0.0 and last_p not in breakevens:
+            breakevens.append(last_p)
+
+    if tail_slope != 0.0:
+        # The upside ray starts at (tail_reference_price, tail_payoff)
+        # with constant slope `tail_slope` per $1 -- solve for where it
+        # crosses zero, if that root is actually on this ray (at or
+        # beyond tail_reference_price).
+        root = tail_reference_price - tail_payoff / tail_slope
+        if root >= tail_reference_price - 1e-9:
+            breakevens.append(root)
+    elif tail_payoff == 0.0:
+        breakevens.append(tail_reference_price)
+
+    # De-duplicate (within float tolerance) and sort.
+    breakevens.sort()
+    deduped: list[float] = []
+    for b in breakevens:
+        if not deduped or abs(b - deduped[-1]) > 1e-6:
+            deduped.append(b)
+    return deduped

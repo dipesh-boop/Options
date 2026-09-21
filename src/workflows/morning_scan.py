@@ -301,7 +301,7 @@ def render_morning_scan_report(report: MorningScanReport) -> str:
                 f"Probability of profit: {qa.probability_of_profit:.0%}",
                 f"Expected value: ${qa.expected_value:,.2f}",
                 f"Capital required: ${qa.capital_required:,.2f}",
-                f"Max profit: ${qa.max_profit:,.2f}",
+                f"Max profit: {'UNLIMITED' if qa.max_profit == float('inf') else f'${qa.max_profit:,.2f}'}",
                 f"Max loss: ${qa.max_loss:,.2f}",
                 f"Return on capital: {qa.return_on_capital:.1%}",
             ]

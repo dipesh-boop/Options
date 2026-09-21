@@ -1,0 +1,34 @@
+{
+  "manifest_id": "mstrat-v1",
+  "frozen_at": "2026-09-21T00:00:00Z",
+  "period": {
+    "start_date": "2026-09-21",
+    "end_date": "2026-12-20",
+    "duration_days": 90
+  },
+  "starting_nav": 100000.0,
+  "config_file_hashes": {
+    "/home/user/Options/config/risk_limits.yaml": "e502d64800785ffd9d21980f250f9822ac287850a798d6e935d26acd4894c8b9",
+    "/home/user/Options/config/brokers.yaml": "8ce1017984fa1fc6897eb9e3eb75c1574ff555c4ca3c86e6f8b2cbd77bb71d92",
+    "/home/user/Options/config/validation.yaml": "2b6fa4aa36db9f9da731543443f85ac0b9164372c4c178ee51f3ed2cafebdab3"
+  },
+  "strategy_versions": {
+    "cash_secured_put": "v1",
+    "covered_call": "v1",
+    "put_credit_spread": "v1",
+    "call_credit_spread": "v1",
+    "bull_call_spread": "v1",
+    "bear_put_spread": "v1",
+    "protective_put": "v1",
+    "protective_collar": "v1",
+    "long_straddle": "v1",
+    "long_strangle": "v1",
+    "long_call": "v1",
+    "long_put": "v1",
+    "long_call_butterfly": "v1",
+    "short_iron_condor": "v1",
+    "short_iron_butterfly": "v1"
+  },
+  "notes": "Step 19A strategy-library expansion freeze. No prior formal validation cohort had ever recorded a trade/snapshot/rejected-outcome/violation (verified programmatically via has_cohort_started), so this is a fresh cohort start per the 'not started' branch of the validation-cohort rule, not a close-and-replace of a PRE_EXPANSION_VALIDATION cohort. strategy_versions covers all 15 StrategyKind values: the 12 Tier1 (order-eligible) strategies plus the 3 Tier2 (evaluation/comparison-only) strategies -- long_call_butterfly, short_iron_condor, short_iron_butterfly -- which cannot become a real order today (TradeProposal's 1-2 leg cap) but are tracked at the same version for counterfactual-alternative pricing.",
+  "cohort_label": "MULTI_STRATEGY_VALIDATION_V1"
+}

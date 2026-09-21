@@ -9,6 +9,16 @@
 # implements: MANUAL (a human enters the order, e.g. Fidelity) or
 # AUTOMATED (a Broker implementation can place_order() directly, e.g.
 # IBKR paper trading). There is no LIVE mode anywhere in this platform.
+#
+# Step 19A note: the 9 strategies below CALL_CREDIT_SPREAD onward are
+# the Tier-1 expansion — every one of them fits src.llm.schemas
+# .TradeProposal's existing <=2-leg cap and is fully wired through
+# Python Quant / Python Risk Engine / PaperBroker / FidelityManualProvider,
+# same as the original 3. LONG_CALL_BUTTERFLY / SHORT_IRON_CONDOR /
+# SHORT_IRON_BUTTERFLY are deliberately absent from every list below —
+# they are not yet representable as a TradeProposal at all (3-4 legs),
+# so listing them here would be a capability this file can't actually
+# back up; see src.llm.schemas.StrategyType's own docstring.
 
 fidelity:
   execution_mode: MANUAL
@@ -18,6 +28,15 @@ fidelity:
     - CASH_SECURED_PUT
     - COVERED_CALL
     - PUT_CREDIT_SPREAD
+    - CALL_CREDIT_SPREAD
+    - BULL_CALL_SPREAD
+    - BEAR_PUT_SPREAD
+    - PROTECTIVE_PUT
+    - PROTECTIVE_COLLAR
+    - LONG_STRADDLE
+    - LONG_STRANGLE
+    - LONG_CALL
+    - LONG_PUT
 
 ibkr_paper:
   execution_mode: AUTOMATED
@@ -27,6 +46,15 @@ ibkr_paper:
     - CASH_SECURED_PUT
     - COVERED_CALL
     - PUT_CREDIT_SPREAD
+    - CALL_CREDIT_SPREAD
+    - BULL_CALL_SPREAD
+    - BEAR_PUT_SPREAD
+    - PROTECTIVE_PUT
+    - PROTECTIVE_COLLAR
+    - LONG_STRADDLE
+    - LONG_STRANGLE
+    - LONG_CALL
+    - LONG_PUT
 
 # src.brokers.paper.PaperBroker — the internal simulator (Step 12), not
 # a connection to any real brokerage, paper or otherwise.
@@ -38,3 +66,12 @@ internal_paper:
     - CASH_SECURED_PUT
     - COVERED_CALL
     - PUT_CREDIT_SPREAD
+    - CALL_CREDIT_SPREAD
+    - BULL_CALL_SPREAD
+    - BEAR_PUT_SPREAD
+    - PROTECTIVE_PUT
+    - PROTECTIVE_COLLAR
+    - LONG_STRADDLE
+    - LONG_STRANGLE
+    - LONG_CALL
+    - LONG_PUT

@@ -182,6 +182,7 @@ def default_quant_stage(
         max_profit=economics.max_profit,
         max_loss=economics.max_loss,
         breakeven=economics.breakeven,
+        breakeven_upper=economics.breakeven_upper,
         capital_required=economics.capital_required,
         return_on_capital=economics.return_on_capital,
         annualized_roc=economics.annualized_roc,

@@ -45,9 +45,35 @@ class _StrictModel(BaseModel):
 
 
 class StrategyType(str, Enum):
+    """Step 19A note: every member here is required to fit within this
+    module's own `TradeProposal.legs` cap (`Field(min_length=1,
+    max_length=2)`, unchanged) — i.e. every strategy that can reach a
+    real order in this codebase is representable with at most two
+    option legs (a single leg, a covered/protected single leg against
+    existing shares, or a two-leg vertical/straddle/strangle/collar).
+    Three named strategies from the Step 19A expansion request
+    (LONG_CALL_BUTTERFLY, SHORT_IRON_CONDOR, SHORT_IRON_BUTTERFLY)
+    genuinely need 3-4 legs and are deliberately NOT added here — they
+    are evaluated and compared as `src.strategies.base.StrategyKind`
+    values (a separate, broader enum) but cannot yet become a
+    `TradeProposal`/`ApprovedOrder`/`FidelityTradeTicket`. Raising this
+    cap would touch the Risk Engine's/PaperBroker's/Fidelity provider's
+    leg-count assumptions throughout the "trusted kernel," which is a
+    larger, separately-scoped hardening pass — flagged in progress.md
+    rather than rushed here."""
+
     CASH_SECURED_PUT = "cash_secured_put"
     COVERED_CALL = "covered_call"
     PUT_CREDIT_SPREAD = "put_credit_spread"
+    CALL_CREDIT_SPREAD = "call_credit_spread"
+    BULL_CALL_SPREAD = "bull_call_spread"
+    BEAR_PUT_SPREAD = "bear_put_spread"
+    PROTECTIVE_PUT = "protective_put"
+    PROTECTIVE_COLLAR = "protective_collar"
+    LONG_STRADDLE = "long_straddle"
+    LONG_STRANGLE = "long_strangle"
+    LONG_CALL = "long_call"
+    LONG_PUT = "long_put"
 
 
 class TradeAction(str, Enum):
@@ -220,6 +246,100 @@ class TradeProposal(_StrictModel):
                     "put_credit_spread short put strike must be higher than the long put "
                     "strike (net credit structure)"
                 )
+
+        elif self.strategy == StrategyType.CALL_CREDIT_SPREAD:
+            if len(self.legs) != 2:
+                raise ValueError("call_credit_spread requires exactly two legs")
+            if any(leg.right != OptionRight.CALL for leg in self.legs):
+                raise ValueError("call_credit_spread legs must both be calls")
+            sells = [leg for leg in self.legs if leg.side == LegSide.SELL]
+            buys = [leg for leg in self.legs if leg.side == LegSide.BUY]
+            if len(sells) != 1 or len(buys) != 1:
+                raise ValueError("call_credit_spread requires exactly one short leg and one long leg")
+            if sells[0].strike >= buys[0].strike:
+                raise ValueError(
+                    "call_credit_spread short call strike must be lower than the long call "
+                    "strike (net credit structure)"
+                )
+
+        elif self.strategy == StrategyType.BULL_CALL_SPREAD:
+            if len(self.legs) != 2:
+                raise ValueError("bull_call_spread requires exactly two legs")
+            if any(leg.right != OptionRight.CALL for leg in self.legs):
+                raise ValueError("bull_call_spread legs must both be calls")
+            sells = [leg for leg in self.legs if leg.side == LegSide.SELL]
+            buys = [leg for leg in self.legs if leg.side == LegSide.BUY]
+            if len(sells) != 1 or len(buys) != 1:
+                raise ValueError("bull_call_spread requires exactly one short leg and one long leg")
+            if buys[0].strike >= sells[0].strike:
+                raise ValueError(
+                    "bull_call_spread long call strike must be lower than the short call "
+                    "strike (net debit structure)"
+                )
+
+        elif self.strategy == StrategyType.BEAR_PUT_SPREAD:
+            if len(self.legs) != 2:
+                raise ValueError("bear_put_spread requires exactly two legs")
+            if any(leg.right != OptionRight.PUT for leg in self.legs):
+                raise ValueError("bear_put_spread legs must both be puts")
+            sells = [leg for leg in self.legs if leg.side == LegSide.SELL]
+            buys = [leg for leg in self.legs if leg.side == LegSide.BUY]
+            if len(sells) != 1 or len(buys) != 1:
+                raise ValueError("bear_put_spread requires exactly one short leg and one long leg")
+            if buys[0].strike <= sells[0].strike:
+                raise ValueError(
+                    "bear_put_spread long put strike must be higher than the short put "
+                    "strike (net debit structure)"
+                )
+
+        elif self.strategy == StrategyType.PROTECTIVE_PUT:
+            if len(self.legs) != 1 or self.legs[0].right != OptionRight.PUT or self.legs[0].side != LegSide.BUY:
+                raise ValueError("protective_put requires exactly one long put leg")
+
+        elif self.strategy == StrategyType.PROTECTIVE_COLLAR:
+            if len(self.legs) != 2:
+                raise ValueError("protective_collar requires exactly two legs")
+            call_legs = [leg for leg in self.legs if leg.right == OptionRight.CALL]
+            put_legs = [leg for leg in self.legs if leg.right == OptionRight.PUT]
+            if len(call_legs) != 1 or len(put_legs) != 1:
+                raise ValueError("protective_collar requires exactly one call leg and one put leg")
+            if call_legs[0].side != LegSide.SELL or put_legs[0].side != LegSide.BUY:
+                raise ValueError("protective_collar requires a short call and a long put")
+            if call_legs[0].strike <= put_legs[0].strike:
+                raise ValueError("protective_collar call strike (ceiling) must be above the put strike (floor)")
+
+        elif self.strategy == StrategyType.LONG_STRADDLE:
+            if len(self.legs) != 2:
+                raise ValueError("long_straddle requires exactly two legs")
+            if any(leg.side != LegSide.BUY for leg in self.legs):
+                raise ValueError("long_straddle legs must both be long")
+            call_legs = [leg for leg in self.legs if leg.right == OptionRight.CALL]
+            put_legs = [leg for leg in self.legs if leg.right == OptionRight.PUT]
+            if len(call_legs) != 1 or len(put_legs) != 1:
+                raise ValueError("long_straddle requires one call leg and one put leg")
+            if call_legs[0].strike != put_legs[0].strike:
+                raise ValueError("long_straddle call and put must share the same strike")
+
+        elif self.strategy == StrategyType.LONG_STRANGLE:
+            if len(self.legs) != 2:
+                raise ValueError("long_strangle requires exactly two legs")
+            if any(leg.side != LegSide.BUY for leg in self.legs):
+                raise ValueError("long_strangle legs must both be long")
+            call_legs = [leg for leg in self.legs if leg.right == OptionRight.CALL]
+            put_legs = [leg for leg in self.legs if leg.right == OptionRight.PUT]
+            if len(call_legs) != 1 or len(put_legs) != 1:
+                raise ValueError("long_strangle requires one call leg and one put leg")
+            if call_legs[0].strike <= put_legs[0].strike:
+                raise ValueError("long_strangle call strike must be above the put strike (else it is a straddle)")
+
+        elif self.strategy == StrategyType.LONG_CALL:
+            if len(self.legs) != 1 or self.legs[0].right != OptionRight.CALL or self.legs[0].side != LegSide.BUY:
+                raise ValueError("long_call requires exactly one long call leg")
+
+        elif self.strategy == StrategyType.LONG_PUT:
+            if len(self.legs) != 1 or self.legs[0].right != OptionRight.PUT or self.legs[0].side != LegSide.BUY:
+                raise ValueError("long_put requires exactly one long put leg")
+
         return self
 
 

@@ -231,6 +231,12 @@ class StrategyVersionManifest(BaseModel):
     config_file_hashes: dict[str, str]
     strategy_versions: dict[str, str]
     notes: str = ""
+    # Step 19A addition: additive, defaults to "default" so every
+    # existing manifest construction/serialization is unaffected. Names
+    # which validation cohort this manifest freezes -- see
+    # src.validation.cohort for the PRE_EXPANSION_VALIDATION /
+    # MULTI_STRATEGY_VALIDATION_V1 (or any later) distinction.
+    cohort_label: str = "default"
 
     @model_validator(mode="after")
     def _tz_aware(self) -> "StrategyVersionManifest":
@@ -248,6 +254,7 @@ def build_validation_manifest(
     strategy_versions: dict[str, str],
     config_paths: tuple[Path, ...] = DEFAULT_MANIFEST_CONFIG_PATHS,
     notes: str = "",
+    cohort_label: str = "default",
 ) -> StrategyVersionManifest:
     hashes = {str(p): compute_file_hash(p) for p in config_paths}
     return StrategyVersionManifest(
@@ -258,6 +265,7 @@ def build_validation_manifest(
         config_file_hashes=hashes,
         strategy_versions=strategy_versions,
         notes=notes,
+        cohort_label=cohort_label,
     )
 
 

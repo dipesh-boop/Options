@@ -20,7 +20,8 @@ component below is designed so that a bad LLM output can degrade the
 *quality* of a decision but can never produce an *unbounded* loss, an
 *unauthorized* order, or a *live* trade.
 
-**Initial strategies:** cash-secured puts, covered calls, put credit spreads.
+**Initial strategies:** cash-secured puts, covered calls, put credit spreads
+(see §13 for the Step 19A expansion to a 16-item strategy library).
 **Initial universe:** SPY, QQQ, IWM, DIA + ~50 liquid large-cap equities
 (exact list is config, not code — see `strategies/screener.py` in the plan).
 **Explicitly excluded, enforced in code, not just policy:** 0DTE, naked
@@ -450,3 +451,153 @@ invent facts:
    for the Portfolio Manager; which tier each of Market Agent, Strategy
    Analyst, and Adversarial Reviewer should run on (cost vs. quality) is
    a config decision to be tuned empirically, not fixed here.
+6. **New from Step 19A**: `TradeProposal`'s 1-2 leg cap — and, by
+   extension, `src.risk.engine`/`src.risk.trade_risk`/
+   `src.brokers.fidelity`'s leg-count assumptions — has not been widened
+   to accommodate the 3 Tier2 strategies (`LONG_CALL_BUTTERFLY`,
+   `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`). They are fully
+   evaluable and comparable via `src.strategies` today but cannot become
+   a real order. Whether/when to extend the trusted kernel to 3-4 legs
+   is a separately-scoped hardening decision, not made here (§13).
+
+## 13. Strategy Competition Engine (Step 19A)
+
+Step 19A expanded the original 3-strategy set into a 16-item library
+(15 real `StrategyKind` members plus NO_TRADE/CASH, which is
+deliberately not a `StrategyKind` member at all — see below) and
+replaced any implicit "one regime maps to one strategy" assumption with
+an explicit competition: for every opportunity, generate every strategy
+a market/volatility view and the portfolio's current holdings make
+*viable*, price all of them identically, and select the single best
+risk-adjusted candidate — never the one with the largest theoretical
+profit.
+
+**New top-level package: `src/strategies/`.** Sibling to `src/llm`,
+`src/quant`, `src/data`, `src/brokers`, `src/risk`, `src/workflows`,
+`src/validation` — the `src/options_platform` packaging question from
+§12/`IMPLEMENTATION_PLAN.md` §6 remains open and is not resolved by this
+addition. One module per strategy (`cash_secured_put.py`,
+`covered_call.py`, `put_credit_spread.py`, `call_credit_spread.py`,
+`bull_call_spread.py`, `bear_put_spread.py`, `protective_put.py`,
+`protective_collar.py`, `long_call.py`, `long_put.py`,
+`long_straddle.py`, `long_strangle.py`, `long_call_butterfly.py`,
+`iron_condor.py`, `iron_butterfly.py`), each a thin leg-builder around
+a single shared assembler (`base.py::build_strategy_evaluation`) that
+performs **no independent financial calculation of its own** — every
+dollar/probability/Greek figure it emits comes from `src.quant`
+(`payoff_profile`, `net_greeks`, `monte_carlo_pop_and_ev`,
+`stress_test`), the same "Python computes, LLM never invents a number"
+rule from §2, now also enforced strategy-by-strategy rather than only
+proposal-by-proposal.
+
+**Tier1 (order-eligible) vs. Tier2 (evaluation-only) split.** 12
+strategies fit `TradeProposal`'s existing 1-2 leg cap and are wired all
+the way through the trusted kernel — Python Quant (`src.quant
+.expected_value`), Python Risk Engine (`src.risk.trade_risk`,
+`src.risk.engine`), and the Fidelity ticket renderer
+(`src.brokers.fidelity`) — exactly like the original 3. The remaining 3
+(`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`)
+need 3-4 legs, which `TradeProposal` does not support today; they can
+be generated, priced, and compared by `src.strategies` for research and
+counterfactual purposes, but `src.strategies.base.TRADE_PROPOSAL_ELIGIBLE`
+excludes them and nothing in this codebase can turn one into a real
+order, an approved Risk Engine decision, or a Fidelity ticket until a
+separately-scoped hardening pass extends the trusted kernel's leg-count
+assumptions. This is a deliberate scope boundary, not an oversight —
+widening the 2-leg cap touches the highest test-coverage code in the
+system (§7) and was judged out of bounds for this step.
+
+**Explicitly excluded from the library, per Step 19A's own instruction,
+same as the original universe-exclusion list in §1:** naked short
+calls, any undefined-risk short call, unfunded naked puts,
+martingale/loss-doubling sizing, and any other unlimited-risk
+structure — none of the 16 items has unbounded downside; the only
+unbounded-*upside* members (`LONG_CALL`, `LONG_STRADDLE`,
+`LONG_STRANGLE`, `PROTECTIVE_PUT`) are long-premium, defined-*loss*-at-
+entry structures, and `QuantitativeAnalysis.max_profit` is the one
+field in the Risk Engine's Pydantic contract permitted to be `+inf`
+(NaN and `-inf` remain rejected) specifically to represent them
+honestly rather than forcing a fabricated cap.
+
+**Strategy families (`StrategyFamily`, 9 members: INCOME, BULLISH,
+BEARISH, NEUTRAL, VOLATILITY_EXPANSION, VOLATILITY_CONTRACTION,
+PORTFOLIO_PROTECTION, TAIL_RISK_HEDGE, CAPITAL_PRESERVATION).**
+Deliberately multi-valued per strategy (`STRATEGY_FAMILIES: dict[StrategyKind,
+tuple[StrategyFamily, ...]]`) — a covered call is both INCOME and
+mildly BULLISH-capped; a protective collar is PORTFOLIO_PROTECTION,
+TAIL_RISK_HEDGE, and CAPITAL_PRESERVATION at once. Never collapsed to a
+single label.
+
+**Regime-to-candidate mapping is a guideline table, not a trading
+rule.** `src.strategies.regime_mapping.CANDIDATE_STRATEGIES_BY_VIEW`
+maps each of 8 `MarketView` values to a *tuple* of strategies worth
+constructing and pricing — order within a tuple is not a ranking.
+Nothing here decides a trade; every constructed candidate still goes
+through suitability filtering, quant pricing, Devil's Advocate,
+Portfolio Manager, and the Risk Engine before anything can be selected.
+
+**Position-aware suitability (`src.strategies.suitability`).** A
+share-requiring strategy (covered call, protective put, protective
+collar) is never even *constructed* unless the portfolio already holds
+enough shares of the underlying (100 × contracts) — the structural
+guarantee behind "never misclassify a bare short call as a covered
+call": an unsuitable strategy is filtered out before pricing, not
+flagged after the fact.
+
+**Comparison and selection (`src.strategies.comparison`,
+`src.strategies.selector`).** `risk_adjusted_score = expected_value /
+maximum_loss` is the ranking metric — expected value *per dollar of
+defined risk*, deliberately not raw expected return, so that a
+25%-return/large-max-loss candidate does not automatically outrank a
+14%-return/small-max-loss one (Step 19A's own worked example).
+`rank_candidates` never collapses the full comparison table
+(`ComparisonRow`, one row per candidate) into just the winning score —
+the table is preserved for counterfactual tracking, the same
+"structurally incapable of collapsing into one number" discipline
+`src.validation.scorecard` already applies to the 90-day report.
+**NO_TRADE/CASH is not a `StrategyKind` member at all** — it is
+represented structurally as `SelectionOutcome.selected is None`, and it
+wins whenever no surviving candidate's `risk_adjusted_score` clears a
+configurable `no_trade_hurdle` (default `0.0`) or every candidate is
+rejected by Devil's Advocate, the Risk Engine, or portfolio-fit
+screening (`src.strategies.portfolio_fit`, reusing `src.risk
+.portfolio_risk`'s concentration/correlation helpers directly).
+
+**Volatility engine (`src.strategies.volatility_engine`).** Compares
+implied vs. realized volatility and computes required-move percentages
+for straddles/strangles against the market's own implied expected move
+and (where supplied) a historical move distribution. Every function
+here returns a comparison figure only (a spread, a ratio, a required-
+move percentage) — never a "buy"/"sell"/"approved" verdict. This is the
+literal enforcement of "do not buy volatility simply because an event
+exists" and "do not sell volatility merely because IV is elevated": the
+module structurally cannot emit a trading verdict, so that judgment
+stays where §2 already puts it — the qualitative agent roles and the
+deterministic Risk Engine, never a Python heuristic pretending to be
+one.
+
+**Validation-cohort integration (`src.validation.cohort`,
+`src.validation.counterfactual`).** Extends, never replaces, Step 19's
+validation system. `has_cohort_started`/`decide_cohort_transition`
+implement the rule this step was given verbatim: if no formal 90-day
+cohort has ever recorded a trade/snapshot/rejected-outcome/violation,
+finish the expansion and start a fresh cohort directly; if one has,
+preserve it under its own label (or `PRE_EXPANSION_VALIDATION` if none
+was ever explicitly given) and start a new, separately-tracked cohort
+— results from materially different strategy architectures are never
+mixed into one cohort's numbers. `src.validation.counterfactual` prices
+every non-selected alternative for a concluded opportunity under the
+same realistic execution assumptions (never hindsight at construction
+time) and aggregates Selection Regret / effectiveness-by-regime only
+once a sample crosses a configured minimum size — a single trade is
+never enough to judge the selector.
+
+**Cross-regime robustness (`src.backtest.regime_scenarios`).** 8 named
+regimes (BULL/BEAR/SIDEWAYS/HIGH_VOLATILITY/LOW_VOLATILITY/
+VOLATILITY_EXPANSION/VOLATILITY_CONTRACTION/MARKET_CRASH) as a
+deterministic, seeded test-fixture generator — `src.backtest.engine`
+was already strategy-agnostic and needed no new logic. The property
+actually proven is "every defined-risk strategy's `maximum_loss` bound
+holds against every simulated terminal price in every regime," never a
+P&L-sign or win-rate requirement in any regime — no strategy is
+required to win everywhere.

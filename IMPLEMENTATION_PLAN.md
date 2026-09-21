@@ -430,3 +430,58 @@ tested through the `IBClientLike` Protocol against a fake
 `_RealIBAdapter` should get a manual smoke test against an actual paper
 TWS/Gateway session before this adapter is trusted with real (paper)
 capital, and that can't happen inside this session.
+
+## 10. Deviation from §1: where the Strategy Competition Engine (Step 19A) actually landed
+
+Same pattern as §6-9: `src/strategies/` (not
+`src/options_platform/strategies/`). `src/` now has eight top-level
+packages (`llm/`, `quant/`, `data/`, `brokers/`, `risk/`, `workflows/`,
+`validation/`, `strategies/`) instead of one `options_platform/`
+package — the layout question from §6 has not gotten smaller by being
+deferred eight times; it has gotten more expensive to resolve later,
+since every deferral means more import paths to rewrite if §1's
+original layout is ever actually adopted.
+
+`src/strategies` is unlike every prior package added this way in one
+respect: it does **not** hold a one-way dependency boundary the way
+`src/quant`/`src/data`/`src/brokers` do (no
+`test_architecture_boundary.py` scanning for a forbidden `src.llm`
+import) — it has no reason to need one, since it imports only
+`src.quant`, `src.data`, `src.risk`, and `src.llm.schemas`
+(`StrategyType`, for the Tier1/Tier2 conversion in `base.py`), never
+the other direction. Every dollar/probability/Greek figure any
+`src/strategies/*.py` module reports comes from `src.quant` directly
+(`payoff_profile`, `net_greeks`, `monte_carlo_pop_and_ev`,
+`stress_test`) — no strategy module performs its own financial
+calculation, mirroring §7's "Python Quant, not the caller, owns the
+math" rule one layer up.
+
+`src/strategies` was built as a **comparison and selection layer that
+consumes already-constructed candidates**, not a candidate-generation
+layer that scans raw option-chain data for viable strikes/expirations
+itself. `src.strategies.selector.select_best_or_no_trade` takes a list
+of already-priced `StrategyEvaluation` objects (however the caller
+constructed them) plus Devil's Advocate/Risk Engine verdicts, and
+chooses the best one or NO_TRADE — it does not itself walk an
+`OptionChain` looking for, say, the ~30-delta strike for a cash-secured
+put. Wiring that construction step into `src.workflows
+.candidate_generation` (today still built only for the original 3
+strategies) so the Strategy Competition Engine can run against live
+chain data end to end, rather than caller-assembled test fixtures, is
+explicitly **not done in this step** — flagged here as the concrete
+next-integration gap, the same "built the engine, not the daily driver"
+pattern Step 19's own `src/validation/` carried into `progress.md`'s
+"Next up" section before it.
+
+The 9 newly-wired Tier1 strategies (`CALL_CREDIT_SPREAD`,
+`BULL_CALL_SPREAD`, `BEAR_PUT_SPREAD`, `PROTECTIVE_PUT`,
+`PROTECTIVE_COLLAR`, `LONG_STRADDLE`, `LONG_STRANGLE`, `LONG_CALL`,
+`LONG_PUT`) extend `src.llm.schemas.StrategyType`,
+`src.quant.expected_value`, `src.risk.trade_risk`, `src.risk.engine`,
+and `config/brokers.yaml` additively — every existing test construction
+for the original 3 strategies continues to pass unmodified, verified by
+running the full suite after each change rather than assuming
+backward compatibility. The 3 Tier2-only strategies
+(`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`)
+touch none of those five files at all — see `ARCHITECTURE.md` §13 for
+the full Tier1/Tier2 boundary and why it was drawn there.

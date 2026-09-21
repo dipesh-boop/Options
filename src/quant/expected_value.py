@@ -21,9 +21,20 @@ cases" in the test suite relies on.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
-from src.quant.probability import probability_of_profit
+from src.quant.black_scholes import Leg, OptionRight, Side
+from src.quant.monte_carlo import Position, monte_carlo_pop_and_ev
+from src.quant.probability import probability_above, probability_below, probability_of_profit
+
+# Fixed seed/path-count for the Monte Carlo expected-value cross-check
+# used by the unbounded-upside strategies below (long call, long
+# straddle, long strangle) -- deterministic and reproducible, the same
+# reasoning MD-001's fix gave for never letting src/quant's output
+# depend on wall-clock/random state a caller didn't explicitly supply.
+_MC_PATHS = 20_000
+_MC_SEED = 20260101
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,13 @@ class StrategyEconomics:
     annualized_roc: float
     probability_of_profit: float
     expected_value: float
+    # Step 19A addition: additive, defaults to None so every existing
+    # caller/construction of a one-breakeven strategy (CSP, covered
+    # call, put/call credit spread, bull/bear spread, long call/put,
+    # protective put/collar) is unaffected. Set only for the two-sided
+    # strategies (long straddle, long strangle), where `breakeven` above
+    # is defined as the LOWER of the two.
+    breakeven_upper: float | None = None
 
 
 def _return_on_capital(max_profit: float, capital_required: float) -> float:
@@ -182,4 +200,292 @@ def put_credit_spread_economics(
         annualized_roc=_annualize(roc, days_to_expiry),
         probability_of_profit=pop,
         expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+# ---------------------------------------- Step 19A: expanded strategy library --
+#
+# Same "explicit numeric parameters, trivially hand-checkable against
+# the textbook formula" discipline as the three functions above. Every
+# formula here is a standard, widely-published options-strategy
+# identity (e.g. bull_call_spread max profit = width - debit) --
+# reused, not derived ad hoc.
+
+
+def call_credit_spread_max_profit(credit: float, contracts: int = 1) -> float:
+    return credit * 100 * contracts
+
+
+def call_credit_spread_max_loss(short_strike: float, long_strike: float, credit: float, contracts: int = 1) -> float:
+    width = long_strike - short_strike
+    if width <= 0:
+        raise ValueError("long_strike must be above short_strike for a call credit spread")
+    return max(width - credit, 0.0) * 100 * contracts
+
+
+def call_credit_spread_breakeven(short_strike: float, credit: float) -> float:
+    return short_strike + credit
+
+
+def call_credit_spread_economics(
+    spot: float, short_strike: float, long_strike: float, credit: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    max_profit = call_credit_spread_max_profit(credit, contracts)
+    max_loss = call_credit_spread_max_loss(short_strike, long_strike, credit, contracts)
+    breakeven = call_credit_spread_breakeven(short_strike, credit)
+    capital_required = max_loss
+    pop = probability_below(spot, breakeven, t, rate, sigma)
+    roc = _return_on_capital(max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=max_profit, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry), probability_of_profit=pop,
+        expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+def bull_call_spread_max_profit(long_strike: float, short_strike: float, debit: float, contracts: int = 1) -> float:
+    width = short_strike - long_strike
+    if width <= 0:
+        raise ValueError("short_strike must be above long_strike for a bull call spread")
+    return max(width - debit, 0.0) * 100 * contracts
+
+
+def bull_call_spread_max_loss(debit: float, contracts: int = 1) -> float:
+    return max(debit, 0.0) * 100 * contracts
+
+
+def bull_call_spread_breakeven(long_strike: float, debit: float) -> float:
+    return long_strike + debit
+
+
+def bull_call_spread_economics(
+    spot: float, long_strike: float, short_strike: float, debit: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    max_profit = bull_call_spread_max_profit(long_strike, short_strike, debit, contracts)
+    max_loss = bull_call_spread_max_loss(debit, contracts)
+    breakeven = bull_call_spread_breakeven(long_strike, debit)
+    capital_required = max_loss  # fully paid for at entry -- the debit is the only capital consumed
+    pop = probability_above(spot, breakeven, t, rate, sigma)
+    roc = _return_on_capital(max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=max_profit, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry), probability_of_profit=pop,
+        expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+def bear_put_spread_max_profit(long_strike: float, short_strike: float, debit: float, contracts: int = 1) -> float:
+    width = long_strike - short_strike
+    if width <= 0:
+        raise ValueError("long_strike must be above short_strike for a bear put spread")
+    return max(width - debit, 0.0) * 100 * contracts
+
+
+def bear_put_spread_max_loss(debit: float, contracts: int = 1) -> float:
+    return max(debit, 0.0) * 100 * contracts
+
+
+def bear_put_spread_breakeven(long_strike: float, debit: float) -> float:
+    return long_strike - debit
+
+
+def bear_put_spread_economics(
+    spot: float, long_strike: float, short_strike: float, debit: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    max_profit = bear_put_spread_max_profit(long_strike, short_strike, debit, contracts)
+    max_loss = bear_put_spread_max_loss(debit, contracts)
+    breakeven = bear_put_spread_breakeven(long_strike, debit)
+    capital_required = max_loss
+    pop = probability_below(spot, breakeven, t, rate, sigma)
+    roc = _return_on_capital(max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=max_profit, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry), probability_of_profit=pop,
+        expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+def protective_put_max_loss(cost_basis: float, put_strike: float, premium: float, contracts: int = 1) -> float:
+    """The floor P&L per share below the strike is constant
+    (put_strike - cost_basis - premium); reported as a loss (>=0), same
+    `max(..., 0.0)` convention as `covered_call_max_loss` for the case
+    where that floor is actually a guaranteed gain (e.g. a deep-ITM
+    protective put bought below cost basis)."""
+    return max(cost_basis - put_strike + premium, 0.0) * 100 * contracts
+
+
+def protective_put_breakeven(cost_basis: float, premium: float) -> float:
+    return cost_basis + premium
+
+
+def protective_put_economics(
+    spot: float, put_strike: float, premium: float, cost_basis: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    """Max profit is unbounded (the long-share leg has no cap) --
+    reported as `math.inf`, the one field `src.risk.trade_risk
+    .QuantitativeAnalysis` explicitly allows to be non-finite (see that
+    module's docstring). `expected_value` is instead sourced from the
+    Monte Carlo cross-check (`_MC_PATHS`/`_MC_SEED`), since the binary
+    max-profit/max-loss heuristic used by every bounded strategy above
+    is meaningless once max_profit is infinite."""
+    max_loss = protective_put_max_loss(cost_basis, put_strike, premium, contracts)
+    breakeven = protective_put_breakeven(cost_basis, premium)
+    capital_required = cost_basis * 100 * contracts
+    pop = probability_above(spot, breakeven, t, rate, sigma)
+    position = Position(
+        legs=[Leg(right=OptionRight.PUT, strike=put_strike, side=Side.BUY, entry_price=premium, quantity=contracts)],
+        underlying_shares=100 * contracts, underlying_cost_basis=cost_basis,
+    )
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else mc.expected_value / capital_required
+    return StrategyEconomics(
+        max_profit=math.inf, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=pop, expected_value=mc.expected_value,
+    )
+
+
+def protective_collar_max_profit(call_strike: float, cost_basis: float, net_credit: float, contracts: int = 1) -> float:
+    return (call_strike - cost_basis + net_credit) * 100 * contracts
+
+
+def protective_collar_max_loss(cost_basis: float, put_strike: float, net_credit: float, contracts: int = 1) -> float:
+    return max(cost_basis - put_strike - net_credit, 0.0) * 100 * contracts
+
+
+def protective_collar_breakeven(cost_basis: float, net_credit: float) -> float:
+    return cost_basis - net_credit
+
+
+def protective_collar_economics(
+    spot: float, call_strike: float, put_strike: float, net_credit: float, cost_basis: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    """`net_credit` = call premium received minus put premium paid
+    (positive = net credit collar, negative = net debit collar; both
+    are valid and common). Both profit and loss are capped -- a collar
+    is a defined-risk, defined-reward structure by construction."""
+    max_profit = protective_collar_max_profit(call_strike, cost_basis, net_credit, contracts)
+    max_loss = protective_collar_max_loss(cost_basis, put_strike, net_credit, contracts)
+    breakeven = protective_collar_breakeven(cost_basis, net_credit)
+    capital_required = cost_basis * 100 * contracts
+    pop = probability_above(spot, breakeven, t, rate, sigma)
+    roc = _return_on_capital(max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=max_profit, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry), probability_of_profit=pop,
+        expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+def long_call_max_loss(premium: float, contracts: int = 1) -> float:
+    return max(premium, 0.0) * 100 * contracts
+
+
+def long_call_breakeven(strike: float, premium: float) -> float:
+    return strike + premium
+
+
+def long_call_economics(
+    spot: float, strike: float, premium: float, t: float, rate: float, sigma: float,
+    days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    max_loss = long_call_max_loss(premium, contracts)
+    breakeven = long_call_breakeven(strike, premium)
+    capital_required = max_loss
+    pop = probability_above(spot, breakeven, t, rate, sigma)
+    position = Position(legs=[Leg(right=OptionRight.CALL, strike=strike, side=Side.BUY, entry_price=premium, quantity=contracts)])
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else mc.expected_value / capital_required
+    return StrategyEconomics(
+        max_profit=math.inf, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=pop, expected_value=mc.expected_value,
+    )
+
+
+def long_put_max_profit(strike: float, premium: float, contracts: int = 1) -> float:
+    return max(strike - premium, 0.0) * 100 * contracts
+
+
+def long_put_max_loss(premium: float, contracts: int = 1) -> float:
+    return max(premium, 0.0) * 100 * contracts
+
+
+def long_put_breakeven(strike: float, premium: float) -> float:
+    return strike - premium
+
+
+def long_put_economics(
+    spot: float, strike: float, premium: float, t: float, rate: float, sigma: float,
+    days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    max_profit = long_put_max_profit(strike, premium, contracts)
+    max_loss = long_put_max_loss(premium, contracts)
+    breakeven = long_put_breakeven(strike, premium)
+    capital_required = max_loss
+    pop = probability_below(spot, breakeven, t, rate, sigma)
+    roc = _return_on_capital(max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=max_profit, max_loss=max_loss, breakeven=breakeven, capital_required=capital_required,
+        return_on_capital=roc, annualized_roc=_annualize(roc, days_to_expiry), probability_of_profit=pop,
+        expected_value=_binary_expected_value(pop, max_profit, max_loss),
+    )
+
+
+def _straddle_strangle_max_loss(debit: float, contracts: int = 1) -> float:
+    return max(debit, 0.0) * 100 * contracts
+
+
+def long_straddle_economics(
+    spot: float, strike: float, call_premium: float, put_premium: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    debit = call_premium + put_premium
+    max_loss = _straddle_strangle_max_loss(debit, contracts)
+    breakeven_lower = strike - debit
+    breakeven_upper = strike + debit
+    capital_required = max_loss
+    pop = probability_below(spot, breakeven_lower, t, rate, sigma) + probability_above(spot, breakeven_upper, t, rate, sigma)
+    position = Position(legs=[
+        Leg(right=OptionRight.CALL, strike=strike, side=Side.BUY, entry_price=call_premium, quantity=contracts),
+        Leg(right=OptionRight.PUT, strike=strike, side=Side.BUY, entry_price=put_premium, quantity=contracts),
+    ])
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else mc.expected_value / capital_required
+    return StrategyEconomics(
+        max_profit=math.inf, max_loss=max_loss, breakeven=breakeven_lower, breakeven_upper=breakeven_upper,
+        capital_required=capital_required, return_on_capital=roc,
+        annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=pop, expected_value=mc.expected_value,
+    )
+
+
+def long_strangle_economics(
+    spot: float, call_strike: float, put_strike: float, call_premium: float, put_premium: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    if call_strike <= put_strike:
+        raise ValueError("call_strike must be above put_strike for a strangle")
+    debit = call_premium + put_premium
+    max_loss = _straddle_strangle_max_loss(debit, contracts)
+    breakeven_lower = put_strike - debit
+    breakeven_upper = call_strike + debit
+    capital_required = max_loss
+    pop = probability_below(spot, breakeven_lower, t, rate, sigma) + probability_above(spot, breakeven_upper, t, rate, sigma)
+    position = Position(legs=[
+        Leg(right=OptionRight.CALL, strike=call_strike, side=Side.BUY, entry_price=call_premium, quantity=contracts),
+        Leg(right=OptionRight.PUT, strike=put_strike, side=Side.BUY, entry_price=put_premium, quantity=contracts),
+    ])
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else mc.expected_value / capital_required
+    return StrategyEconomics(
+        max_profit=math.inf, max_loss=max_loss, breakeven=breakeven_lower, breakeven_upper=breakeven_upper,
+        capital_required=capital_required, return_on_capital=roc,
+        annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=pop, expected_value=mc.expected_value,
     )

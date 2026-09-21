@@ -25,8 +25,17 @@ from src.quant.black_scholes import OptionRight as QuantOptionRight
 from src.quant.black_scholes import Side as QuantSide
 from src.quant.expected_value import (
     StrategyEconomics,
+    bear_put_spread_economics,
+    bull_call_spread_economics,
+    call_credit_spread_economics,
     covered_call_economics,
     csp_economics,
+    long_call_economics,
+    long_put_economics,
+    long_straddle_economics,
+    long_strangle_economics,
+    protective_collar_economics,
+    protective_put_economics,
     put_credit_spread_economics,
 )
 from src.quant.greeks import Greeks, net_greeks
@@ -87,9 +96,13 @@ class QuantitativeAnalysis(BaseModel):
     expected_value: float
     net_delta: float
     net_vega: float
+    # Step 19A addition: additive, defaults to None. Set only for the
+    # two-sided strategies (long straddle, long strangle) -- `breakeven`
+    # above is the LOWER of the two in that case, mirroring
+    # `src.quant.expected_value.StrategyEconomics`'s own addition.
+    breakeven_upper: float | None = None
 
     @field_validator(
-        "max_profit",
         "max_loss",
         "breakeven",
         "capital_required",
@@ -104,6 +117,30 @@ class QuantitativeAnalysis(BaseModel):
     def _finite(cls, v: float) -> float:
         if not math.isfinite(v):
             raise ValueError(f"QuantitativeAnalysis field must be finite, got {v!r}")
+        return v
+
+    @field_validator("breakeven_upper")
+    @classmethod
+    def _breakeven_upper_finite(cls, v: float | None) -> float | None:
+        if v is not None and not math.isfinite(v):
+            raise ValueError(f"breakeven_upper must be finite, got {v!r}")
+        return v
+
+    @field_validator("max_profit")
+    @classmethod
+    def _max_profit_finite_or_positive_infinity(cls, v: float) -> float:
+        """The one field this module allows to be non-finite, and only
+        in the +inf direction: a long call / long straddle / long
+        strangle / protective put's upside genuinely has no cap (see
+        `src.quant.expected_value.long_call_economics` and its
+        siblings). -inf and NaN are still rejected outright -- an
+        "unbounded loss" or a not-a-number max_profit is never a valid
+        claim for any strategy this platform allows (no naked short
+        calls, no unfunded naked puts, no unlimited-risk strategies)."""
+        if math.isnan(v):
+            raise ValueError("max_profit cannot be NaN")
+        if v == -math.inf:
+            raise ValueError("max_profit cannot be -infinity")
         return v
 
     @field_validator("generated_at")
@@ -214,22 +251,69 @@ def check_collateral(proposal: TradeProposal, portfolio: Portfolio, contracts: i
                 f"covered call requires {required_shares} shares of {proposal.ticker}; "
                 f"portfolio holds {held}"
             )
-    elif proposal.strategy == StrategyType.PUT_CREDIT_SPREAD:
-        # Defined-risk: the long put itself is the collateral once both
-        # legs are held; no separate share/cash requirement beyond the
-        # capital_required already enforced as buying power.
+    elif proposal.strategy in (
+        StrategyType.PUT_CREDIT_SPREAD,
+        StrategyType.CALL_CREDIT_SPREAD,
+        StrategyType.BULL_CALL_SPREAD,
+        StrategyType.BEAR_PUT_SPREAD,
+    ):
+        # Defined-risk verticals: the opposite leg itself is the
+        # collateral once both legs are held; no separate share/cash
+        # requirement beyond the capital_required already enforced as
+        # buying power.
         return
+
+    elif proposal.strategy == StrategyType.PROTECTIVE_PUT:
+        holding = portfolio.underlying_holdings.get(proposal.ticker)
+        required_shares = 100 * contracts
+        if holding is None or holding.shares < required_shares:
+            held = holding.shares if holding else 0
+            raise MissingCollateralError(
+                f"protective_put requires {required_shares} shares of {proposal.ticker} already held "
+                f"(this strategy protects an existing position, it does not establish one); "
+                f"portfolio holds {held}"
+            )
+
+    elif proposal.strategy == StrategyType.PROTECTIVE_COLLAR:
+        holding = portfolio.underlying_holdings.get(proposal.ticker)
+        required_shares = 100 * contracts
+        if holding is None or holding.shares < required_shares:
+            held = holding.shares if holding else 0
+            raise MissingCollateralError(
+                f"protective_collar requires {required_shares} shares of {proposal.ticker} already held; "
+                f"portfolio holds {held}"
+            )
+
+    elif proposal.strategy in (
+        StrategyType.LONG_STRADDLE,
+        StrategyType.LONG_STRANGLE,
+        StrategyType.LONG_CALL,
+        StrategyType.LONG_PUT,
+    ):
+        # Pure long-premium strategies: fully paid for at entry (the
+        # debit is the only cash consumed), same reasoning as a long
+        # leg within a vertical spread above. No share/cash collateral
+        # requirement beyond the buying-power check src.risk.engine
+        # already runs against capital_required.
+        return
+
     else:  # pragma: no cover - StrategyType is exhaustive today
         raise MissingCollateralError(f"no collateral rule defined for strategy {proposal.strategy!r}")
 
 
 def resolve_credit(proposal: TradeProposal, contracts: list[OptionContract]) -> float:
-    """The net credit per share this module prices the structure at,
-    from current market mids — the same value `compute_trade_economics`
-    uses internally, exposed separately so `src.risk.engine` can build a
-    `FidelityTradeTicket`'s limit/net-bid/net-ask fields from the exact
-    same, single source of truth rather than re-deriving it."""
-    if proposal.strategy in (StrategyType.CASH_SECURED_PUT, StrategyType.COVERED_CALL):
+    """The net credit (or, for a debit strategy, net debit — always
+    returned as a positive magnitude, the same convention the original
+    three strategies established) per share this module prices the
+    structure at, from current market mids — the same value
+    `compute_trade_economics` uses internally, exposed separately so
+    `src.risk.engine` can build a `FidelityTradeTicket`'s limit/net-bid/
+    net-ask fields from the exact same, single source of truth rather
+    than re-deriving it."""
+    if proposal.strategy in (
+        StrategyType.CASH_SECURED_PUT, StrategyType.COVERED_CALL,
+        StrategyType.PROTECTIVE_PUT, StrategyType.LONG_CALL, StrategyType.LONG_PUT,
+    ):
         return contracts[0].mid
 
     if proposal.strategy == StrategyType.PUT_CREDIT_SPREAD:
@@ -241,6 +325,36 @@ def resolve_credit(proposal: TradeProposal, contracts: list[OptionContract]) -> 
                 f"put credit spread nets to a non-positive credit ({credit:.4f}) from current market prices"
             )
         return credit
+
+    if proposal.strategy == StrategyType.CALL_CREDIT_SPREAD:
+        _, short_contract = _matching(proposal.legs, contracts, LegSide.SELL)
+        _, long_contract = _matching(proposal.legs, contracts, LegSide.BUY)
+        credit = short_contract.mid - long_contract.mid
+        if credit <= 0:
+            raise UndefinedEconomicsError(
+                f"call credit spread nets to a non-positive credit ({credit:.4f}) from current market prices"
+            )
+        return credit
+
+    if proposal.strategy in (StrategyType.BULL_CALL_SPREAD, StrategyType.BEAR_PUT_SPREAD):
+        _, short_contract = _matching(proposal.legs, contracts, LegSide.SELL)
+        _, long_contract = _matching(proposal.legs, contracts, LegSide.BUY)
+        debit = long_contract.mid - short_contract.mid
+        if debit <= 0:
+            raise UndefinedEconomicsError(
+                f"{proposal.strategy.value} nets to a non-positive debit ({debit:.4f}) from current market prices"
+            )
+        return debit
+
+    if proposal.strategy == StrategyType.PROTECTIVE_COLLAR:
+        _, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
+        _, put_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
+        return call_contract.mid - put_contract.mid  # net_credit; may legitimately be negative (a net-debit collar)
+
+    if proposal.strategy in (StrategyType.LONG_STRADDLE, StrategyType.LONG_STRANGLE):
+        _, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
+        _, put_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
+        return call_contract.mid + put_contract.mid  # total debit paid
 
     raise UndefinedEconomicsError(f"no credit formula for strategy {proposal.strategy!r}")  # pragma: no cover
 
@@ -284,6 +398,76 @@ def compute_trade_economics(
             spot, short_leg.strike, long_leg.strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts
         )
 
+    if proposal.strategy == StrategyType.CALL_CREDIT_SPREAD:
+        short_leg, short_contract = _matching(proposal.legs, contracts, LegSide.SELL)
+        long_leg, _ = _matching(proposal.legs, contracts, LegSide.BUY)
+        sigma = _require_iv(short_contract)
+        return call_credit_spread_economics(
+            spot, short_leg.strike, long_leg.strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts
+        )
+
+    if proposal.strategy == StrategyType.BULL_CALL_SPREAD:
+        long_leg, long_contract = _matching(proposal.legs, contracts, LegSide.BUY)
+        short_leg, _ = _matching(proposal.legs, contracts, LegSide.SELL)
+        sigma = _require_iv(long_contract)
+        return bull_call_spread_economics(
+            spot, long_leg.strike, short_leg.strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts
+        )
+
+    if proposal.strategy == StrategyType.BEAR_PUT_SPREAD:
+        long_leg, long_contract = _matching(proposal.legs, contracts, LegSide.BUY)
+        short_leg, _ = _matching(proposal.legs, contracts, LegSide.SELL)
+        sigma = _require_iv(long_contract)
+        return bear_put_spread_economics(
+            spot, long_leg.strike, short_leg.strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts
+        )
+
+    if proposal.strategy == StrategyType.PROTECTIVE_PUT:
+        holding = portfolio.underlying_holdings.get(proposal.ticker)
+        if holding is None:
+            raise MissingCollateralError(f"no underlying share holding on record for {proposal.ticker}")
+        sigma = _require_iv(contracts[0])
+        return protective_put_economics(
+            spot, proposal.legs[0].strike, credit, holding.cost_basis, t, rate, sigma, max(days_to_expiry, 1), num_contracts
+        )
+
+    if proposal.strategy == StrategyType.PROTECTIVE_COLLAR:
+        holding = portfolio.underlying_holdings.get(proposal.ticker)
+        if holding is None:
+            raise MissingCollateralError(f"no underlying share holding on record for {proposal.ticker}")
+        call_leg, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
+        put_leg, _ = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
+        sigma = _require_iv(call_contract)
+        return protective_collar_economics(
+            spot, call_leg.strike, put_leg.strike, credit, holding.cost_basis, t, rate, sigma,
+            max(days_to_expiry, 1), num_contracts,
+        )
+
+    if proposal.strategy == StrategyType.LONG_CALL:
+        sigma = _require_iv(contracts[0])
+        return long_call_economics(spot, proposal.legs[0].strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts)
+
+    if proposal.strategy == StrategyType.LONG_PUT:
+        sigma = _require_iv(contracts[0])
+        return long_put_economics(spot, proposal.legs[0].strike, credit, t, rate, sigma, max(days_to_expiry, 1), num_contracts)
+
+    if proposal.strategy == StrategyType.LONG_STRADDLE:
+        call_leg, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
+        put_leg, put_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
+        sigma = _require_iv(call_contract)
+        return long_straddle_economics(
+            spot, call_leg.strike, call_contract.mid, put_contract.mid, t, rate, sigma, max(days_to_expiry, 1), num_contracts
+        )
+
+    if proposal.strategy == StrategyType.LONG_STRANGLE:
+        call_leg, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
+        put_leg, put_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
+        sigma = _require_iv(call_contract)
+        return long_strangle_economics(
+            spot, call_leg.strike, put_leg.strike, call_contract.mid, put_contract.mid,
+            t, rate, sigma, max(days_to_expiry, 1), num_contracts,
+        )
+
     raise UndefinedEconomicsError(f"no economics formula for strategy {proposal.strategy!r}")  # pragma: no cover
 
 
@@ -307,7 +491,7 @@ def compute_trade_greeks(proposal: TradeProposal, contracts: list[OptionContract
     # the position-level vol input, consistent with compute_trade_economics.
     sigma = _require_iv(contracts[0])
     underlying_shares = 0
-    if proposal.strategy == StrategyType.COVERED_CALL:
+    if proposal.strategy in (StrategyType.COVERED_CALL, StrategyType.PROTECTIVE_PUT, StrategyType.PROTECTIVE_COLLAR):
         holding = portfolio.underlying_holdings.get(proposal.ticker)
         underlying_shares = holding.shares if holding else 0
     return net_greeks(quant_legs, spot, t, 0.0, sigma, underlying_shares=underlying_shares)
@@ -328,6 +512,16 @@ def cross_check_quantitative_analysis(
     tol = limits.quant_cross_check_tolerance_pct
 
     def _within_tolerance(a: float, b: float) -> bool:
+        # Both sides infinite (an unbounded-upside strategy correctly
+        # reported by both the caller and this module's own
+        # recomputation) is an exact agreement, not a mismatch -- a
+        # naive (a-b)/b division would produce inf-inf=NaN here, which
+        # `abs(...) <= tol` always evaluates False for, wrongly
+        # rejecting two numbers that agree perfectly.
+        if math.isinf(a) and math.isinf(b) and a == b:
+            return True
+        if math.isinf(a) or math.isinf(b):
+            return False
         if b == 0:
             return abs(a) < 1e-6
         return abs(a - b) / abs(b) <= tol
@@ -347,6 +541,12 @@ def cross_check_quantitative_analysis(
             f"supplied breakeven={supplied.breakeven:.2f} disagrees with recomputed "
             f"{recomputed.breakeven:.2f} by more than {tol:.1%}"
         )
+    if recomputed.breakeven_upper is not None:
+        if supplied.breakeven_upper is None or not _within_tolerance(supplied.breakeven_upper, recomputed.breakeven_upper):
+            raise QuantMismatchError(
+                f"supplied breakeven_upper={supplied.breakeven_upper!r} disagrees with recomputed "
+                f"{recomputed.breakeven_upper:.2f} by more than {tol:.1%}"
+            )
 
 
 def size_trade(
@@ -400,3 +600,12 @@ def _matching(legs: list[OptionLeg], contracts: list[OptionContract], side: LegS
         if leg.side == side:
             return leg, contract
     raise UndefinedEconomicsError(f"no leg with side={side!r}")  # pragma: no cover - schema-enforced
+
+
+def _matching_by_right(
+    legs: list[OptionLeg], contracts: list[OptionContract], right: DataOptionRight
+) -> tuple[OptionLeg, OptionContract]:
+    for leg, contract in zip(legs, contracts):
+        if _leg_data_right(leg) == right:
+            return leg, contract
+    raise UndefinedEconomicsError(f"no leg with right={right!r}")  # pragma: no cover - schema-enforced

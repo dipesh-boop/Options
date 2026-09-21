@@ -2476,3 +2476,359 @@ one (feeding real `PaperBroker`/confirmed-Fidelity fills into a
 `render_morning_scan_report`, and — unrelated to this step but still
 open — every Phase 0 foundation item and cross-step gap already
 carried forward above.
+
+## 2026-09-21 — Strategy library expansion and Strategy Competition Engine (Step 19A)
+
+**Explicit instruction for this step:** expand the original 3-strategy
+set (cash-secured put, covered call, put credit spread) into a 16-item
+library (15 real strategies + NO_TRADE/CASH), replace any implicit
+one-regime-to-one-strategy mapping with a Strategy Competition Engine
+that generates every compatible candidate, prices all of them
+identically, and selects the single best *risk-adjusted* candidate —
+never the one with the largest theoretical profit — and extend, never
+rebuild, Step 19's validation system to track it. Naked short calls,
+undefined-risk short calls, unfunded naked puts, martingale sizing, and
+any unlimited-risk structure remained excluded, unchanged from §1.
+Nothing from Step 19 was deleted, reset, or weakened to do this — every
+extension below is additive, verified by running the full suite after
+each change rather than assumed compatible.
+
+**`src/llm/schemas.py`** — `StrategyType` gained 9 members
+(`CALL_CREDIT_SPREAD`, `BULL_CALL_SPREAD`, `BEAR_PUT_SPREAD`,
+`PROTECTIVE_PUT`, `PROTECTIVE_COLLAR`, `LONG_STRADDLE`,
+`LONG_STRANGLE`, `LONG_CALL`, `LONG_PUT`) alongside the original 3,
+each with its own leg-shape/side/strike-ordering validator branch in
+`TradeProposal._validate_legs_match_strategy` (e.g. a bull call spread
+must have long strike < short strike; a protective collar's call
+strike must exceed its put strike; a straddle's two strikes must be
+equal). These 9, plus the original 3, are the **Tier1** set — every one
+fits `TradeProposal`'s existing 1-2 leg cap and is wired all the way to
+a real order.
+
+**`src/quant/expected_value.py`** — 9 new closed-form economics
+functions, one per new Tier1 strategy, following the exact
+`StrategyEconomics` pattern the original 3 already used.
+`StrategyEconomics` gained `breakeven_upper: float | None = None`
+(additive; every existing single-breakeven strategy leaves it `None`).
+Unbounded-upside strategies (`protective_put`, `long_call`,
+`long_straddle`, `long_strangle`) set `max_profit=math.inf` and source
+`expected_value` from the existing `monte_carlo_pop_and_ev` cross-check
+tool (fixed seed `20260101`, 20,000 paths) rather than the binary
+max-profit/max-loss EV heuristic the original 3 strategies use, which
+is mathematically undefined once max_profit is infinite.
+
+**`src/quant/monte_carlo.py`** — a new generic, exact (not
+approximated) payoff-analysis engine: `PayoffProfile`
+(`max_profit`/`max_loss`/`breakeven_points`) and `payoff_profile(position)`,
+which evaluates any `Position` (any legs, any quantity ratio, with or
+without underlying shares) at every strike plus zero, analyzes the
+upside tail slope for unboundedness, and finds breakevens by exact
+linear interpolation between adjacent kink points. This became the
+single reusable foundation for both the closed-form
+`expected_value` functions above (cross-checked against it directly in
+tests) and the entirely new `src/strategies` evaluation layer below,
+which has no closed-form economics functions of its own at all for the
+6-and-up-strike structures (butterflies, condors).
+
+**`src/risk/trade_risk.py`** (safety-critical, extended) — `check_collateral`,
+`resolve_credit`, and `compute_trade_economics` each gained a dispatch
+branch per new Tier1 strategy. `QuantitativeAnalysis.max_profit`'s
+validator was split so `math.inf` is now accepted (NaN and `-inf`
+remain rejected) — the one field in the Risk Engine's Pydantic contract
+allowed to be non-finite, needed for the genuinely unbounded-upside
+strategies. `cross_check_quantitative_analysis`'s tolerance check was
+fixed alongside this: the existing `(a-b)/b` relative-difference
+formula produces NaN when both `a` and `b` are `math.inf` (`inf - inf`
+is undefined), which was incorrectly failing two *correctly agreeing*
+infinite values before an explicit `math.isinf(a) and math.isinf(b)`
+branch was added.
+
+**`src/risk/engine.py`** (safety-critical bug fix) — `_build_approved_order`
+was rewritten after a self-caught sign-correctness bug: a debit
+strategy (e.g. a bull call spread) was rendering "NET CREDIT" on the
+human-facing Fidelity ticket instead of "NET DEBIT", because
+`resolve_credit()` always returns a positive magnitude and was being
+used directly as the *signed* `estimated_credit_debit` field. The fix
+generalizes `net_bid`/`net_ask` to a per-leg signed sum (works for any
+leg-side combination, including a straddle's two long legs, which
+previously crashed the old short/long-leg-lookup code with
+`StopIteration`), derives `net_mid`, and uses its sign to set
+`estimated_credit_debit` (signed) vs. `limit_price` (`abs(net_mid)`,
+since `ApprovedOrder.limit_price` is `Field(gt=0)`). This was caught by
+my own end-to-end smoke test, not user feedback, before any test ran
+against it — flagged here because it is the most consequential defect
+of this step: an unfixed version would have shown a trader the wrong
+side of the trade on a manual-execution ticket.
+
+**`config/brokers.yaml`** — all three broker configs
+(`fidelity`, `ibkr_paper`, `internal_paper`) gained the 9 new Tier1
+strategy names in `allowed_strategies`.
+
+**`src/brokers/fidelity.py`, `src/workflows/morning_scan.py`** — small
+additive changes so `math.inf` max-profit renders as "UNLIMITED" rather
+than a literal `inf` on a human-facing ticket or report line, and the
+Fidelity ticket's net bid/ask/mid lines render as unsigned magnitudes
+(the signed value lives in `estimated_credit_debit`/the NET
+CREDIT/DEBIT label, never duplicated as a second, possibly
+inconsistent sign elsewhere on the ticket).
+
+**New package: `src/strategies/`** (sibling to `src/llm`, `src/quant`,
+`src/data`, `src/brokers`, `src/risk`, `src/workflows`,
+`src/validation` — see `IMPLEMENTATION_PLAN.md` §10 for the full
+deviation writeup):
+- `base.py` — `StrategyKind` (15 members — the CASH/NO_TRADE concept is
+  deliberately *not* a member, see `selector.py` below),
+  `StrategyFamily` (9 members, multi-valued per strategy — a covered
+  call is both `INCOME` and mildly `BULLISH`; a protective collar is
+  `PORTFOLIO_PROTECTION`, `TAIL_RISK_HEDGE`, and
+  `CAPITAL_PRESERVATION` at once), `TRADE_PROPOSAL_ELIGIBLE` (the 12
+  Tier1 kinds), and `build_strategy_evaluation` — the single assembler
+  every per-strategy module calls, producing a `StrategyEvaluation`
+  with capital requirement, signed net credit/debit, max profit/loss,
+  breakevens, all four Greeks, probability of profit, probability of
+  max loss (`None` when the payoff has no single max-loss terminal
+  region), expected shortfall/CVaR (from the same Monte Carlo sample as
+  the EV, not a second simulation), return on capital, annualized ROC,
+  a 0-1 liquidity score, estimated slippage, execution complexity,
+  assignment/early-exercise/event risk levels, entry/exit/adjustment/
+  invalidation rules, and Fidelity compatibility — computed exclusively
+  from `src.quant` outputs, never invented by this module.
+- 15 per-strategy modules, one file each
+  (`cash_secured_put.py`, `covered_call.py`, `put_credit_spread.py`,
+  `call_credit_spread.py`, `bull_call_spread.py`, `bear_put_spread.py`,
+  `protective_put.py`, `protective_collar.py`, `long_call.py`,
+  `long_put.py`, `long_straddle.py`, `long_strangle.py`,
+  `long_call_butterfly.py`, `iron_condor.py`, `iron_butterfly.py`) —
+  each a thin leg-builder that constructs a `Position` and calls
+  `build_strategy_evaluation`. The last 3
+  (`long_call_butterfly.py`/`iron_condor.py`/`iron_butterfly.py`) are
+  the **Tier2** set: 3-4 leg structures `TradeProposal` cannot
+  represent today, fully evaluable/comparable here but never wired to
+  `src.risk.engine`/a Fidelity ticket — a deliberate scope boundary
+  (widening the 2-leg cap touches the highest test-coverage code in the
+  system), not an oversight, see `ARCHITECTURE.md` §13.
+- `regime_mapping.py` — `MarketView` (8 values) and
+  `CANDIDATE_STRATEGIES_BY_VIEW`, an explicit guideline table mapping
+  each view to a *tuple* of strategies worth constructing and pricing —
+  never a 1:1 mapping, and order within a tuple is not a ranking.
+  Nothing here decides a trade.
+- `suitability.py` — `is_strategy_suitable`: a share-requiring strategy
+  (covered call, protective put, protective collar) is never even
+  *constructed* unless the portfolio already holds ≥100×contracts
+  shares of the underlying — the structural guarantee behind "never
+  misclassify a bare short call as a covered call."
+- `portfolio_fit.py` — post-trade underlying/sector exposure percentage
+  and a 0-1 diversification score, reusing `src.risk.portfolio_risk`'s
+  aggregation helpers directly (no second concentration computation).
+  Correlation-with-existing is honestly `None` (not tracked) — the same
+  QF-001 gap `src.risk.correlation.check_correlation` already carries,
+  not silently fabricated here.
+- `comparison.py` — `ComparisonRow` (one row per candidate, a full
+  metrics table) and `risk_adjusted_score = expected_value /
+  maximum_loss`, the literal antidote to this step's own worked
+  example: a 25%-return/large-max-loss candidate does not automatically
+  outrank a 14%-return/small-max-loss one. `rank_candidates` never
+  collapses the table into just the winning score — both are always
+  returned together, the same "structurally incapable of collapsing
+  into one number" discipline `src.validation.scorecard` already
+  established.
+- `selector.py` — `select_best_or_no_trade`: takes already-priced
+  `StrategyEvaluation` candidates plus each one's Devil's Advocate
+  verdict and Risk Engine decision (`CandidateVerdicts`, supplied by
+  the caller — this module does not itself invoke the Multi-Agent Layer
+  or the Risk Engine), filters to `APPROVE`/`RESIZE`-only + non-flagged
+  candidates, and picks the best `risk_adjusted_score` — or NO_TRADE.
+  NO_TRADE/CASH is **not** a `StrategyKind` member; it is represented
+  structurally as `SelectionOutcome.selected is None`, winning whenever
+  no surviving candidate clears a configurable `no_trade_hurdle`
+  (default `0.0`) or every candidate is filtered out. The full
+  comparison table survives into `SelectionOutcome` regardless of which
+  candidate wins, specifically so every non-selected alternative is
+  available for counterfactual tracking later.
+- `volatility_engine.py` — `compare_iv_to_rv` (IV-RV spread, term
+  structure slope, percentile/rank passed through honestly as `None`
+  when not supplied — never invented), `straddle_required_move_comparison`
+  / `strangle_required_move_comparison` (required move vs. implied
+  expected move and, where supplied, a historical move distribution),
+  and `premium_compensates_for_tail_risk`. Every function returns a
+  comparison figure only — never a "buy"/"sell"/"approved" verdict —
+  the literal enforcement of "do not buy volatility simply because an
+  event exists" / "do not sell volatility merely because IV is
+  elevated": the qualitative judgment stays with the Multi-Agent Layer
+  and the deterministic Risk Engine, never a Python heuristic
+  pretending to make that call.
+
+**`src/llm/context.py`** — `MarketContext` gained ~14 additive optional
+fields (trend/momentum, realized volatility, IV percentile/rank, term
+structure, skew, breadth, ATR, support/resistance, yields, credit
+conditions, econ calendar) — every existing `MarketContext`
+construction continues to pass unmodified.
+
+**`src/validation/cohort.py`** (new) — the direct, tested answer to
+this step's own cohort-transition rule: `has_cohort_started` checks the
+`ValidationStore` for any real recorded trade/snapshot/rejected-outcome
+/violation (never a manifest's mere existence), and
+`decide_cohort_transition` returns `START_FRESH_COHORT` when nothing
+has ever run, or `CLOSE_AND_START_NEW_COHORT` (preserving the prior
+cohort's label, or `PRE_EXPANSION_VALIDATION` if none was ever
+explicitly given) when it has — so results from materially different
+strategy architectures are never mixed into one cohort's numbers.
+`StrategyVersionManifest` gained `cohort_label: str = "default"`
+(additive) and `build_validation_manifest` a matching parameter.
+
+**`src/validation/counterfactual.py`** (new) — `StrategyAlternativeRecord`
+stores a decision-time `StrategyEvaluation` directly (no duplicated/
+independently-drifting fields), and `summarize_selection_effectiveness`
+/`summarize_by_regime` compute Selection Regret (positive = the
+selected candidate underperformed a non-selected alternative) only once
+a sample of concluded opportunities crosses a configurable minimum size
+— a `meaningful_sample=False`/explicit warning below that threshold,
+the same "don't claim more than the sample supports" discipline
+`src.workflows.rejected_trade_review` and Step 19's
+`RegimeCoverageSummary` already established. No-trade expectancy is
+passed through from the caller, never computed here (this module prices
+alternatives, it does not itself run a backtest).
+
+**`src/backtest/regime_scenarios.py`** (new) — `generate_regime_path`,
+a deterministic seeded GBM price/IV path generator across 8 named
+regimes (`BULL`/`BEAR`/`SIDEWAYS`/`HIGH_VOLATILITY`/`LOW_VOLATILITY`/
+`VOLATILITY_EXPANSION`/`VOLATILITY_CONTRACTION`/`MARKET_CRASH`). This
+is a **test-fixture generator**, not new backtest-engine logic —
+`src.backtest.engine` was confirmed already strategy-agnostic and
+needed no changes. Used to prove "every defined-risk strategy's
+`max_loss` bound holds against every simulated terminal price in every
+regime" — deliberately never a P&L-sign or win-rate assertion in any
+regime, since this step explicitly does not require one strategy to
+always win anywhere.
+
+**Testing discipline**: after every source-code change, the directly
+affected test subdirectory was run before moving on
+(`tests/unit/llm/`, `tests/unit/quant/`, `tests/unit/risk/`,
+`tests/unit/brokers/`, `tests/unit/orchestration/`,
+`tests/unit/dashboard/`), catching regressions immediately rather than
+accumulating risk. 186 new tests across 13 files:
+`tests/unit/llm/test_expanded_strategy_types.py` (24, the 9 new
+`StrategyType` members' leg-validation rules),
+`tests/unit/quant/test_payoff_profile.py` (16, the generic engine
+cross-checked against every closed-form strategy's own max-profit/loss/
+breakeven),
+`tests/unit/quant/test_expanded_expected_value.py` (13, the 9 new
+economics functions including the Monte-Carlo-sourced EV path for
+unbounded strategies),
+`tests/unit/risk/test_expanded_strategies.py` (17, collateral/credit-
+sign/economics dispatch for all 9, plus the debit-vs-credit sign-
+correctness regression test that caught the `_build_approved_order`
+bug),
+`tests/unit/strategies/test_base.py` (13),
+`tests/unit/strategies/test_individual_strategies.py` (20, all 15
+per-strategy modules),
+`tests/unit/strategies/test_regime_mapping_suitability.py` (12),
+`tests/unit/strategies/test_comparison_portfolio_fit_selector.py` (11,
+including a direct test of the 25%/30%-vs-14%/6% worked example),
+`tests/unit/strategies/test_volatility_engine.py` (12),
+`tests/unit/strategies/test_system_integration.py` (1, the full
+MARKET DATA → REGIME → OPPORTUNITY → MULTIPLE STRATEGIES → QUANT →
+COMPARISON → Devil's Advocate/Portfolio Manager verdicts (supplied,
+same pattern `tests/unit/orchestration/test_pipeline.py` already uses)
+→ real Risk Engine → SELECTED STRATEGY OR NO_TRADE → real PaperBroker →
+validation store → reporting chain, everything except the two LLM
+verdicts unmocked),
+`tests/unit/validation/test_cohort.py` (12, including the direct,
+programmatic answer to this step's own questions #11/#12 — see below),
+`tests/unit/validation/test_counterfactual.py` (11), and
+`tests/unit/backtest/test_regime_scenarios.py` (9, the 8-regime
+generator plus the cross-strategy max-loss-bound property test,
+parametrized across all 8 regimes for a put credit spread and
+separately checked for a bear put spread inside a bull regime to make
+"no strategy has to win everywhere" explicit).
+
+Full repo suite: **1966 passed, 4 skipped** (up from 1780 at the end of
+Step 19; +186 new tests, 0 regressions, 0 weakened or deleted existing
+tests, 4 skips unchanged — the same pre-existing IBKR live-adapter
+skips).
+
+**Validation cohort status (this step's own questions #11/#12,
+answered programmatically, not asserted):** this codebase's actual
+current `ValidationStore` state has **never recorded a single
+trade, snapshot, rejected-trade outcome, or violation** — no 90-day
+validation session has ever actually run end to end (Step 19 built the
+calculation/reporting engine; nothing yet drives it day by day, see
+Step 19's own "Next up" above). `decide_cohort_transition(None)` and
+`decide_cohort_transition(InMemoryValidationStore())` both correctly
+resolve to `START_FRESH_COHORT` with
+`new_cohort_label="MULTI_STRATEGY_VALIDATION_V1"` — so **no**,
+the formal cohort had not started, and **no** `PRE_EXPANSION_VALIDATION`
+cohort needs to be closed because none ever existed; **yes**, per this
+step's own rule for the "not started" branch, a fresh
+`VALIDATION_MANIFEST` should be frozen now, directly as
+`MULTI_STRATEGY_VALIDATION_V1`, rather than staged behind a close step.
+`reports/validation/VALIDATION_MANIFEST.json` was frozen accordingly —
+`manifest_id="mstrat-v1"`, `cohort_label="MULTI_STRATEGY_VALIDATION_V1"`,
+90-day period starting today, `strategy_versions` covering all 12
+Tier1 strategies plus the 3 Tier2 evaluation-only ones at `"v1"`, and
+`config_file_hashes` over `config/risk_limits.yaml`,
+`config/brokers.yaml`, and `config/validation.yaml` as they exist at
+freeze time — so any later silent edit to those three files during the
+run is detectable via `verify_manifest_integrity`, exactly as Step 19
+designed. **This manifest freeze is not the same as Day 1 having
+happened** (`has_cohort_started` on the freshly-created store still
+correctly returns `False`, proven directly in
+`test_cohort.py::TestStartNewCohort`) — actually starting Day 1 still
+requires the same not-yet-built daily driver Step 19's "Next up"
+already flagged, unchanged by this step.
+
+`config/validation.yaml` needed **no new fields** for this step —
+`cohort_label` is a per-manifest-freeze parameter
+(`build_validation_manifest(..., cohort_label=...)`), not a
+YAML-configured constant, so there was nothing to add to the config
+file itself; confirmed by re-reading `src/validation/protocol.py`
+rather than assumed.
+
+## Open decisions carried forward (updated an eighth time)
+
+- [ ] **New from Step 19A**: the Strategy Competition Engine is a
+      comparison/selection layer over already-constructed
+      `StrategyEvaluation` candidates, not a candidate-generation layer
+      that scans a live `OptionChain` for viable strikes/expirations
+      itself. `src.workflows.candidate_generation` (Step 15) still only
+      knows how to build candidates for the original 3 strategies —
+      wiring it to generate candidates for all 12 Tier1 strategies from
+      real chain data, so the Strategy Competition Engine can run
+      end-to-end rather than against caller-assembled test fixtures, is
+      the concrete next-integration gap this step leaves open. See
+      `IMPLEMENTATION_PLAN.md` §10.
+- [ ] **New from Step 19A**: the 3 Tier2 strategies
+      (`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`,
+      `SHORT_IRON_BUTTERFLY`) are evaluation/comparison-only —
+      `TradeProposal`'s 1-2 leg cap was deliberately not widened this
+      step. Extending the trusted kernel (`src.risk.engine`,
+      `src.risk.trade_risk`, `src.brokers.fidelity`) to 3-4 legs is a
+      separately-scoped hardening decision, not made here.
+- [ ] **New from Step 19A**: no scheduler or CLI entry point yet drives
+      a real 90-day (or any) validation session day by day — unchanged
+      from Step 19's own "Next up," now inherited by the
+      `MULTI_STRATEGY_VALIDATION_V1` cohort whose manifest this step
+      froze. The manifest existing is not the same as Day 1 having
+      happened.
+- [ ] **New from Step 19A**: `src.strategies` has no verified one-way
+      dependency-boundary test the way `src.quant`/`src.data`/
+      `src.brokers` do — not needed today (it only imports `src.quant`,
+      `src.data`, `src.risk`, and `src.llm.schemas`, never the reverse),
+      but flagged here rather than silently assumed permanent as the
+      package grows.
+
+## Next up
+
+Per this step's own instruction, mirrored from Step 19: **do not
+proceed to Step 20 without direction.** The concrete gaps this step
+leaves open, in likely priority order: (1) wire
+`src.workflows.candidate_generation` to build real, chain-sourced
+candidates for all 12 Tier1 strategies so the Strategy Competition
+Engine runs against live data rather than test fixtures; (2) build the
+daily driver that actually starts Day 1 of `MULTI_STRATEGY_VALIDATION_V1`
+(feeding real `PaperBroker`/confirmed-Fidelity fills and daily snapshots
+into a `ValidationStore`) — inherited unchanged from Step 19; (3) decide
+whether/when to widen `TradeProposal`'s leg cap to bring the 3 Tier2
+strategies into Tier1; and, unrelated to this step but still open,
+every Phase 0 foundation item and cross-step gap already carried
+forward above.
