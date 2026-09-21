@@ -41,6 +41,9 @@ from dataclasses import dataclass
 
 from src.research.performance_breakdown import ResearchTradeObservation, breakdown_by
 from src.strategies.base import STRATEGY_FAMILIES, StrategyFamily, StrategyKind
+from src.validation.counterfactual import StrategyAlternativeRecord
+
+_RISK_APPROVAL_DECISIONS = ("approve", "resize")
 
 DEFAULT_MIN_SAMPLE_FOR_SHARPE = 20  # same default src.validation.protocol's rejected_trade_min_sample_size already uses
 _REGIME_DOMINANCE_THRESHOLD = 0.80  # same threshold src.validation.regime_analysis.RegimeCoverageSummary already uses
@@ -82,6 +85,7 @@ class StrategyPerformanceSummary:
     average_loss_magnitude: float | None  # mean |pnl| among losing trades only; None when there are no losing trades
     avg_holding_period_days: float
     avg_slippage: float  # dollars per trade, same (theoretical - realistic - commission) definition build_backtest_result uses
+    avg_capital_deployed: float  # dollars per trade -- mean capital_at_risk, this strategy's own "capital utilization" figure
     performance_by_regime: dict[str, "RegimeSlice"]
 
 
@@ -167,6 +171,7 @@ def per_strategy_performance(
             average_loss_magnitude=(gross_loss / len(losses)) if losses else None,
             avg_holding_period_days=statistics.mean(o.trade.holding_period_days for o in group),
             avg_slippage=statistics.mean(slippage),
+            avg_capital_deployed=capital_total / len(group),
             performance_by_regime=regime_slices,
         )
     return summaries
@@ -230,3 +235,42 @@ def answer_attribution_questions(summaries: dict[str, StrategyPerformanceSummary
         generated_excessive_trading_costs=generated_excessive_trading_costs,
         summaries=summaries,
     )
+
+
+@dataclass(frozen=True)
+class StrategyFunnelCounts:
+    """The decision-time funnel this step's re-ask names explicitly,
+    distinct from `StrategyPerformanceSummary`'s completed-trade stats:
+    how often a strategy was even generated as a candidate, how often it
+    won the internal comparison and was put forward, how often the Risk
+    Engine actually rejected it, and how often it became a real
+    position. Sourced from `src.validation.counterfactual
+    .StrategyAlternativeRecord` (already captured at decision time for
+    every serious candidate, selected or not) rather than a second
+    decision-tracking mechanism."""
+
+    strategy: str
+    opportunities_considered: int  # distinct opportunities where this strategy was generated as a candidate at all
+    trades_proposed: int  # won the internal risk-adjusted comparison and was put forward as the opportunity's trade
+    trades_rejected: int  # the Risk Engine's own verdict on this candidate was not an approval/resize
+    trades_entered: int  # proposed AND risk-approved -- became a real position
+
+
+def funnel_counts_by_strategy(records: list[StrategyAlternativeRecord]) -> dict[str, StrategyFunnelCounts]:
+    grouped: dict[str, list[StrategyAlternativeRecord]] = {}
+    for r in records:
+        grouped.setdefault(r.evaluation.strategy_kind.value, []).append(r)
+
+    counts: dict[str, StrategyFunnelCounts] = {}
+    for strategy, group in grouped.items():
+        proposed = [r for r in group if r.was_selected]
+        rejected = [r for r in group if r.risk_decision.lower() not in _RISK_APPROVAL_DECISIONS]
+        entered = [r for r in proposed if r.risk_decision.lower() in _RISK_APPROVAL_DECISIONS]
+        counts[strategy] = StrategyFunnelCounts(
+            strategy=strategy,
+            opportunities_considered=len({r.opportunity_id for r in group}),
+            trades_proposed=len(proposed),
+            trades_rejected=len(rejected),
+            trades_entered=len(entered),
+        )
+    return counts

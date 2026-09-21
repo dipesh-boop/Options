@@ -3090,3 +3090,100 @@ same family-membership flag; (3) deciding whether
 `src.research.performance_breakdown`'s dimension list should expand to
 the full 16-strategy library, or remain deliberately scoped to the
 original 3 — not decided here.
+
+## 2026-09-21 (cont'd) — Step 19A gap-check re-ask
+
+A follow-up restatement of Step 19A's own objective arrived, closely
+overlapping what Step 19A and Step 14B already delivered. Per its own
+explicit "do not rebuild" instruction, this pass was a genuine
+re-inspection (steps 1-14 of its own preamble: docs, the Step 19
+validation system, the Strategy Engine, Quant Engine, Risk Engine,
+Market Regime Agent, Portfolio Manager, Devil's Advocate, PaperBroker,
+Backtesting Engine, Fidelity constraints) looking for real gaps against
+the restatement's own added detail, not a re-implementation of anything
+already built. Confirmed already satisfied, by direct inspection: all
+16 library items and the Tier1/Tier2 split; the 9-family
+classification (Step 14B's renamed vocabulary); the 9-view regime
+mapping including `LOW_IV_EXPANSION_EXPECTED`; the volatility engine;
+the comparison/ranking engine (`risk_adjusted_score`, never raw
+return); position-aware suitability; hedge evaluation by family
+classification; per-strategy Fidelity-compatibility flags; backtesting
+across all 8 named regimes with the two collateral bugs already fixed
+in Step 14B; the frozen `MULTI_STRATEGY_VALIDATION_V1` manifest
+(re-verified programmatically this step — still no recorded trade,
+snapshot, rejected outcome, or violation, so the cohort still has not
+formally started and no new manifest freeze was needed); `MarketContext`'s
+full set of extended regime-analysis fields (trend, momentum, realized/
+implied vol, IV percentile/rank, term structure, skew, breadth, ATR,
+support/resistance, Treasury yields, credit conditions — economic-
+calendar/earnings events already covered by the pre-existing
+`notable_events` field).
+
+**Two genuine gaps found and closed, both additive:**
+
+- **`ManagementConditionType`** (`src.strategies.base`, new 9-value
+  enum matching this step's own list verbatim) + `MANAGEMENT_CONDITION_TYPES`,
+  a per-`StrategyKind` table auto-wired into `build_strategy_evaluation`
+  exactly the way `STRATEGY_FAMILIES` already is — zero changes needed
+  to any of the 15 individual strategy modules. `StrategyEvaluation`
+  gained a new `management_condition_types` field. Previously,
+  `entry_rules`/`exit_rules`/`adjustment_rules`/`invalidation_rules`
+  were free-text prose only, descriptive but not backed by any closed
+  type — this enum is the concrete mechanism behind "LLMs may interpret
+  conditions, they may NOT improvise risk rules": the *categories* of
+  management logic applicable to a strategy are now a closed,
+  Python-determined set. Pure long-premium strategies (long call/put,
+  straddle, strangle) correctly carry no `ASSIGNMENT_MANAGEMENT` (no
+  short leg to be assigned on); every strategy with a short leg does.
+  5 new tests in `tests/unit/strategies/test_base.py`
+  (`TestManagementConditionTypes`).
+- **`src.validation.strategy_attribution.funnel_counts_by_strategy`**
+  + new `StrategyFunnelCounts` dataclass (opportunities_considered/
+  trades_proposed/trades_rejected/trades_entered) — the decision-time
+  funnel this step names explicitly, distinct from that module's
+  existing completed-trade statistics (`per_strategy_performance`).
+  Sourced from `src.validation.counterfactual.StrategyAlternativeRecord`
+  (already captured at decision time for every serious candidate,
+  selected or not, since Step 19A) rather than a second decision-
+  tracking mechanism: `opportunities_considered` counts distinct
+  opportunities where a strategy was generated as a candidate at all,
+  `trades_proposed` counts records where it won the internal
+  risk-adjusted comparison (`was_selected`), `trades_rejected` counts
+  records whose own `risk_decision` was not an approval/resize
+  regardless of selection, and `trades_entered` requires both.
+  `StrategyPerformanceSummary` also gained `avg_capital_deployed`
+  (mean `capital_at_risk` per completed trade) — this step's own
+  "capital utilization" figure, computed from data already tracked
+  rather than a new NAV-relative metric this module has no portfolio
+  context to compute honestly. 6 new tests in
+  `tests/unit/validation/test_strategy_attribution.py`
+  (`TestFunnelCountsByStrategy`).
+
+No changes were made to `reports/validation/VALIDATION_MANIFEST.json`
+this pass — `strategy_versions` still covers the same 15 `StrategyKind`
+values at `"v1"`, and no new strategy was added, so the existing
+`MULTI_STRATEGY_VALIDATION_V1` freeze remains accurate; re-verified
+programmatically (not assumed) that the cohort still has not formally
+started.
+
+Full repo suite: **2032 passed, 4 skipped** (up from 2021 at the end of
+Step 14B; +11 new tests, 0 regressions, 0 weakened or deleted existing
+tests, 4 skips unchanged).
+
+## Open decisions carried forward (updated a tenth time)
+
+Every open decision Step 19A/14B already carried forward remains open,
+unchanged by this pass (live-chain candidate generation, the 90-day
+daily driver, the Tier2 leg-cap decision, the per-trade Sharpe
+approximation's documented scope, the "reduced losses"/"improved
+drawdown" hedge-family-flag limitation, `.claude/agents/strategy_research.md`'s
+stale "three strategies" language). No new open decisions from this
+pass — both gaps found were closed, not deferred.
+
+## Next up
+
+Unchanged from Step 14B's own "Next up": do not proceed further without
+direction. The same three priorities stand (live-chain candidate
+generation, the 90-day daily driver, the Tier2 leg-cap decision), plus
+the hedge-effectiveness counterfactual and the Strategy Research Agent
+scope question, neither decided here.

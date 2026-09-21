@@ -9,12 +9,39 @@ from datetime import date, timedelta
 import pytest
 
 from src.backtest.simulator import TradeRecord
+from src.data.option_chain import OptionRight as DataOptionRight
 from src.llm.schemas import StrategyType
 from src.research.performance_breakdown import ResearchTradeObservation, TradeContext
+from src.strategies.bull_call_spread import evaluate_bull_call_spread
+from src.strategies.put_credit_spread import evaluate_put_credit_spread
+from src.validation.counterfactual import StrategyAlternativeRecord
 from src.validation.strategy_attribution import (
     answer_attribution_questions,
+    funnel_counts_by_strategy,
     per_strategy_performance,
 )
+
+from tests.unit.strategies.conftest import EXPIRATION as STRATEGY_EXPIRATION
+from tests.unit.strategies.conftest import contract, limits
+
+_STRATEGY_COMMON = dict(
+    ticker="XYZ", expiration=STRATEGY_EXPIRATION, spot=100.0, sigma=0.25, t=24 / 365, rate=0.04,
+    days_to_expiry=24, num_contracts=1, limits=limits(),
+)
+
+
+def _pcs_evaluation():
+    return evaluate_put_credit_spread(
+        short_put_contract=contract(95, DataOptionRight.PUT, 2.8, 3.0),
+        long_put_contract=contract(90, DataOptionRight.PUT, 1.4, 1.6), **_STRATEGY_COMMON,
+    )
+
+
+def _bcs_evaluation():
+    return evaluate_bull_call_spread(
+        long_call_contract=contract(95, DataOptionRight.CALL, 6.8, 7.0),
+        short_call_contract=contract(105, DataOptionRight.CALL, 2.3, 2.5), **_STRATEGY_COMMON,
+    )
 
 
 def _trade(pnl: float, *, strategy: StrategyType, capital_at_risk: float = 500.0, day_offset: int = 0, holding_days: int = 10, commission: float = 1.0, theoretical_pnl: float | None = None) -> TradeRecord:
@@ -213,3 +240,59 @@ class TestAnswerAttributionQuestions:
         report = answer_attribution_questions(per_strategy_performance(observations))
         assert "put_credit_spread" in report.summaries
         assert report.summaries["put_credit_spread"].net_pnl == pytest.approx(100.0)
+
+
+class TestFunnelCountsByStrategy:
+    """opportunities_considered / trades_proposed / trades_rejected /
+    trades_entered, sourced from src.validation.counterfactual
+    .StrategyAlternativeRecord -- the decision-time funnel, distinct
+    from per_strategy_performance's completed-trade stats."""
+
+    def test_opportunities_considered_counts_distinct_opportunities(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="approve", selection_or_rejection_reason="best score"),
+            StrategyAlternativeRecord(opportunity_id="opp-2", evaluation=_pcs_evaluation(), was_selected=False, risk_decision="approve", selection_or_rejection_reason="outranked"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert counts["put_credit_spread"].opportunities_considered == 2
+
+    def test_trades_proposed_counts_only_selected_records(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="approve", selection_or_rejection_reason="best score"),
+            StrategyAlternativeRecord(opportunity_id="opp-2", evaluation=_pcs_evaluation(), was_selected=False, risk_decision="approve", selection_or_rejection_reason="outranked by a better candidate"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert counts["put_credit_spread"].trades_proposed == 1
+
+    def test_trades_rejected_counts_non_approval_risk_decisions_regardless_of_selection(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=False, risk_decision="reject", selection_or_rejection_reason="exceeds concentration limit"),
+            StrategyAlternativeRecord(opportunity_id="opp-2", evaluation=_pcs_evaluation(), was_selected=False, risk_decision="approve", selection_or_rejection_reason="outranked"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert counts["put_credit_spread"].trades_rejected == 1
+
+    def test_trades_entered_requires_both_selected_and_approved(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="approve", selection_or_rejection_reason="best score"),
+            StrategyAlternativeRecord(opportunity_id="opp-2", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="resize", selection_or_rejection_reason="best score, resized"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert counts["put_credit_spread"].trades_entered == 2
+
+    def test_strategies_tracked_independently(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="approve", selection_or_rejection_reason="best score"),
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_bcs_evaluation(), was_selected=False, risk_decision="approve", selection_or_rejection_reason="outranked"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert set(counts) == {"put_credit_spread", "bull_call_spread"}
+        assert counts["put_credit_spread"].trades_proposed == 1
+        assert counts["bull_call_spread"].trades_proposed == 0
+
+    def test_resize_counts_as_a_risk_approval_not_a_rejection(self):
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=False, risk_decision="resize", selection_or_rejection_reason="approved with a smaller size"),
+        ]
+        counts = funnel_counts_by_strategy(records)
+        assert counts["put_credit_spread"].trades_rejected == 0

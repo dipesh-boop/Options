@@ -7,8 +7,10 @@ import pytest
 from src.quant.black_scholes import Leg, OptionRight, Side
 from src.quant.monte_carlo import Position
 from src.strategies.base import (
+    MANAGEMENT_CONDITION_TYPES,
     STRATEGY_FAMILIES,
     TRADE_PROPOSAL_ELIGIBLE,
+    ManagementConditionType,
     StrategyEvaluation,
     StrategyFamily,
     StrategyKind,
@@ -67,6 +69,46 @@ class TestNeverIntroducesExcludedStrategies:
             assert "unfunded" not in kind.value
 
 
+class TestManagementConditionTypes:
+    """The closed, Python-determined set of management-condition
+    categories -- "LLMs may interpret conditions, may NOT improvise
+    risk rules." Distinct from entry_rules/exit_rules/etc (free-text
+    prose, unchanged) -- this is the enum those rules are drawn from."""
+
+    def test_9_condition_types_defined(self):
+        assert len(list(ManagementConditionType)) == 9
+
+    def test_every_kind_has_a_mapping_with_the_universal_baseline(self):
+        baseline = {
+            ManagementConditionType.PROFIT_TARGET, ManagementConditionType.MAX_LOSS,
+            ManagementConditionType.DTE_EXIT, ManagementConditionType.THESIS_INVALIDATION,
+            ManagementConditionType.EXPIRATION_MANAGEMENT,
+        }
+        for kind in StrategyKind:
+            assert kind in MANAGEMENT_CONDITION_TYPES
+            assert baseline.issubset(set(MANAGEMENT_CONDITION_TYPES[kind]))
+
+    def test_pure_long_premium_strategies_carry_no_assignment_management(self):
+        # A long call/put/straddle/strangle has no short leg -- nothing
+        # for the holder to be assigned on.
+        for kind in (
+            StrategyKind.LONG_CALL, StrategyKind.LONG_PUT, StrategyKind.LONG_STRADDLE, StrategyKind.LONG_STRANGLE,
+        ):
+            assert ManagementConditionType.ASSIGNMENT_MANAGEMENT not in MANAGEMENT_CONDITION_TYPES[kind]
+
+    def test_short_leg_strategies_carry_assignment_management(self):
+        for kind in (
+            StrategyKind.CASH_SECURED_PUT, StrategyKind.COVERED_CALL, StrategyKind.PUT_CREDIT_SPREAD,
+            StrategyKind.CALL_CREDIT_SPREAD, StrategyKind.SHORT_IRON_CONDOR, StrategyKind.SHORT_IRON_BUTTERFLY,
+        ):
+            assert ManagementConditionType.ASSIGNMENT_MANAGEMENT in MANAGEMENT_CONDITION_TYPES[kind]
+
+    def test_no_type_is_invented_outside_the_enum(self):
+        for kind in StrategyKind:
+            for t in MANAGEMENT_CONDITION_TYPES[kind]:
+                assert isinstance(t, ManagementConditionType)
+
+
 class TestBuildStrategyEvaluation:
     def _bull_call_spread_position(self) -> Position:
         return Position(legs=[
@@ -95,6 +137,7 @@ class TestBuildStrategyEvaluation:
         assert ev.probability_metrics.probability_of_profit > 0
         assert ev.fidelity_compatible is True
         assert ev.fidelity_incompatibility_reason is None
+        assert ev.management_condition_types == MANAGEMENT_CONDITION_TYPES[StrategyKind.BULL_CALL_SPREAD]
 
     def test_payoff_at_uses_the_stored_position(self):
         ev = build_strategy_evaluation(

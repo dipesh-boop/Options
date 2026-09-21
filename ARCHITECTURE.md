@@ -661,3 +661,34 @@ is additive or a targeted bug fix over the §13 architecture above):
   CRASH), asserting only that a valid outcome exists and every
   candidate's own defined-risk bound holds against that scenario's
   simulated terminal prices — never which strategy wins.
+
+**Step 19A gap-check re-ask.** A follow-up restatement of Step 19A's
+own objective, closely overlapping what §13 above already delivers.
+Re-inspecting every named component (Quant/Risk Engines, Market Regime
+Agent, Portfolio Manager, Devil's Advocate, PaperBroker, Backtesting
+Engine, Fidelity constraints) against this restatement surfaced two
+genuine, previously-unbuilt pieces, both additive:
+
+- `ManagementConditionType` (`src.strategies.base`, 9 values —
+  `PROFIT_TARGET`/`MAX_LOSS`/`DTE_EXIT`/`THESIS_INVALIDATION`/
+  `DELTA_THRESHOLD`/`VOLATILITY_CHANGE`/`ROLL_EVALUATION`/
+  `ASSIGNMENT_MANAGEMENT`/`EXPIRATION_MANAGEMENT`) plus
+  `MANAGEMENT_CONDITION_TYPES`, a per-`StrategyKind` table auto-wired
+  into `build_strategy_evaluation` (no per-strategy module changes
+  needed, the same pattern `STRATEGY_FAMILIES` already established).
+  `StrategyEvaluation.entry_rules`/`exit_rules`/`adjustment_rules`/
+  `invalidation_rules` were free-text prose only — descriptive, but not
+  backed by a closed type. This enum is the actual mechanism behind
+  "LLMs may interpret conditions, they may NOT improvise risk rules":
+  the *categories* of management logic that apply to a given strategy
+  are now a closed, Python-determined set, not something free text
+  alone could be trusted to constrain.
+- `src.validation.strategy_attribution.funnel_counts_by_strategy` +
+  `StrategyFunnelCounts` (opportunities_considered/trades_proposed/
+  trades_rejected/trades_entered) and a new `avg_capital_deployed`
+  field on `StrategyPerformanceSummary` — the decision-time funnel this
+  step names explicitly, distinct from that module's existing
+  completed-trade statistics. Sourced from `src.validation
+  .counterfactual.StrategyAlternativeRecord` (already captured at
+  decision time for every serious candidate, selected or not) rather
+  than a second decision-tracking mechanism.

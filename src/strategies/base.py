@@ -145,6 +145,60 @@ STRATEGY_FAMILIES: dict[StrategyKind, tuple[StrategyFamily, ...]] = {
     ),
 }
 
+class ManagementConditionType(str, Enum):
+    """The closed set of position-management condition types this Step
+    19A re-ask names verbatim. The free-text `entry_rules`/`exit_rules`/
+    `adjustment_rules`/`invalidation_rules` tuples on `StrategyEvaluation`
+    remain human-readable prose (unchanged) — this enum is the actual
+    enforcement mechanism behind "LLMs may interpret conditions, they
+    may NOT improvise risk rules": which *categories* of management
+    logic apply to a given strategy is a closed, Python-determined set
+    (`MANAGEMENT_CONDITION_TYPES` below), never something an LLM can add
+    to or invent on its own."""
+
+    PROFIT_TARGET = "profit_target"
+    MAX_LOSS = "max_loss"
+    DTE_EXIT = "dte_exit"
+    THESIS_INVALIDATION = "thesis_invalidation"
+    DELTA_THRESHOLD = "delta_threshold"
+    VOLATILITY_CHANGE = "volatility_change"
+    ROLL_EVALUATION = "roll_evaluation"
+    ASSIGNMENT_MANAGEMENT = "assignment_management"
+    EXPIRATION_MANAGEMENT = "expiration_management"
+
+
+_MCT = ManagementConditionType
+# Every strategy gets the universal baseline (PROFIT_TARGET, MAX_LOSS,
+# DTE_EXIT, THESIS_INVALIDATION, EXPIRATION_MANAGEMENT); additional
+# types are added only where they actually apply -- a pure long-premium
+# structure with no short leg has no assignment risk to manage, and a
+# structure with no shares/short-option delta exposure worth actively
+# monitoring has no reason to carry DELTA_THRESHOLD.
+_BASELINE_MCT = (_MCT.PROFIT_TARGET, _MCT.MAX_LOSS, _MCT.DTE_EXIT, _MCT.THESIS_INVALIDATION, _MCT.EXPIRATION_MANAGEMENT)
+
+MANAGEMENT_CONDITION_TYPES: dict[StrategyKind, tuple[ManagementConditionType, ...]] = {
+    StrategyKind.CASH_SECURED_PUT: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.COVERED_CALL: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.PUT_CREDIT_SPREAD: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.CALL_CREDIT_SPREAD: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.BULL_CALL_SPREAD: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.BEAR_PUT_SPREAD: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
+    StrategyKind.PROTECTIVE_PUT: _BASELINE_MCT + (_MCT.VOLATILITY_CHANGE, _MCT.ROLL_EVALUATION),
+    StrategyKind.PROTECTIVE_COLLAR: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.VOLATILITY_CHANGE, _MCT.ROLL_EVALUATION),
+    StrategyKind.LONG_STRADDLE: _BASELINE_MCT + (_MCT.VOLATILITY_CHANGE, _MCT.DELTA_THRESHOLD),
+    StrategyKind.LONG_STRANGLE: _BASELINE_MCT + (_MCT.VOLATILITY_CHANGE, _MCT.DELTA_THRESHOLD),
+    StrategyKind.LONG_CALL: _BASELINE_MCT + (_MCT.VOLATILITY_CHANGE, _MCT.DELTA_THRESHOLD),
+    StrategyKind.LONG_PUT: _BASELINE_MCT + (_MCT.VOLATILITY_CHANGE, _MCT.DELTA_THRESHOLD),
+    StrategyKind.LONG_CALL_BUTTERFLY: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.DELTA_THRESHOLD, _MCT.VOLATILITY_CHANGE),
+    StrategyKind.SHORT_IRON_CONDOR: _BASELINE_MCT + (
+        _MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD, _MCT.VOLATILITY_CHANGE,
+    ),
+    StrategyKind.SHORT_IRON_BUTTERFLY: _BASELINE_MCT + (
+        _MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD, _MCT.VOLATILITY_CHANGE,
+    ),
+}
+
+
 MarketOutlook = Literal[
     "bullish", "moderately_bullish", "neutral", "moderately_bearish", "bearish", "protection",
 ]
@@ -209,6 +263,7 @@ class StrategyEvaluation:
     exit_rules: tuple[str, ...]
     adjustment_rules: tuple[str, ...]
     invalidation_rules: tuple[str, ...]
+    management_condition_types: tuple[ManagementConditionType, ...]  # auto-derived from MANAGEMENT_CONDITION_TYPES[kind], never caller-supplied
 
     fidelity_compatible: bool
     fidelity_incompatibility_reason: str | None
@@ -373,6 +428,7 @@ def build_strategy_evaluation(
         exit_rules=exit_rules,
         adjustment_rules=adjustment_rules,
         invalidation_rules=invalidation_rules,
+        management_condition_types=MANAGEMENT_CONDITION_TYPES[kind],
         fidelity_compatible=fidelity_compatible,
         fidelity_incompatibility_reason=fidelity_incompatibility_reason,
     )
