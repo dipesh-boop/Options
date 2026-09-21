@@ -3373,3 +3373,247 @@ real data; (3) the Tier2 leg-cap decision; (4) wiring
 `evaluate_hedge_effectiveness` into whatever eventually generates
 protective put/collar candidates, so hedge reports accumulate
 automatically rather than requiring a caller to invoke it by hand.
+
+## 2026-09-21 — Step 20A: Multi-Leg Strategy Integration
+
+**Instruction**: complete end-to-end order-eligibility for
+LONG_CALL_BUTTERFLY, SHORT_IRON_CONDOR, SHORT_IRON_BUTTERFLY — the 3
+strategies Step 19A deliberately left evaluation-only because
+`TradeProposal.legs` capped at 2. Explicitly framed as the
+separately-scoped hardening pass every prior step (19A, 14B, the 19A
+re-ask) flagged and deferred rather than rushed.
+
+**Mandatory pre-implementation audit (completed before any code
+change, per the instruction's own gate)**: grepped `src/` for every
+`max_length=2`/`max_length=4` leg-count field and every `breakeven:`
+singular field. Finding: most of the "trusted kernel" already supported
+4 legs at the Pydantic-field level before this step —
+`src.brokers.base.PlaceOrderRequest.legs`, `src.brokers.fidelity`'s
+`ApprovedOrder.legs`/`FidelityTradeTicket.legs`, `src.risk.portfolio_risk
+.PortfolioPositionLeg`-list, and `src.dashboard.schemas.leg_quotes`
+were already `max_length=4`. The confirmed blockers were narrower than
+the instruction's framing suggested: `src.llm.schemas.TradeProposal
+.legs` (`max_length=2`), the missing 3 `StrategyType` members, and
+several places assuming a flat 1:1 per-leg quantity ratio (which no
+prior strategy needed, since `LONG_CALL_BUTTERFLY`'s 1:-2:1 middle
+strike is the first non-uniform ratio this platform has had to
+represent). `src.strategies.base.StrategyKind`/`STRATEGY_FAMILIES`/
+`MANAGEMENT_CONDITION_TYPES` and the 3 evaluation-only strategy modules
+(`long_call_butterfly.py`, `iron_condor.py`, `iron_butterfly.py`) were
+already fully built and tested from Step 19A — only their
+`fidelity_compatible=False` flags needed flipping.
+
+**Architectural changes**:
+
+1. `src.llm.schemas`: `TradeProposal.legs` widened to `max_length=4`;
+   `StrategyType` gained the 3 members; `OptionLeg.quantity_ratio`
+   (additive, default 1) added; 3 new `elif` branches in
+   `_validate_legs_match_strategy` enforce each strategy's exact leg
+   count/strike ordering/side/ratio, fail-closed (missing wing, wrong
+   option type, wrong strike order, wrong quantities, mismatched
+   center strike, a long-iron-butterfly-shaped payload are all
+   rejected at the schema layer). A generic `else` branch now also
+   enforces `quantity_ratio == 1` on every leg of every pre-existing
+   strategy, so the new field can never silently misrepresent an old
+   structure.
+2. `src.quant.expected_value`: 3 new economics functions
+   (`long_call_butterfly_economics`, `short_iron_condor_economics`,
+   `short_iron_butterfly_economics`) build a `Position` and delegate
+   to the existing generic `payoff_profile` engine for exact max
+   profit/max loss/breakevens (never a new hand-derived formula), plus
+   a full Monte Carlo run for probability-of-profit/expected-value
+   (the profit zone sits *between* two breakevens for all 3, so the
+   existing `probability_above`/`probability_below` closed forms don't
+   apply the way they do for a single-sided structure).
+3. `src.risk.trade_risk`: `check_collateral`/`resolve_credit`/
+   `compute_trade_economics` gained dispatch branches for the 3
+   strategies via a new `_legs_sorted_by_strike` helper (sorting
+   `(strike, put-before-call)` deterministically recovers each leg's
+   structural role, since `_matching_by_right`'s single-match lookup
+   is ambiguous once a strategy has two same-right legs).
+   `compute_trade_greeks` now weights each leg by `quantity_ratio`
+   (was hardcoded `quantity=1` — a latent bug for any future
+   non-uniform strategy, now fixed generically).
+4. `src.risk.engine`: `_build_quant_position`/`_build_approved_order`
+   now multiply by `leg.quantity_ratio`; net_bid/net_ask are now
+   ratio-weighted (previously always ±1 per leg — would have
+   understated the butterfly's true net debit by treating a 1:-2:1
+   combo as 1:-1:1); `_STRATEGY_DISPLAY` gained the 3 names.
+5. `src.brokers.fidelity`: `ApprovedOrder`/`FidelityTradeTicket`
+   gained `breakeven_upper: float | None` (additive) — and in fixing
+   this, found and fixed a genuine **pre-existing gap**: the
+   pre-Step-20A long straddle/strangle's second breakeven was computed
+   by `StrategyEconomics` but silently dropped before ever reaching
+   `ApprovedOrder`/a human-readable Fidelity ticket. `render_ticket_text`
+   now prints "BREAKEVEN (LOWER)"/"BREAKEVEN (UPPER)" when both are
+   present. `src.llm.context.QuantitativeAnalysisContext` and
+   `src.dashboard.schemas.OpportunityView`/the dashboard frontend
+   received the same additive field and propagation fix, so no stage
+   of the pipeline silently discards the upper breakeven anymore.
+6. `src.brokers.paper` (PaperBroker): new `base_combo_quantity` helper
+   — the smallest per-leg `OrderLeg.quantity` across an order ("1
+   combo unit") — replaces every place that used to read
+   `order.legs[0].quantity` as a proxy for the order's overall size (a
+   latent bug: `TradeProposal.legs`/`ApprovedOrder.legs` carry no
+   guaranteed submission order, so "the first leg" was never a safe
+   proxy once a strategy could have a non-uniform ratio).
+   `compute_fill` now separately tracks per-share leg prices
+   (`raw_signs`, unweighted, used for actual cash flow/position
+   updates) from the combo's net per-unit price (`weighted_signs`,
+   scaled by `quantity_ratio`, used for limit-price/fillable-quantity
+   checks) — so a butterfly's net debit correctly reflects its middle
+   leg counting double without distorting any individual leg's own
+   per-share price. `_apply_fill` scales each leg's actual fill
+   quantity and commission by its own ratio (the middle leg now
+   correctly pays 2x commission, consistent with a standard
+   per-contract-per-leg schedule). `_required_collateral` gained
+   explicit shape detection for the butterfly (debit paid only, zero
+   extra collateral) and the two iron structures
+   (`max(put_wing_width, call_wing_width)`, standard margin treatment)
+   *before* the generic same-right pairing fallback, which cannot
+   recognize a 2x-ratio leg or two same-right short legs and would
+   otherwise have (a) charged the butterfly's short middle leg as if
+   naked (badly overstating risk) or (b) summed both iron-structure
+   wing widths instead of taking the wider one (also overstating risk,
+   though less dangerously than an under-estimate would).
+7. `src.backtest.engine`/`src.backtest.simulator`/`src.backtest.slippage`/
+   `src.backtest.execution`: `BacktestLeg` gained the matching
+   `quantity_ratio` field (default 1), threaded through `_to_order_leg`/
+   `flip_legs` so `compute_fill`'s ratio-aware pricing applies
+   identically to a backtested butterfly. `_estimate_capital_at_risk`
+   gained the same 3 collateral-shape branches as PaperBroker (mirrored
+   deliberately, not reimplemented independently, matching the existing
+   `_is_credit_pairing`-sharing discipline between the two modules).
+8. `src.strategies.regime_mapping`: found and fixed a genuine gap —
+   `SHORT_IRON_CONDOR`/`SHORT_IRON_BUTTERFLY` were already present
+   under `NEUTRAL_RANGE_BOUND`/`HIGH_IV_CONTRACTION_EXPECTED` since
+   Step 19A, but `LONG_CALL_BUTTERFLY` was never added to either view.
+   Added to both, with guidance text describing the pin/range thesis +
+   controlled-volatility + favorable-debit conditions under which it's
+   worth pricing.
+9. `config/brokers.yaml`: all 3 strategies added to every broker's
+   `allowed_strategies` — done **last**, after the full pipeline was
+   proven end-to-end by the new test files below, per this file's own
+   standing rule (never list a capability before it's backed up).
+10. Not touched, deliberately: `src.strategies.selector`/`comparison`/
+    `portfolio_fit`/`suitability` needed no changes (already generic
+    over `StrategyEvaluation` lists); `src.validation.strategy_attribution`
+    already iterates all 15 `StrategyKind` values (built that way in
+    Step 14B specifically so this day would need no further changes
+    there) — verified, not modified.
+
+**New documentation**: `CLAUDE.md` (did not exist — created, covering
+the platform's non-negotiable invariants and the Step 20A multi-leg
+architecture specifically, so a future session doesn't have to
+rediscover the `quantity_ratio`/`base_combo_quantity` reasoning from
+scratch), `README.md` (did not exist — created, beginner-friendly, all
+14 required topics), `.env.example` (did not exist — created, every
+env var documented, no real secrets), `scripts/start.sh` + `Makefile`
+(did not exist — created; `./scripts/start.sh` smoke-tested to
+actually boot the dashboard). `ARCHITECTURE.md` gained §14 (full
+technical writeup of every mechanism above) and an update to §13/§12's
+open question 6 (marked resolved, with the one remaining gap — no
+backtest candidate generator constructs a butterfly `EntrySignal` yet
+— stated explicitly rather than left implicit).
+`IMPLEMENTATION_PLAN.md` gained §11.
+
+**Deliberately out of scope, stated explicitly rather than silently
+skipped**: the backtest engine's `EntrySignal`/`run_backtest` already
+take fully-formed entries from an external caller (there is no
+internal per-strategy candidate generator anywhere in this codebase to
+extend for any of the 16 strategies, not just the 3 new ones) — Step
+20A made the pricing/execution math correct for a butterfly entry once
+one exists (`BacktestLeg.quantity_ratio`), but did not build a new
+candidate-generation call site, matching the existing, unresolved
+"live-chain candidate generation" gap already tracked in this file's
+open decisions since Step 19A.
+
+**Tests**: 50 new — `tests/unit/risk/test_multileg_strategies.py` (new
+file, 35: TradeProposal structural validation for all 3 strategies
+including every named malformed-structure rejection, collateral/
+resolve_credit/compute_trade_economics dispatch, and 4 full
+`evaluate_trade_proposal` end-to-end integration tests proving correct
+leg count, correct 1:-2:1 quantity ratio on the rendered Fidelity
+ticket, correct net credit/debit sign, both breakevens present, and
+that an unlisted broker capability still rejects), `tests/unit/brokers
+/test_paper_broker_multileg.py` (new file, 8: butterfly ratio-aware
+fill/position/collateral/commission, iron-condor 4-leg fill and
+wider-wing-only collateral, and direct `base_combo_quantity` unit
+tests), `tests/unit/backtest/test_engine.py` (+7,
+`TestEstimateCapitalAtRiskMultiLegShapes`, mirroring the existing
+Step 14B regression-test pattern for the 3 new shapes). 4 pre-existing
+tests updated (not weakened) to assert the intentionally reversed
+Tier1/Tier2 architectural decision:
+`tests/unit/strategies/test_base.py`'s `test_3_tier2_kinds_are_not
+_trade_proposal_eligible`/`test_strategy_type_for_returns_none_for_tier2`
+became `test_all_16_kinds_are_trade_proposal_eligible`/
+`test_strategy_type_for_returns_matching_type_for_former_tier2`, and
+`tests/unit/strategies/test_individual_strategies.py`'s 3
+`test_defined_risk_and_fidelity_incompatible` tests became
+`test_defined_risk_and_fidelity_compatible`, asserting
+`fidelity_compatible is True` where they'd asserted `False`. Also
+fixed a pre-existing test-fixture gap while writing these:
+`tests/unit/risk/conftest.py`'s `quantitative_analysis_from` helper
+never passed `breakeven_upper` through — invisible for every prior
+2-breakeven-capable strategy this fixture was exercised against, but
+would have produced a false `REJECT_QUANT_MISMATCH` for any 2-breakeven
+strategy run through it, caught immediately by the new end-to-end
+butterfly test.
+
+Full repo suite: **2125 passed, 4 skipped** (up from 2078 at the end of
+the previous pass; +50 new tests, -3 net from the 4-updated/1-merged
+Tier1/Tier2-split tests above nets against previously-counted tests,
+0 regressions, 0 weakened assertions, 0 deleted tests, 4 skips
+unchanged, 0 bypassed risk checks, 0 hardcoded expected answers).
+
+## Open decisions carried forward (updated a twelfth time)
+
+- [ ] **New from this step**: no backtest candidate generator
+      constructs a `LONG_CALL_BUTTERFLY`/`SHORT_IRON_CONDOR`/
+      `SHORT_IRON_BUTTERFLY` `EntrySignal` yet — `run_backtest` takes
+      fully-formed entries from its caller for all 16 strategies alike;
+      this was already true before Step 20A and remains true after it.
+      The pricing/execution math is now correct once such an entry
+      exists (verified by `TestEstimateCapitalAtRiskMultiLegShapes`
+      and the ratio-aware `compute_fill` path), but nothing yet
+      generates one automatically.
+- [ ] **New from this step**: no report renderer (daily/weekly/monthly
+      workflows, trade journal) has been hand-verified against a real
+      3-/4-leg trade record yet, since no live/paper trading of the 3
+      new strategies has actually happened — `strategy_attribution.py`
+      and the dashboard's `OpportunityView` are verified generic/
+      correct by direct unit test, but an end-to-end "a real
+      LONG_CALL_BUTTERFLY trade flows through morning-scan → paper fill
+      → weekly review → strategy attribution" walkthrough has not been
+      run, since the platform has no live daily driver yet (unchanged
+      from every prior step's open decisions).
+- [ ] Every open decision already carried forward from Step 19A/14B/the
+      19A re-ask/the reports pass remains open, unchanged by this step,
+      **except** open decision "(3) the Tier2 leg-cap decision" from
+      the immediately preceding entry, which this step resolves.
+
+## Next up
+
+The formal 90-day validation cohort has **not started** (per
+`src.validation.cohort.has_cohort_started`: no `ValidationStore`
+anywhere in this repository has recorded a single real trade, snapshot,
+rejected-trade outcome, or violation — no persisted database file
+exists at all). Per this step's own instruction and the cohort-
+transition logic already built in Step 19A (`src.validation.cohort
+.decide_cohort_transition`, unchanged by this step, still returns
+`START_FRESH_COHORT`), this means the future frozen validation cohort
+can start at Day 1 directly under the now-expanded 16-strategy library
+— there is no `PRE_EXPANSION_VALIDATION` cohort to preserve, because
+none has begun.
+
+Concrete gaps, largely unchanged in substance from the prior entry:
+(1) live-chain candidate generation (still the single largest concrete
+gap — nothing in this codebase yet fetches a live option chain and
+turns it into a scored opportunity automatically, for any of the 16
+strategies); (2) the 90-day daily driver that would actually run the
+platform day over day and populate real trade/validation/attribution
+records; (3) wiring `evaluate_hedge_effectiveness` into whatever
+eventually generates protective put/collar candidates; (4) persisting
+reports/validation data to disk across restarts (README.md's
+"Where reports/validation results are stored" sections describe this
+honestly as not yet built).

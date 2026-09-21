@@ -21,6 +21,7 @@ _LC, _LP = StrategyKind.LONG_CALL, StrategyKind.LONG_PUT
 _PP, _PCOL = StrategyKind.PROTECTIVE_PUT, StrategyKind.PROTECTIVE_COLLAR
 _STRD, _STRN = StrategyKind.LONG_STRADDLE, StrategyKind.LONG_STRANGLE
 _IC, _IB = StrategyKind.SHORT_IRON_CONDOR, StrategyKind.SHORT_IRON_BUTTERFLY
+_LCB = StrategyKind.LONG_CALL_BUTTERFLY
 
 
 class MarketView(str, Enum):
@@ -47,13 +48,24 @@ CANDIDATE_STRATEGIES_BY_VIEW: dict[MarketView, tuple[StrategyKind, ...]] = {
     MarketView.STRONGLY_BULLISH: (_BCS, _LC, _PCS),
     MarketView.MODERATELY_BEARISH: (_BPS, _LP, _CCS, _PP),
     MarketView.STRONGLY_BEARISH: (_LP, _BPS),
-    MarketView.NEUTRAL_RANGE_BOUND: (_IC, _IB, _CC),
+    # Step 20A: LONG_CALL_BUTTERFLY added here -- "may be considered
+    # when a moderately bullish-to-neutral thesis names a specific
+    # target price region, expected volatility is controlled (not
+    # expanding sharply), and the debit/reward ratio is favorable at
+    # the chosen strikes." Worth pricing here alongside the iron
+    # structures, since all three share the same "pin/range" thesis;
+    # which one (if any) actually gets selected is the Strategy
+    # Competition Engine's job, never decided by this table.
+    MarketView.NEUTRAL_RANGE_BOUND: (_IC, _IB, _CC, _LCB),
     MarketView.LARGE_MOVE_EXPECTED: (_STRD, _STRN),
     MarketView.PORTFOLIO_PROTECTION: (_PP, _PCOL),
     # "Evaluate... but ONLY when directional, tail and event risks are
     # acceptable" -- that acceptability check is the Devil's Advocate's
     # and Risk Engine's job downstream, never decided by this table.
-    MarketView.HIGH_IV_CONTRACTION_EXPECTED: (_IC, _IB, _PCS, _CCS),
+    # LONG_CALL_BUTTERFLY is worth pricing here too: IV contraction into
+    # the pin strike benefits a bought butterfly's debit the same way it
+    # benefits the iron structures' credit.
+    MarketView.HIGH_IV_CONTRACTION_EXPECTED: (_IC, _IB, _PCS, _CCS, _LCB),
     # "Long Straddle, Long Strangle, Long Call, Long Put, appropriate
     # debit spreads" per Step 14B -- deliberately broader than
     # LARGE_MOVE_EXPECTED above, since low-IV expansion setups are

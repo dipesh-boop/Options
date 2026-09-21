@@ -52,7 +52,7 @@ def _to_order_leg(leg: BacktestLeg, expiration) -> OrderLeg:
         strike=leg.strike,
         expiration=expiration,
         action=OrderAction.SELL if leg.side == "sell" else OrderAction.BUY,
-        quantity=1,
+        quantity=leg.quantity_ratio,
     )
 
 

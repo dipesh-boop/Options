@@ -36,7 +36,13 @@ def flip_legs(legs: list[BacktestLeg]) -> list[BacktestLeg]:
     """A closing order trades the opposite side of each leg — selling
     back what was bought, buying back what was sold — with the same
     strikes/rights."""
-    return [BacktestLeg(right=leg.right, strike=leg.strike, side=("buy" if leg.side == "sell" else "sell")) for leg in legs]
+    return [
+        BacktestLeg(
+            right=leg.right, strike=leg.strike, side=("buy" if leg.side == "sell" else "sell"),
+            quantity_ratio=leg.quantity_ratio,
+        )
+        for leg in legs
+    ]
 
 
 def execute_entry(

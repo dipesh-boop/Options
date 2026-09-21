@@ -196,6 +196,7 @@ def quantitative_analysis_from(proposal: TradeProposal, contracts, portfolio, li
         max_profit=econ.max_profit,
         max_loss=econ.max_loss,
         breakeven=econ.breakeven,
+        breakeven_upper=econ.breakeven_upper,
         capital_required=econ.capital_required,
         return_on_capital=econ.return_on_capital,
         annualized_roc=econ.annualized_roc,

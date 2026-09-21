@@ -113,6 +113,15 @@ class BacktestLeg:
     right: OptionRight
     strike: float
     side: BacktestSide
+    # Step 20A: this leg's contract count relative to the position's
+    # base combo quantity (`src.brokers.paper.base_combo_quantity`) --
+    # a flat 1 for every leg of every strategy before Step 20A
+    # (unchanged), 2 for LONG_CALL_BUTTERFLY's middle (short) leg. Fed
+    # straight through to `compute_fill` via `_to_order_leg`'s
+    # `OrderLeg.quantity`, which already prices/fills per-combo-unit
+    # generically from each leg's own quantity -- no separate backtest
+    # ratio math needed.
+    quantity_ratio: int = 1
 
 
 @dataclass(frozen=True)

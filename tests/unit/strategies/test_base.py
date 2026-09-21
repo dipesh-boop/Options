@@ -37,24 +37,26 @@ class TestStrategyKindCompleteness:
             assert kind in STRATEGY_FAMILIES
             assert len(STRATEGY_FAMILIES[kind]) >= 1
 
-    def test_9_tier1_kinds_are_trade_proposal_eligible(self):
+    def test_all_16_kinds_are_trade_proposal_eligible(self):
+        """Step 20A reverses the Step 19A Tier1/Tier2 split:
+        `TradeProposal.legs` now caps at 4, and `StrategyType` gained
+        the 3 multi-leg members, so every `StrategyKind` value is now
+        representable as a real `TradeProposal`."""
         eligible = {k.value for k in TRADE_PROPOSAL_ELIGIBLE}
         for name in (
             "cash_secured_put", "covered_call", "put_credit_spread", "call_credit_spread", "bull_call_spread",
             "bear_put_spread", "protective_put", "protective_collar", "long_straddle", "long_strangle",
-            "long_call", "long_put",
+            "long_call", "long_put", "long_call_butterfly", "short_iron_condor", "short_iron_butterfly",
         ):
             assert name in eligible
+        assert len(eligible) == 15
 
-    def test_3_tier2_kinds_are_not_trade_proposal_eligible(self):
-        eligible = {k.value for k in TRADE_PROPOSAL_ELIGIBLE}
-        for name in ("long_call_butterfly", "short_iron_condor", "short_iron_butterfly"):
-            assert name not in eligible
+    def test_strategy_type_for_returns_matching_type_for_former_tier2(self):
+        from src.llm.schemas import StrategyType
 
-    def test_strategy_type_for_returns_none_for_tier2(self):
-        assert strategy_type_for(StrategyKind.SHORT_IRON_CONDOR) is None
-        assert strategy_type_for(StrategyKind.LONG_CALL_BUTTERFLY) is None
-        assert strategy_type_for(StrategyKind.SHORT_IRON_BUTTERFLY) is None
+        assert strategy_type_for(StrategyKind.SHORT_IRON_CONDOR) == StrategyType.SHORT_IRON_CONDOR
+        assert strategy_type_for(StrategyKind.LONG_CALL_BUTTERFLY) == StrategyType.LONG_CALL_BUTTERFLY
+        assert strategy_type_for(StrategyKind.SHORT_IRON_BUTTERFLY) == StrategyType.SHORT_IRON_BUTTERFLY
 
     def test_strategy_type_for_returns_matching_type_for_tier1(self):
         from src.llm.schemas import StrategyType

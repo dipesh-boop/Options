@@ -152,7 +152,7 @@ class TestLongStrangle:
 
 
 class TestLongCallButterflyTier2:
-    def test_defined_risk_and_fidelity_incompatible(self):
+    def test_defined_risk_and_fidelity_compatible(self):
         ev = evaluate_long_call_butterfly(
             lower_contract=contract(95, DataOptionRight.CALL, 6.4, 6.6), middle_contract=contract(100, DataOptionRight.CALL, 3.4, 3.6),
             upper_contract=contract(105, DataOptionRight.CALL, 1.4, 1.6), limits=limits(), **_COMMON,
@@ -160,8 +160,8 @@ class TestLongCallButterflyTier2:
         assert ev.strategy_kind == StrategyKind.LONG_CALL_BUTTERFLY
         assert math.isfinite(ev.maximum_profit)
         assert math.isfinite(ev.maximum_loss)
-        assert ev.fidelity_compatible is False
-        assert "2-leg cap" in ev.fidelity_incompatibility_reason
+        assert ev.fidelity_compatible is True
+        assert ev.fidelity_incompatibility_reason is None
 
     def test_unequal_wings_rejected(self):
         with pytest.raises(ValueError):
@@ -172,7 +172,7 @@ class TestLongCallButterflyTier2:
 
 
 class TestShortIronCondorTier2:
-    def test_defined_risk_and_fidelity_incompatible(self):
+    def test_defined_risk_and_fidelity_compatible(self):
         ev = evaluate_short_iron_condor(
             long_put_contract=contract(90, DataOptionRight.PUT, 0.5, 0.7), short_put_contract=contract(95, DataOptionRight.PUT, 1.1, 1.3),
             short_call_contract=contract(105, DataOptionRight.CALL, 1.0, 1.2), long_call_contract=contract(110, DataOptionRight.CALL, 0.4, 0.6),
@@ -182,7 +182,8 @@ class TestShortIronCondorTier2:
         assert math.isfinite(ev.maximum_profit)
         assert math.isfinite(ev.maximum_loss)
         assert ev.net_credit_or_debit > 0  # short iron condor is a net-credit structure
-        assert ev.fidelity_compatible is False
+        assert ev.fidelity_compatible is True
+        assert ev.fidelity_incompatibility_reason is None
 
     def test_wrong_strike_order_rejected(self):
         with pytest.raises(ValueError):
@@ -194,7 +195,7 @@ class TestShortIronCondorTier2:
 
 
 class TestShortIronButterflyTier2:
-    def test_defined_risk_and_fidelity_incompatible(self):
+    def test_defined_risk_and_fidelity_compatible(self):
         ev = evaluate_short_iron_butterfly(
             put_wing_contract=contract(90, DataOptionRight.PUT, 0.7, 0.9), center_put_contract=contract(100, DataOptionRight.PUT, 3.1, 3.3),
             center_call_contract=contract(100, DataOptionRight.CALL, 3.3, 3.5), call_wing_contract=contract(110, DataOptionRight.CALL, 0.8, 1.0),
@@ -203,7 +204,8 @@ class TestShortIronButterflyTier2:
         assert ev.strategy_kind == StrategyKind.SHORT_IRON_BUTTERFLY
         assert math.isfinite(ev.maximum_profit)
         assert math.isfinite(ev.maximum_loss)
-        assert ev.fidelity_compatible is False
+        assert ev.fidelity_compatible is True
+        assert ev.fidelity_incompatibility_reason is None
 
     def test_mismatched_center_strikes_rejected(self):
         with pytest.raises(ValueError):

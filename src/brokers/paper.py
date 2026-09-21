@@ -150,17 +150,44 @@ class FillQuote:
     is_credit: bool
 
 
+def base_combo_quantity(legs: list[OrderLeg]) -> int:
+    """Step 20A: the smallest per-leg `quantity` across an order's legs
+    -- "1 unit of the combo." For every strategy before Step 20A every
+    leg shares the same quantity (a flat 1:1 ratio), so this is just
+    that shared quantity, unchanged. For LONG_CALL_BUTTERFLY's 1:-2:1
+    structure, the two wing legs carry this value and the middle leg
+    carries 2x it -- `compute_fill`/`_apply_fill`/order-quantity
+    tracking all anchor on this figure rather than an arbitrary leg's
+    (e.g. `legs[0]`'s) quantity, since `TradeProposal.legs` carries no
+    guaranteed submission order."""
+    return min((leg.quantity for leg in legs), default=1)
+
+
 def compute_fill(legs: list[OrderLeg], leg_quotes: list[LegQuote], config: PaperBrokerConfig) -> FillQuote:
     """Pure function: given an order's legs and their current quotes,
     computes the simulated net fill price under `config.fill_model` —
     the deterministic core `PaperBroker.place_order`/`attempt_fill` call.
+    `net_price`/`leg_prices` are always PER COMBO UNIT (`base_combo_quantity`),
+    matching every quantity this module fills/tracks in the same unit.
     """
     if len(legs) != len(leg_quotes):
         raise ValueError("legs and leg_quotes must be the same length")
 
-    signs = [1 if leg.action == OrderAction.SELL else -1 for leg in legs]
+    # Step 20A: `raw_signs` (+-1) prices each leg PER SHARE, exactly as
+    # before Step 20A -- `leg_prices` below feeds `_apply_fill`'s
+    # per-leg cash flow, which already multiplies by that leg's own
+    # absolute `quantity`, so a per-share price must never itself be
+    # scaled by the leg's ratio (that would double-count it). `weighted_signs`
+    # is used only to aggregate the NET, PER-COMBO-UNIT price
+    # (net_base/net_mid/net_price) -- for every pre-Step-20A strategy
+    # every leg has the same quantity, so weight=1 and this is
+    # unchanged; for LONG_CALL_BUTTERFLY's 1:-2:1 structure the middle
+    # leg correctly counts double toward the combo's net debit.
+    base_qty = base_combo_quantity(legs)
+    raw_signs = [1 if leg.action == OrderAction.SELL else -1 for leg in legs]
+    weighted_signs = [sign * (leg.quantity / base_qty) for sign, leg in zip(raw_signs, legs)]
     base_prices = [_leg_price_for_model(q, config.fill_model) for q in leg_quotes]
-    net_base = sum(s * p for s, p in zip(signs, base_prices))
+    net_base = sum(s * p for s, p in zip(weighted_signs, base_prices))
 
     min_vol = min((q.volume for q in leg_quotes), default=0)
     min_oi = min((q.open_interest for q in leg_quotes), default=0)
@@ -185,7 +212,7 @@ def compute_fill(legs: list[OrderLeg], leg_quotes: list[LegQuote], config: Paper
     # entirely (a wide spread with the same mid as a tight one would
     # otherwise simulate identically).
     mids = [_leg_mid(q) for q in leg_quotes]
-    net_mid = sum(s * m for s, m in zip(signs, mids))
+    net_mid = sum(s * m for s, m in zip(weighted_signs, mids))
     avg_leg_spread = sum(q.ask - q.bid for q in leg_quotes) / len(leg_quotes)
     slippage_from_bps = max(abs(net_mid), 0.01) * (config.slippage_bps / 10_000.0)
     slippage_from_spread = avg_leg_spread * config.spread_capture_fraction
@@ -197,8 +224,12 @@ def compute_fill(legs: list[OrderLeg], leg_quotes: list[LegQuote], config: Paper
         slippage_amount *= config.thin_liquidity_penalty_multiplier
 
     net_price = net_mid - slippage_amount
+    # The combo's total slippage, spread per share across legs, each at
+    # its own per-share (unweighted) sign -- consistent with
+    # `leg_prices` being a per-share price list, not a per-combo-unit
+    # one.
     adjustment_per_leg = -slippage_amount / len(legs)
-    leg_prices = [m + s * adjustment_per_leg for m, s in zip(mids, signs)]
+    leg_prices = [m + s * adjustment_per_leg for m, s in zip(mids, raw_signs)]
 
     return FillQuote(
         net_base_price=net_base,
@@ -411,7 +442,8 @@ class PaperBroker(Broker):
             return rejected
 
         fill_quote = compute_fill(order.legs, leg_quotes, self._config)
-        remaining = order.legs[0].quantity - order.filled_quantity
+        base_qty = base_combo_quantity(order.legs)
+        remaining = base_qty - order.filled_quantity
         if not price_satisfies_limit(fill_quote, order.limit_price):
             return order  # still resting, no fill this attempt
 
@@ -425,9 +457,12 @@ class PaperBroker(Broker):
         # once `fill_quote`/`qty` exist, computed by the exact same
         # per-leg formula `_apply_fill` below is about to apply, so the
         # preflight check and the real cash movement can never diverge.
+        # `qty` is a count of combo units; each leg's own fill quantity
+        # scales by its ratio to `base_qty` (see `base_combo_quantity`).
         prospective_cash_delta = sum(
-            -(qty if leg.action == OrderAction.BUY else -qty) * leg_price * (_CONTRACT_MULTIPLIER if leg.right is not None else 1)
-            - self._config.commission_per_contract * qty
+            -(1 if leg.action == OrderAction.BUY else -1) * (qty * (leg.quantity // base_qty))
+            * leg_price * (_CONTRACT_MULTIPLIER if leg.right is not None else 1)
+            - self._config.commission_per_contract * (qty * (leg.quantity // base_qty))
             for leg, leg_price in zip(order.legs, fill_quote.leg_prices)
         )
         if self._cash + prospective_cash_delta < 0:
@@ -441,7 +476,7 @@ class PaperBroker(Broker):
 
         self._apply_fill(order, fill_quote, qty)
         new_filled = order.filled_quantity + qty
-        new_status = OrderStatus.FILLED if new_filled >= order.legs[0].quantity else OrderStatus.PARTIALLY_FILLED
+        new_status = OrderStatus.FILLED if new_filled >= base_qty else OrderStatus.PARTIALLY_FILLED
         prior_notional = (order.avg_fill_price or 0.0) * order.filled_quantity
         new_avg = (prior_notional + fill_quote.net_price * qty) / new_filled
         updated = order.model_copy(update={"status": new_status, "filled_quantity": new_filled, "avg_fill_price": new_avg})
@@ -548,6 +583,42 @@ class PaperBroker(Broker):
         short_legs = [leg for leg in legs if leg.action == OrderAction.SELL and leg.right is not None and leg.strike is not None]
         long_legs = [leg for leg in legs if leg.action == OrderAction.BUY and leg.right is not None and leg.strike is not None]
 
+        # Step 20A: LONG_CALL_BUTTERFLY -- one short leg (the middle
+        # strike, at 2x quantity) plus two long wings of equal quantity,
+        # same right, short strike strictly between the two long
+        # strikes. Fully defined-risk debit structure: no additional
+        # collateral beyond the debit itself (checked separately, once a
+        # fill price is known, by attempt_fill's own preflight cash
+        # check) -- the generic pairing loop below can't recognize a 2x
+        # short quantity against two separate 1x longs and would
+        # otherwise fall through to the naked-short branch, wildly
+        # overstating this structure's actual risk.
+        if (
+            len(short_legs) == 1 and len(long_legs) == 2
+            and long_legs[0].right == long_legs[1].right == short_legs[0].right
+            and long_legs[0].quantity == long_legs[1].quantity
+            and short_legs[0].quantity == 2 * long_legs[0].quantity
+            and min(long_legs[0].strike, long_legs[1].strike) < short_legs[0].strike < max(long_legs[0].strike, long_legs[1].strike)
+        ):
+            return 0.0
+
+        # Step 20A: SHORT_IRON_CONDOR / SHORT_IRON_BUTTERFLY -- two
+        # short legs (put + call) each paired with a long wing of the
+        # same right, equal quantities throughout. Standard defined-risk
+        # margin is the WIDER of the two wing widths, never their sum --
+        # only one side can ever finish in-the-money at expiration.
+        if len(short_legs) == 2 and len(long_legs) == 2:
+            short_put = next((leg for leg in short_legs if leg.right == OptionRight.PUT), None)
+            short_call = next((leg for leg in short_legs if leg.right == OptionRight.CALL), None)
+            long_put = next((leg for leg in long_legs if leg.right == OptionRight.PUT), None)
+            long_call = next((leg for leg in long_legs if leg.right == OptionRight.CALL), None)
+            quantities = {leg.quantity for leg in (*short_legs, *long_legs)}
+            if None not in (short_put, short_call, long_put, long_call) and len(quantities) == 1:
+                put_width = short_put.strike - long_put.strike
+                call_width = long_call.strike - short_call.strike
+                if put_width > 0 and call_width > 0:
+                    return max(put_width, call_width) * _CONTRACT_MULTIPLIER * short_put.quantity
+
         total = 0.0
         paired_long_ids = set()
         for short in short_legs:
@@ -587,11 +658,20 @@ class PaperBroker(Broker):
         return option_symbol
 
     def _apply_fill(self, order: Order, fill_quote: FillQuote, qty: int) -> None:
+        # Step 20A: `qty` is a count of COMBO units (see
+        # `base_combo_quantity`) -- each leg's own actual fill quantity
+        # is `qty` scaled by that leg's ratio to the combo's base
+        # quantity. A flat 1 for every leg of every strategy before
+        # Step 20A (unchanged); 2x for LONG_CALL_BUTTERFLY's middle
+        # leg, so its position and cash flow are never understated
+        # relative to its two 1x wings.
+        base_qty = base_combo_quantity(order.legs)
         for leg, leg_price in zip(order.legs, fill_quote.leg_prices):
+            leg_qty = qty * (leg.quantity // base_qty)
             multiplier = _CONTRACT_MULTIPLIER if leg.right is not None else 1
-            signed_qty = qty if leg.action == OrderAction.BUY else -qty
+            signed_qty = leg_qty if leg.action == OrderAction.BUY else -leg_qty
             cash_flow = -signed_qty * leg_price * multiplier
-            commission = self._config.commission_per_contract * qty
+            commission = self._config.commission_per_contract * leg_qty
             self._cash += cash_flow - commission
             self._update_position(leg.symbol, signed_qty, leg_price, multiplier)
 
@@ -600,7 +680,7 @@ class PaperBroker(Broker):
                 client_order_id=order.client_order_id,
                 symbol=leg.symbol,
                 action=leg.action,
-                quantity=qty,
+                quantity=leg_qty,
                 price=leg_price if leg_price > 0 else 0.0001,
                 commission=commission,
                 timestamp=self._now,

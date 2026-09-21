@@ -106,6 +106,9 @@ _STRATEGY_DISPLAY = {
     StrategyType.LONG_STRANGLE: "LONG STRANGLE",
     StrategyType.LONG_CALL: "LONG CALL",
     StrategyType.LONG_PUT: "LONG PUT",
+    StrategyType.LONG_CALL_BUTTERFLY: "LONG CALL BUTTERFLY",
+    StrategyType.SHORT_IRON_CONDOR: "SHORT IRON CONDOR",
+    StrategyType.SHORT_IRON_BUTTERFLY: "SHORT IRON BUTTERFLY",
 }
 
 
@@ -411,7 +414,7 @@ def _build_quant_position(proposal: TradeProposal, contracts, num_contracts: int
             strike=leg.strike,
             side=QuantSide.BUY if leg.side == LegSide.BUY else QuantSide.SELL,
             entry_price=contract.mid,
-            quantity=num_contracts,
+            quantity=num_contracts * leg.quantity_ratio,
         )
         for leg, contract in zip(proposal.legs, contracts)
     ]
@@ -439,7 +442,7 @@ def _build_approved_order(
             put_call=_DATA_RIGHT[leg.right.value],
             strike=leg.strike,
             expiration=proposal.expiration,
-            contracts=num_contracts,
+            contracts=num_contracts * leg.quantity_ratio,
         )
         for leg in proposal.legs
     ]
@@ -453,8 +456,18 @@ def _build_approved_order(
     # (verified: short.bid - long.ask / short.ask - long.bid) and
     # correctly extends to a net-debit result (a negative "credit") for
     # every Tier-1 debit strategy and to two-long-leg strategies.
-    net_bid = sum(c.bid if leg.side == LegSide.SELL else -c.ask for leg, c in zip(proposal.legs, contracts))
-    net_ask = sum(c.ask if leg.side == LegSide.SELL else -c.bid for leg, c in zip(proposal.legs, contracts))
+    #
+    # Step 20A: each leg is also weighted by its own `quantity_ratio` --
+    # a flat 1 for every leg of every strategy before Step 20A (so this
+    # is a no-op for all of them), but 2 for LONG_CALL_BUTTERFLY's
+    # middle (short) leg, correctly pricing its 1:-2:1 net debit instead
+    # of understating it as a 1:-1:1 combo would.
+    net_bid = sum(
+        (c.bid if leg.side == LegSide.SELL else -c.ask) * leg.quantity_ratio for leg, c in zip(proposal.legs, contracts)
+    )
+    net_ask = sum(
+        (c.ask if leg.side == LegSide.SELL else -c.bid) * leg.quantity_ratio for leg, c in zip(proposal.legs, contracts)
+    )
     net_mid = (net_bid + net_ask) / 2.0
     is_debit = net_mid < 0
     limit_price = abs(net_mid)
@@ -492,6 +505,7 @@ def _build_approved_order(
         max_profit=economics.max_profit,
         max_loss=economics.max_loss,
         breakeven=economics.breakeven,
+        breakeven_upper=economics.breakeven_upper,
         capital_at_risk=max(economics.capital_required, economics.max_loss),
         return_on_capital=economics.return_on_capital,
         profit_target=profit_target_price if profit_target_price > 0 else 0.01,

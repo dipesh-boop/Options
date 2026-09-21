@@ -68,6 +68,11 @@ class QuantitativeAnalysisContext:
     annualized_roc: float
     probability_of_profit: float
     expected_value: float
+    # Step 20A addition: additive, defaults to None. Mirrors
+    # `StrategyEconomics.breakeven_upper` -- set for two-sided
+    # structures (long straddle/strangle, and the 3 multi-leg strategies
+    # added in Step 20A, each of which has exactly two breakevens).
+    breakeven_upper: float | None = None
 
 
 @dataclass(frozen=True)

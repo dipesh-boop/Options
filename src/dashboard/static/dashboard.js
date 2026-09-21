@@ -179,7 +179,8 @@ function renderOpportunityCard(o) {
       <div><div class="k">${esc(o.price_guard_label)}</div><div class="v">${fmtMoney(o.minimum_acceptable_price)}</div></div>
       <div><div class="k">Max Profit</div><div class="v">${fmtMoney(o.max_profit)}</div></div>
       <div><div class="k">Max Loss</div><div class="v">${fmtMoney(o.max_loss)}</div></div>
-      <div><div class="k">Breakeven</div><div class="v">${fmtMoney(o.breakeven)}</div></div>
+      <div><div class="k">${o.breakeven_upper != null ? "Breakeven (Lower)" : "Breakeven"}</div><div class="v">${fmtMoney(o.breakeven)}</div></div>
+      ${o.breakeven_upper != null ? `<div><div class="k">Breakeven (Upper)</div><div class="v">${fmtMoney(o.breakeven_upper)}</div></div>` : ""}
       <div><div class="k">Capital Required</div><div class="v">${fmtMoney(o.capital_required)}</div></div>
       <div><div class="k">ROC</div><div class="v">${fmtPct(o.return_on_capital)}</div></div>
       <div><div class="k">Probability</div><div class="v">${probBlock}</div></div>

@@ -229,6 +229,14 @@ class ApprovedOrder(StrictModel):
     max_profit: float = Field(gt=0)
     max_loss: float = Field(gt=0)
     breakeven: float = Field(gt=0)
+    # Step 20A: the upper of two breakevens, additive (defaults to None
+    # so every pre-existing single-breakeven strategy is unaffected).
+    # Already needed by the pre-Step-20A long straddle/strangle (never
+    # wired through until now -- see progress.md) and by all 3 new
+    # multi-leg structures, every one of which has exactly two
+    # breakevens (lower/upper). Never silently discarded: when present,
+    # `render_ticket_text` prints both.
+    breakeven_upper: float | None = Field(default=None, gt=0)
     capital_at_risk: float = Field(gt=0)
     return_on_capital: float
     profit_target: float = Field(gt=0)
@@ -289,6 +297,7 @@ class FidelityTradeTicket(TimestampedModel):
     max_profit: float = Field(gt=0)
     max_loss: float = Field(gt=0)
     breakeven: float = Field(gt=0)
+    breakeven_upper: float | None = Field(default=None, gt=0)
     capital_at_risk: float = Field(gt=0)
     return_on_capital: float
     profit_target: float = Field(gt=0)
@@ -405,6 +414,7 @@ class FidelityManualProvider:
             max_profit=approved.max_profit,
             max_loss=approved.max_loss,
             breakeven=approved.breakeven,
+            breakeven_upper=approved.breakeven_upper,
             capital_at_risk=approved.capital_at_risk,
             return_on_capital=approved.return_on_capital,
             profit_target=approved.profit_target,
@@ -503,9 +513,17 @@ def render_ticket_text(ticket: FidelityTradeTicket) -> str:
         "MAX LOSS:",
         f"${ticket.max_loss:.0f}",
         "",
-        "BREAKEVEN:",
+        "BREAKEVEN:" if ticket.breakeven_upper is None else "BREAKEVEN (LOWER):",
         f"${ticket.breakeven:.2f}",
         "",
+    ]
+    if ticket.breakeven_upper is not None:
+        lines += [
+            "BREAKEVEN (UPPER):",
+            f"${ticket.breakeven_upper:.2f}",
+            "",
+        ]
+    lines += [
         "CAPITAL AT RISK:",
         f"${ticket.capital_at_risk:.0f}",
         "",

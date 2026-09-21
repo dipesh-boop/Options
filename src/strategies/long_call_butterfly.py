@@ -1,9 +1,8 @@
-"""Long call butterfly — new in Step 19A, evaluation-only (Tier 2, see
-`src.strategies.base.StrategyKind`'s own docstring: 3 legs exceed
-`TradeProposal`'s current 2-leg cap, so this can be compared but not
-yet turned into a real order). A neutral, defined-risk, low-cost
-structure: long the lower strike, short 2x the middle strike, long the
-upper strike, all calls, equally spaced."""
+"""Long call butterfly — added in Step 19A as evaluation-only, wired to
+a real order in Step 20A (`TradeProposal.legs` now caps at 4;
+`StrategyType.LONG_CALL_BUTTERFLY` exists). A neutral, defined-risk,
+low-cost structure: long the lower strike, short 2x the middle strike,
+long the upper strike, all calls, equally spaced."""
 from __future__ import annotations
 
 from datetime import date
@@ -72,9 +71,6 @@ def evaluate_long_call_butterfly(
         entry_rules=DEFAULT_ENTRY_RULES, exit_rules=DEFAULT_EXIT_RULES,
         adjustment_rules=DEFAULT_ADJUSTMENT_RULES, invalidation_rules=DEFAULT_INVALIDATION_RULES,
         event_risk=event_risk,
-        fidelity_compatible=False,
-        fidelity_incompatibility_reason=(
-            "3-leg structure exceeds TradeProposal's current 2-leg cap; not yet wired to the Risk Engine or a "
-            "FidelityTradeTicket -- see src.strategies.base.StrategyKind"
-        ),
+        fidelity_compatible=True,
+        fidelity_incompatibility_reason=None,
     )

@@ -45,22 +45,17 @@ class _StrictModel(BaseModel):
 
 
 class StrategyType(str, Enum):
-    """Step 19A note: every member here is required to fit within this
-    module's own `TradeProposal.legs` cap (`Field(min_length=1,
-    max_length=2)`, unchanged) — i.e. every strategy that can reach a
-    real order in this codebase is representable with at most two
-    option legs (a single leg, a covered/protected single leg against
-    existing shares, or a two-leg vertical/straddle/strangle/collar).
-    Three named strategies from the Step 19A expansion request
-    (LONG_CALL_BUTTERFLY, SHORT_IRON_CONDOR, SHORT_IRON_BUTTERFLY)
-    genuinely need 3-4 legs and are deliberately NOT added here — they
-    are evaluated and compared as `src.strategies.base.StrategyKind`
-    values (a separate, broader enum) but cannot yet become a
-    `TradeProposal`/`ApprovedOrder`/`FidelityTradeTicket`. Raising this
-    cap would touch the Risk Engine's/PaperBroker's/Fidelity provider's
-    leg-count assumptions throughout the "trusted kernel," which is a
-    larger, separately-scoped hardening pass — flagged in progress.md
-    rather than rushed here."""
+    """Step 20A note: this enum previously capped every member at what
+    fits in a <=2-leg `TradeProposal`. That cap is now 4 legs
+    (`TradeProposal.legs`, `Field(min_length=1, max_length=4)`), and the
+    3 strategies that were deliberately excluded in Step 19A —
+    LONG_CALL_BUTTERFLY (3 legs), SHORT_IRON_CONDOR (4 legs),
+    SHORT_IRON_BUTTERFLY (4 legs) — are added below. Each has a matching
+    `elif` branch in `TradeProposal._validate_legs_match_strategy`
+    enforcing its exact leg count/ratio/strike ordering, and a matching
+    `src.strategies.base.StrategyKind` member of the same string value
+    (unchanged by this step — `strategy_type_for`/`TRADE_PROPOSAL_ELIGIBLE`
+    now include all 3 automatically, no logic change there)."""
 
     CASH_SECURED_PUT = "cash_secured_put"
     COVERED_CALL = "covered_call"
@@ -74,6 +69,9 @@ class StrategyType(str, Enum):
     LONG_STRANGLE = "long_strangle"
     LONG_CALL = "long_call"
     LONG_PUT = "long_put"
+    LONG_CALL_BUTTERFLY = "long_call_butterfly"
+    SHORT_IRON_CONDOR = "short_iron_condor"
+    SHORT_IRON_BUTTERFLY = "short_iron_butterfly"
 
 
 class TradeAction(str, Enum):
@@ -126,11 +124,21 @@ class OptionLeg(_StrictModel):
     """One leg of a proposed structure. All legs of a TradeProposal share
     its top-level `expiration` — every initial strategy (CSP, covered
     call, put credit spread) is single-expiration, so a per-leg expiry
-    field would only add a redundant place for the two to disagree."""
+    field would only add a redundant place for the two to disagree.
+
+    `quantity_ratio` (Step 20A) is this leg's contract count relative to
+    `TradeProposal.contracts_requested` — the actual number of contracts
+    for this leg is `contracts_requested * quantity_ratio`. Every
+    strategy before Step 20A used a flat 1:1 ratio on every leg (the
+    default), so this field is purely additive and does not change any
+    existing proposal's meaning. Only LONG_CALL_BUTTERFLY's middle
+    (short) leg uses `quantity_ratio=2`, encoding its 1:-2:1 structure —
+    every other leg of every strategy, old or new, stays at 1."""
 
     right: OptionRight
     strike: float = Field(gt=0)
     side: LegSide
+    quantity_ratio: int = Field(default=1, ge=1, le=2)
 
 
 class TradeProposal(_StrictModel):
@@ -150,7 +158,7 @@ class TradeProposal(_StrictModel):
     strategy: StrategyType
     market_regime: MarketRegimeLabel
     expiration: date
-    legs: list[OptionLeg] = Field(min_length=1, max_length=2)
+    legs: list[OptionLeg] = Field(min_length=1, max_length=4)
     direction: TradeDirection
     contracts_requested: int = Field(ge=1, le=100_000)
     target_entry: float = Field(gt=0)
@@ -339,6 +347,66 @@ class TradeProposal(_StrictModel):
         elif self.strategy == StrategyType.LONG_PUT:
             if len(self.legs) != 1 or self.legs[0].right != OptionRight.PUT or self.legs[0].side != LegSide.BUY:
                 raise ValueError("long_put requires exactly one long put leg")
+
+        elif self.strategy == StrategyType.LONG_CALL_BUTTERFLY:
+            if len(self.legs) != 3:
+                raise ValueError("long_call_butterfly requires exactly three legs")
+            if any(leg.right != OptionRight.CALL for leg in self.legs):
+                raise ValueError("long_call_butterfly legs must all be calls")
+            by_strike = sorted(self.legs, key=lambda leg: leg.strike)
+            lower, middle, upper = by_strike
+            if not (lower.strike < middle.strike < upper.strike):
+                raise ValueError("long_call_butterfly requires three distinct, strictly increasing strikes")
+            if abs((middle.strike - lower.strike) - (upper.strike - middle.strike)) > 1e-6:
+                raise ValueError("long_call_butterfly requires equally spaced wings (symmetric butterfly)")
+            if lower.side != LegSide.BUY or upper.side != LegSide.BUY or middle.side != LegSide.SELL:
+                raise ValueError("long_call_butterfly requires long wings and a short middle strike")
+            if lower.quantity_ratio != 1 or upper.quantity_ratio != 1 or middle.quantity_ratio != 2:
+                raise ValueError("long_call_butterfly requires a 1:-2:1 quantity ratio (middle leg quantity_ratio=2)")
+
+        elif self.strategy == StrategyType.SHORT_IRON_CONDOR:
+            if len(self.legs) != 4:
+                raise ValueError("short_iron_condor requires exactly four legs")
+            if any(leg.quantity_ratio != 1 for leg in self.legs):
+                raise ValueError("short_iron_condor requires a 1:1:1:1 quantity ratio on every leg")
+            puts = sorted((leg for leg in self.legs if leg.right == OptionRight.PUT), key=lambda leg: leg.strike)
+            calls = sorted((leg for leg in self.legs if leg.right == OptionRight.CALL), key=lambda leg: leg.strike)
+            if len(puts) != 2 or len(calls) != 2:
+                raise ValueError("short_iron_condor requires exactly two put legs and two call legs")
+            long_put, short_put = puts
+            short_call, long_call = calls
+            if long_put.side != LegSide.BUY or short_put.side != LegSide.SELL:
+                raise ValueError("short_iron_condor requires a long put wing and a short put closer to the money")
+            if short_call.side != LegSide.SELL or long_call.side != LegSide.BUY:
+                raise ValueError("short_iron_condor requires a short call closer to the money and a long call wing")
+            if not (long_put.strike < short_put.strike < short_call.strike < long_call.strike):
+                raise ValueError(
+                    "short_iron_condor requires strictly increasing strikes: long put < short put < short call < long call"
+                )
+
+        elif self.strategy == StrategyType.SHORT_IRON_BUTTERFLY:
+            if len(self.legs) != 4:
+                raise ValueError("short_iron_butterfly requires exactly four legs")
+            if any(leg.quantity_ratio != 1 for leg in self.legs):
+                raise ValueError("short_iron_butterfly requires a 1:1:1:1 quantity ratio on every leg")
+            puts = sorted((leg for leg in self.legs if leg.right == OptionRight.PUT), key=lambda leg: leg.strike)
+            calls = sorted((leg for leg in self.legs if leg.right == OptionRight.CALL), key=lambda leg: leg.strike)
+            if len(puts) != 2 or len(calls) != 2:
+                raise ValueError("short_iron_butterfly requires exactly two put legs and two call legs")
+            long_put, short_put = puts
+            short_call, long_call = calls
+            if long_put.side != LegSide.BUY or short_put.side != LegSide.SELL:
+                raise ValueError("short_iron_butterfly requires a long put wing and a short center put")
+            if short_call.side != LegSide.SELL or long_call.side != LegSide.BUY:
+                raise ValueError("short_iron_butterfly requires a short center call and a long call wing")
+            if short_put.strike != short_call.strike:
+                raise ValueError("short_iron_butterfly requires the short put and short call to share the same center strike")
+            if not (long_put.strike < short_put.strike < long_call.strike):
+                raise ValueError("short_iron_butterfly requires long_put strike < center strike < long_call strike")
+
+        else:
+            if any(leg.quantity_ratio != 1 for leg in self.legs):
+                raise ValueError(f"{self.strategy.value} requires quantity_ratio=1 on every leg")
 
         return self
 

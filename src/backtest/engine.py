@@ -68,6 +68,7 @@ from src.backtest.simulator import (
 )
 from src.backtest.slippage import NoFillError, mark_to_market
 from src.brokers.paper import PaperBrokerConfig, _is_credit_pairing
+from src.data.option_chain import OptionRight
 from src.data.historical import HistoricalBar
 
 _CONTRACT_MULTIPLIER = 100
@@ -128,10 +129,46 @@ def _estimate_capital_at_risk(
             return underlying_cost_basis * _CONTRACT_MULTIPLIER * contracts + debit_paid
         return debit_paid
 
-    # Not one of this platform's supported 2-leg shapes (e.g. a Tier2
-    # iron condor/butterfly backtest, per ARCHITECTURE.md §13) — fall
-    # back to the sum of short strikes as a conservative (never an
-    # under-estimate for a credit strategy) stand-in.
+    # Step 20A: LONG_CALL_BUTTERFLY -- one short leg (the middle strike,
+    # at 2x quantity) plus two long wings of equal quantity, same right,
+    # short strike strictly between the two long strikes. A fully
+    # defined-risk debit structure: max loss is already the debit paid,
+    # exactly like the debit-vertical branch above -- no additional
+    # collateral (the sum-of-short-strikes fallback below would
+    # otherwise wildly overstate risk on the short middle leg alone).
+    if (
+        len(shorts) == 1 and len(longs) == 2
+        and longs[0].right == longs[1].right == shorts[0].right
+        and longs[0].quantity_ratio == longs[1].quantity_ratio
+        and shorts[0].quantity_ratio == 2 * longs[0].quantity_ratio
+        and min(longs[0].strike, longs[1].strike) < shorts[0].strike < max(longs[0].strike, longs[1].strike)
+    ):
+        return debit_paid
+
+    # Step 20A: SHORT_IRON_CONDOR / SHORT_IRON_BUTTERFLY -- two short
+    # legs (put + call) each paired with a long wing of the same right,
+    # equal quantities throughout. Standard defined-risk margin is the
+    # WIDER of the two wing widths, never their sum -- only one side can
+    # ever finish in-the-money at expiration, so the narrower side's
+    # width never adds to the wider side's own worst case. (The
+    # sum-of-short-strikes fallback below would badly overstate this,
+    # and a naive sum-of-both-widths would still overstate it by the
+    # narrower width.)
+    if len(shorts) == 2 and len(longs) == 2:
+        short_put = next((leg for leg in shorts if leg.right == OptionRight.PUT), None)
+        short_call = next((leg for leg in shorts if leg.right == OptionRight.CALL), None)
+        long_put = next((leg for leg in longs if leg.right == OptionRight.PUT), None)
+        long_call = next((leg for leg in longs if leg.right == OptionRight.CALL), None)
+        quantities = {leg.quantity_ratio for leg in (*shorts, *longs)}
+        if short_put is not None and short_call is not None and long_put is not None and long_call is not None and len(quantities) == 1:
+            put_width = short_put.strike - long_put.strike
+            call_width = long_call.strike - short_call.strike
+            if put_width > 0 and call_width > 0:
+                return max(put_width, call_width) * _CONTRACT_MULTIPLIER * contracts
+
+    # Not one of this platform's supported shapes above -- fall back to
+    # the sum of short strikes as a conservative (never an under-estimate
+    # for a credit strategy) stand-in.
     return sum(leg.strike for leg in shorts) * _CONTRACT_MULTIPLIER * contracts
 
 

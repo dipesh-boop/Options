@@ -198,6 +198,7 @@ def _context_from_quant(qa: QuantitativeAnalysis) -> QuantitativeAnalysisContext
         max_profit=qa.max_profit,
         max_loss=qa.max_loss,
         breakeven=qa.breakeven,
+        breakeven_upper=qa.breakeven_upper,
         capital_required=qa.capital_required,
         return_on_capital=qa.return_on_capital,
         annualized_roc=qa.annualized_roc,

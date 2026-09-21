@@ -503,3 +503,20 @@ directly from `src.brokers.paper` rather than re-deriving the same
 credit-vs-debit rule a second time, the same "import the existing
 answer, don't reimplement it" discipline `src.backtest.slippage`
 already established for `src.brokers.paper.compute_fill`.
+
+## 11. Deviation from §1: Step 20A multi-leg trusted-kernel extension
+
+Not a new package. Step 20A widened `src.llm.schemas.TradeProposal
+.legs` from a 2-leg to a 4-leg cap, added the 3 remaining
+`StrategyType` members (`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`,
+`SHORT_IRON_BUTTERFLY`), and added a per-leg `quantity_ratio` field
+(additive, default 1) to represent the butterfly's 1:-2:1 structure —
+the first non-uniform leg ratio this platform has had to support.
+`src.risk.trade_risk`/`src.risk.engine` gained per-strategy dispatch
+branches for the 3 new strategies (reusing the existing generic
+`payoff_profile` engine rather than new hand-derived formulas);
+`src.brokers.paper` gained `base_combo_quantity` and ratio-aware
+fill/collateral logic; `src.backtest.engine`/`src.backtest.simulator`
+gained matching collateral-shape detection and a `BacktestLeg
+.quantity_ratio` field. See `ARCHITECTURE.md` §14 for the full writeup
+and `progress.md` for the test/commit record.

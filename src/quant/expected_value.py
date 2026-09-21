@@ -25,7 +25,7 @@ import math
 from dataclasses import dataclass
 
 from src.quant.black_scholes import Leg, OptionRight, Side
-from src.quant.monte_carlo import Position, monte_carlo_pop_and_ev
+from src.quant.monte_carlo import Position, monte_carlo_pop_and_ev, payoff_profile
 from src.quant.probability import probability_above, probability_below, probability_of_profit
 
 # Fixed seed/path-count for the Monte Carlo expected-value cross-check
@@ -462,6 +462,128 @@ def long_straddle_economics(
         capital_required=capital_required, return_on_capital=roc,
         annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
         probability_of_profit=pop, expected_value=mc.expected_value,
+    )
+
+
+# ---------------------------------------- Step 20A: 3/4-leg structures --
+#
+# Unlike every strategy above (whose profit zone is bounded by a single
+# breakeven, on one side or between two symmetric tails), a long call
+# butterfly / short iron condor / short iron butterfly's profit zone
+# sits *between* its two breakevens, with a payoff shape that has more
+# than one kink -- the "probability of profit above/below one
+# breakeven" closed forms above don't apply. Rather than hand-derive a
+# new probability formula for each of these 3 shapes, these functions
+# use the generic, exact `payoff_profile` engine (max profit/max loss/
+# breakevens, from the same piecewise-linear analysis every
+# `src.strategies.*` module already relies on) plus the full simulated
+# Monte Carlo payoff distribution for probability_of_profit/expected_value
+# (which integrates the real payoff curve regardless of its shape) --
+# the same "generic payoff engine reduces dependence on hand-written
+# formulas" approach Step 20A calls for, and the same pattern
+# `protective_put_economics`/`long_call_economics` already use for an
+# unbounded-upside shape above.
+
+
+def long_call_butterfly_economics(
+    spot: float, lower_strike: float, middle_strike: float, upper_strike: float,
+    lower_premium: float, middle_premium: float, upper_premium: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    """Buy 1x lower call, sell 2x middle call, buy 1x upper call, all
+    same expiration, equally spaced. Defined risk (the net debit) and
+    defined reward (wing width minus debit) on both sides."""
+    if not (lower_strike < middle_strike < upper_strike):
+        raise ValueError("long_call_butterfly requires lower_strike < middle_strike < upper_strike")
+    position = Position(legs=[
+        Leg(right=OptionRight.CALL, strike=lower_strike, side=Side.BUY, entry_price=lower_premium, quantity=contracts),
+        Leg(right=OptionRight.CALL, strike=middle_strike, side=Side.SELL, entry_price=middle_premium, quantity=2 * contracts),
+        Leg(right=OptionRight.CALL, strike=upper_strike, side=Side.BUY, entry_price=upper_premium, quantity=contracts),
+    ])
+    profile = payoff_profile(position)
+    debit = lower_premium - 2 * middle_premium + upper_premium
+    capital_required = max(debit, 0.0) * 100 * contracts
+    breakevens = profile.breakeven_points
+    breakeven = breakevens[0] if breakevens else lower_strike
+    breakeven_upper = breakevens[1] if len(breakevens) > 1 else None
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else _return_on_capital(profile.max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=profile.max_profit, max_loss=profile.max_loss, breakeven=breakeven, breakeven_upper=breakeven_upper,
+        capital_required=capital_required, return_on_capital=roc,
+        annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=mc.probability_of_profit, expected_value=mc.expected_value,
+    )
+
+
+def short_iron_condor_economics(
+    spot: float, long_put_strike: float, short_put_strike: float, short_call_strike: float, long_call_strike: float,
+    long_put_premium: float, short_put_premium: float, short_call_premium: float, long_call_premium: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    """Buy lower put, sell higher put, sell lower call, sell higher... —
+    buy long_put < sell short_put < sell short_call < buy long_call,
+    same expiration, 1:-1:-1:1. Defined-risk margin is the wider of the
+    two wing widths minus the net credit received (only one side can
+    ever be in-the-money at expiration, so the wider wing never adds to
+    the narrower one's own worst case)."""
+    if not (long_put_strike < short_put_strike < short_call_strike < long_call_strike):
+        raise ValueError("short_iron_condor requires long_put < short_put < short_call < long_call strikes")
+    position = Position(legs=[
+        Leg(right=OptionRight.PUT, strike=long_put_strike, side=Side.BUY, entry_price=long_put_premium, quantity=contracts),
+        Leg(right=OptionRight.PUT, strike=short_put_strike, side=Side.SELL, entry_price=short_put_premium, quantity=contracts),
+        Leg(right=OptionRight.CALL, strike=short_call_strike, side=Side.SELL, entry_price=short_call_premium, quantity=contracts),
+        Leg(right=OptionRight.CALL, strike=long_call_strike, side=Side.BUY, entry_price=long_call_premium, quantity=contracts),
+    ])
+    profile = payoff_profile(position)
+    put_width = short_put_strike - long_put_strike
+    call_width = long_call_strike - short_call_strike
+    credit = (short_put_premium - long_put_premium) + (short_call_premium - long_call_premium)
+    capital_required = max(max(put_width, call_width) - credit, 0.0) * 100 * contracts
+    breakevens = profile.breakeven_points
+    breakeven = breakevens[0] if breakevens else short_put_strike
+    breakeven_upper = breakevens[1] if len(breakevens) > 1 else None
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else _return_on_capital(profile.max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=profile.max_profit, max_loss=profile.max_loss, breakeven=breakeven, breakeven_upper=breakeven_upper,
+        capital_required=capital_required, return_on_capital=roc,
+        annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=mc.probability_of_profit, expected_value=mc.expected_value,
+    )
+
+
+def short_iron_butterfly_economics(
+    spot: float, put_wing_strike: float, center_strike: float, call_wing_strike: float,
+    put_wing_premium: float, center_put_premium: float, center_call_premium: float, call_wing_premium: float,
+    t: float, rate: float, sigma: float, days_to_expiry: int, contracts: int = 1,
+) -> StrategyEconomics:
+    """Buy put wing, sell center put + sell center call (same strike),
+    buy call wing, same expiration, 1:-1:-1:1. Explicitly the SHORT
+    variant -- a net credit collected at entry, never a net debit."""
+    if not (put_wing_strike < center_strike < call_wing_strike):
+        raise ValueError("short_iron_butterfly requires put_wing_strike < center_strike < call_wing_strike")
+    position = Position(legs=[
+        Leg(right=OptionRight.PUT, strike=put_wing_strike, side=Side.BUY, entry_price=put_wing_premium, quantity=contracts),
+        Leg(right=OptionRight.PUT, strike=center_strike, side=Side.SELL, entry_price=center_put_premium, quantity=contracts),
+        Leg(right=OptionRight.CALL, strike=center_strike, side=Side.SELL, entry_price=center_call_premium, quantity=contracts),
+        Leg(right=OptionRight.CALL, strike=call_wing_strike, side=Side.BUY, entry_price=call_wing_premium, quantity=contracts),
+    ])
+    profile = payoff_profile(position)
+    put_width = center_strike - put_wing_strike
+    call_width = call_wing_strike - center_strike
+    credit = (center_put_premium - put_wing_premium) + (center_call_premium - call_wing_premium)
+    capital_required = max(max(put_width, call_width) - credit, 0.0) * 100 * contracts
+    breakevens = profile.breakeven_points
+    breakeven = breakevens[0] if breakevens else center_strike
+    breakeven_upper = breakevens[1] if len(breakevens) > 1 else None
+    mc = monte_carlo_pop_and_ev(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    roc = 0.0 if capital_required <= 0 else _return_on_capital(profile.max_profit, capital_required)
+    return StrategyEconomics(
+        max_profit=profile.max_profit, max_loss=profile.max_loss, breakeven=breakeven, breakeven_upper=breakeven_upper,
+        capital_required=capital_required, return_on_capital=roc,
+        annualized_roc=_annualize(roc, days_to_expiry) if days_to_expiry > 0 else roc,
+        probability_of_profit=mc.probability_of_profit, expected_value=mc.expected_value,
     )
 
 

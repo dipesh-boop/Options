@@ -1,6 +1,6 @@
-"""Short iron condor — new in Step 19A, evaluation-only (Tier 2, see
-`src.strategies.base.StrategyKind`'s own docstring: 4 legs exceed
-`TradeProposal`'s current 2-leg cap). A defined-risk, neutral,
+"""Short iron condor — added in Step 19A as evaluation-only, wired to a
+real order in Step 20A (`TradeProposal.legs` now caps at 4;
+`StrategyType.SHORT_IRON_CONDOR` exists). A defined-risk, neutral,
 volatility-contraction income structure: a put credit spread and a call
 credit spread on the same underlying and expiration, sold together."""
 from __future__ import annotations
@@ -73,9 +73,6 @@ def evaluate_short_iron_condor(
         entry_rules=DEFAULT_ENTRY_RULES, exit_rules=DEFAULT_EXIT_RULES,
         adjustment_rules=DEFAULT_ADJUSTMENT_RULES, invalidation_rules=DEFAULT_INVALIDATION_RULES,
         event_risk=event_risk,
-        fidelity_compatible=False,
-        fidelity_incompatibility_reason=(
-            "4-leg structure exceeds TradeProposal's current 2-leg cap; not yet wired to the Risk Engine or a "
-            "FidelityTradeTicket -- see src.strategies.base.StrategyKind"
-        ),
+        fidelity_compatible=True,
+        fidelity_incompatibility_reason=None,
     )

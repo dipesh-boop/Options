@@ -14,11 +14,21 @@
 # the Tier-1 expansion — every one of them fits src.llm.schemas
 # .TradeProposal's existing <=2-leg cap and is fully wired through
 # Python Quant / Python Risk Engine / PaperBroker / FidelityManualProvider,
-# same as the original 3. LONG_CALL_BUTTERFLY / SHORT_IRON_CONDOR /
-# SHORT_IRON_BUTTERFLY are deliberately absent from every list below —
-# they are not yet representable as a TradeProposal at all (3-4 legs),
-# so listing them here would be a capability this file can't actually
-# back up; see src.llm.schemas.StrategyType's own docstring.
+# same as the original 3.
+#
+# Step 20A note: LONG_CALL_BUTTERFLY / SHORT_IRON_CONDOR /
+# SHORT_IRON_BUTTERFLY were deliberately absent from every list below
+# through Step 19A/14B/the 19A re-ask, since they were not yet
+# representable as a TradeProposal at all (3-4 legs). Step 20A raised
+# TradeProposal.legs to a 4-leg cap, added the matching StrategyType
+# members, and wired all 3 strategies through structure validation,
+# Python Quant (a per-leg quantity_ratio for LONG_CALL_BUTTERFLY's
+# 1:-2:1 structure), Python Risk Engine, PaperBroker (ratio-aware
+# fills/collateral), and FidelityManualProvider end-to-end — proven by
+# tests/unit/risk/test_multileg_strategies.py and
+# tests/unit/brokers/test_paper_broker_multileg.py before being added
+# here, per this file's own standing rule (never list a capability
+# before it's actually backed up).
 
 fidelity:
   execution_mode: MANUAL
@@ -37,6 +47,9 @@ fidelity:
     - LONG_STRANGLE
     - LONG_CALL
     - LONG_PUT
+    - LONG_CALL_BUTTERFLY
+    - SHORT_IRON_CONDOR
+    - SHORT_IRON_BUTTERFLY
 
 ibkr_paper:
   execution_mode: AUTOMATED
@@ -55,6 +68,9 @@ ibkr_paper:
     - LONG_STRANGLE
     - LONG_CALL
     - LONG_PUT
+    - LONG_CALL_BUTTERFLY
+    - SHORT_IRON_CONDOR
+    - SHORT_IRON_BUTTERFLY
 
 # src.brokers.paper.PaperBroker — the internal simulator (Step 12), not
 # a connection to any real brokerage, paper or otherwise.
@@ -75,3 +91,6 @@ internal_paper:
     - LONG_STRANGLE
     - LONG_CALL
     - LONG_PUT
+    - LONG_CALL_BUTTERFLY
+    - SHORT_IRON_CONDOR
+    - SHORT_IRON_BUTTERFLY

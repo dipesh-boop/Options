@@ -368,6 +368,67 @@ class TestEstimateCapitalAtRiskAllStrategyShapes:
         legs = [self._leg(OptionRight.PUT, 90, "buy")]
         assert _estimate_capital_at_risk(legs, 1, 100.0, entry_credit_total=-150.0) == pytest.approx(10150.0)
 
+
+class TestEstimateCapitalAtRiskMultiLegShapes:
+    """Step 20A regression tests: the same fallback bug class Step 14B
+    fixed for 2-leg shapes above also applied to the 3 new 3-/4-leg
+    strategies -- the generic sum-of-short-strikes fallback wildly
+    overstated a butterfly's naked-looking middle leg and either summed
+    or naked-priced an iron structure's two wings instead of using the
+    standard max(wing_width) margin treatment."""
+
+    def _leg(self, right: OptionRight, strike: float, side: str, quantity_ratio: int = 1) -> BacktestLeg:
+        return BacktestLeg(right=right, strike=strike, side=side, quantity_ratio=quantity_ratio)
+
+    def test_long_call_butterfly_uses_only_the_debit_paid(self):
+        legs = [
+            self._leg(OptionRight.CALL, 95, "buy"),
+            self._leg(OptionRight.CALL, 100, "sell", quantity_ratio=2),
+            self._leg(OptionRight.CALL, 105, "buy"),
+        ]
+        # A net debit of $100 for the whole 1:-2:1 combo -- never the
+        # middle leg's own $100 strike x 100 x contracts (which the old
+        # fallback would have charged as if it were a naked short call).
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=-100.0) == pytest.approx(100.0)
+
+    def test_short_iron_condor_uses_the_wider_wing_never_the_sum(self):
+        legs = [
+            self._leg(OptionRight.PUT, 90, "buy"),
+            self._leg(OptionRight.PUT, 95, "sell"),
+            self._leg(OptionRight.CALL, 105, "sell"),
+            self._leg(OptionRight.CALL, 110, "buy"),
+        ]
+        # put_width = 5, call_width = 5 -> 500, never 1000 (the sum) and
+        # never a naked-short full-strike reservation.
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=180.0) == pytest.approx(500.0)
+
+    def test_short_iron_condor_uses_the_wider_of_two_unequal_wings(self):
+        legs = [
+            self._leg(OptionRight.PUT, 85, "buy"),
+            self._leg(OptionRight.PUT, 95, "sell"),  # put_width = 10
+            self._leg(OptionRight.CALL, 105, "sell"),
+            self._leg(OptionRight.CALL, 110, "buy"),  # call_width = 5
+        ]
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=180.0) == pytest.approx(1000.0)
+
+    def test_short_iron_butterfly_uses_the_wider_wing_never_the_sum(self):
+        legs = [
+            self._leg(OptionRight.PUT, 90, "buy"),
+            self._leg(OptionRight.PUT, 100, "sell"),
+            self._leg(OptionRight.CALL, 100, "sell"),
+            self._leg(OptionRight.CALL, 112, "buy"),
+        ]
+        # put_width = 10, call_width = 12 -> max = 1200, never 2200 (sum).
+        assert _estimate_capital_at_risk(legs, 1, 0.0, entry_credit_total=350.0) == pytest.approx(1200.0)
+
+    def test_multi_leg_shapes_scale_with_contracts(self):
+        legs = [
+            self._leg(OptionRight.CALL, 95, "buy"),
+            self._leg(OptionRight.CALL, 100, "sell", quantity_ratio=2),
+            self._leg(OptionRight.CALL, 105, "buy"),
+        ]
+        assert _estimate_capital_at_risk(legs, 3, 0.0, entry_credit_total=-300.0) == pytest.approx(300.0)
+
     def test_protective_collar_uses_cost_basis_not_the_short_calls_strike(self):
         legs = [self._leg(OptionRight.CALL, 110, "sell"), self._leg(OptionRight.PUT, 90, "buy")]
         assert _estimate_capital_at_risk(legs, 1, 100.0, entry_credit_total=20.0) == pytest.approx(10000.0)

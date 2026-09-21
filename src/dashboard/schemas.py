@@ -73,6 +73,7 @@ class OpportunityView(BaseModel):
     max_profit: float
     max_loss: float
     breakeven: float
+    breakeven_upper: float | None = None
     capital_required: float
     return_on_capital: float
     probability_metrics: ProbabilityMetricsView | None
@@ -233,6 +234,7 @@ def build_opportunity_view(record: OpportunityRecord, now: datetime) -> Opportun
         max_profit=ticket.max_profit,
         max_loss=ticket.max_loss,
         breakeven=ticket.breakeven,
+        breakeven_upper=ticket.breakeven_upper,
         capital_required=ticket.capital_at_risk,
         return_on_capital=ticket.return_on_capital,
         probability_metrics=(

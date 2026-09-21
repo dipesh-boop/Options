@@ -1,6 +1,6 @@
-"""Short iron butterfly — new in Step 19A, evaluation-only (Tier 2, see
-`src.strategies.base.StrategyKind`'s own docstring: 4 legs exceed
-`TradeProposal`'s current 2-leg cap). A defined-risk, neutral,
+"""Short iron butterfly — added in Step 19A as evaluation-only, wired to
+a real order in Step 20A (`TradeProposal.legs` now caps at 4;
+`StrategyType.SHORT_IRON_BUTTERFLY` exists). A defined-risk, neutral,
 volatility-contraction income structure: a short straddle at the center
 strike, wrapped with a long put and a long call at the wings for
 defined risk. Explicitly the SHORT variant -- this module never
@@ -80,9 +80,6 @@ def evaluate_short_iron_butterfly(
         entry_rules=DEFAULT_ENTRY_RULES, exit_rules=DEFAULT_EXIT_RULES,
         adjustment_rules=DEFAULT_ADJUSTMENT_RULES, invalidation_rules=DEFAULT_INVALIDATION_RULES,
         event_risk=event_risk,
-        fidelity_compatible=False,
-        fidelity_incompatibility_reason=(
-            "4-leg structure exceeds TradeProposal's current 2-leg cap; not yet wired to the Risk Engine or a "
-            "FidelityTradeTicket -- see src.strategies.base.StrategyKind"
-        ),
+        fidelity_compatible=True,
+        fidelity_incompatibility_reason=None,
     )

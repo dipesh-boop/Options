@@ -451,14 +451,19 @@ invent facts:
    for the Portfolio Manager; which tier each of Market Agent, Strategy
    Analyst, and Adversarial Reviewer should run on (cost vs. quality) is
    a config decision to be tuned empirically, not fixed here.
-6. **New from Step 19A**: `TradeProposal`'s 1-2 leg cap — and, by
-   extension, `src.risk.engine`/`src.risk.trade_risk`/
-   `src.brokers.fidelity`'s leg-count assumptions — has not been widened
-   to accommodate the 3 Tier2 strategies (`LONG_CALL_BUTTERFLY`,
-   `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`). They are fully
-   evaluable and comparable via `src.strategies` today but cannot become
-   a real order. Whether/when to extend the trusted kernel to 3-4 legs
-   is a separately-scoped hardening decision, not made here (§13).
+6. **Resolved by Step 20A** (§14): `TradeProposal`'s leg cap was widened
+   from 2 to 4, and `src.risk.engine`/`src.risk.trade_risk`/
+   `src.brokers.fidelity`'s leg-count assumptions were extended
+   end-to-end, so `LONG_CALL_BUTTERFLY`/`SHORT_IRON_CONDOR`/
+   `SHORT_IRON_BUTTERFLY` are now order-eligible like the other 12.
+   Left open by Step 20A: the backtest engine's `BacktestLeg
+   .quantity_ratio` field (added so `compute_fill`'s existing ratio-
+   aware pricing applies to a backtested butterfly) has no candidate-
+   generation call site actually constructing a `LONG_CALL_BUTTERFLY`
+   `EntrySignal` yet — `run_backtest` takes fully-formed entries from
+   its caller (there is no internal per-strategy candidate generator to
+   extend), so this is a "someone must supply the entries" gap, not a
+   pricing-correctness one.
 
 ## 13. Strategy Competition Engine (Step 19A)
 
@@ -490,22 +495,16 @@ dollar/probability/Greek figure it emits comes from `src.quant`
 rule from §2, now also enforced strategy-by-strategy rather than only
 proposal-by-proposal.
 
-**Tier1 (order-eligible) vs. Tier2 (evaluation-only) split.** 12
-strategies fit `TradeProposal`'s existing 1-2 leg cap and are wired all
-the way through the trusted kernel — Python Quant (`src.quant
-.expected_value`), Python Risk Engine (`src.risk.trade_risk`,
-`src.risk.engine`), and the Fidelity ticket renderer
-(`src.brokers.fidelity`) — exactly like the original 3. The remaining 3
-(`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`)
-need 3-4 legs, which `TradeProposal` does not support today; they can
-be generated, priced, and compared by `src.strategies` for research and
-counterfactual purposes, but `src.strategies.base.TRADE_PROPOSAL_ELIGIBLE`
-excludes them and nothing in this codebase can turn one into a real
-order, an approved Risk Engine decision, or a Fidelity ticket until a
-separately-scoped hardening pass extends the trusted kernel's leg-count
-assumptions. This is a deliberate scope boundary, not an oversight —
-widening the 2-leg cap touches the highest test-coverage code in the
-system (§7) and was judged out of bounds for this step.
+**Tier1/Tier2 split — reversed by Step 20A.** Through Step 19A/14B, 12
+strategies fit `TradeProposal`'s 1-2 leg cap and were wired all the way
+through the trusted kernel, while the remaining 3
+(`LONG_CALL_BUTTERFLY`, `SHORT_IRON_CONDOR`, `SHORT_IRON_BUTTERFLY`,
+needing 3-4 legs) were evaluation-only. Step 20A (§14) extended the
+trusted kernel's leg-count assumptions end-to-end, so all 15
+`StrategyKind` members are now order-eligible —
+`src.strategies.base.TRADE_PROPOSAL_ELIGIBLE` includes all 15, with
+zero logic changes needed there (it was built in Step 19A specifically
+to require none once `StrategyType` gained the 3 new members).
 
 **Explicitly excluded from the library, per Step 19A's own instruction,
 same as the original universe-exclusion list in §1:** naked short
@@ -730,3 +729,122 @@ genuine, previously-unbuilt pieces, both additive:
   `HedgeEffectivenessReport` nor its aggregate has a field for one,
   directly enforcing "never label a hedge unsuccessful merely because
   its standalone P&L is negative."
+
+## 14. Multi-leg structural support (Step 20A)
+
+Step 20A widened the trusted kernel end-to-end so `LONG_CALL_BUTTERFLY`,
+`SHORT_IRON_CONDOR`, and `SHORT_IRON_BUTTERFLY` (§13) are order-eligible,
+not just evaluable. Audit finding that shaped the implementation: most of
+the "trusted kernel" already supported 4 legs at the Pydantic-field level
+before this step (`src.brokers.base.PlaceOrderRequest.legs`,
+`src.brokers.fidelity`'s `ApprovedOrder.legs`/`FidelityTradeTicket.legs`,
+`src.risk.portfolio_risk.PortfolioPositionLeg`-list, `src.dashboard.schemas
+.leg_quotes` were all already `max_length=4`) — the actual blockers were
+`src.llm.schemas.TradeProposal.legs` (`max_length=2`), the missing
+`StrategyType` members, and several places that assumed a flat 1:1
+per-leg quantity ratio.
+
+**`TradeProposal.legs`**: widened to `max_length=4`. `StrategyType`
+gained `LONG_CALL_BUTTERFLY`/`SHORT_IRON_CONDOR`/`SHORT_IRON_BUTTERFLY`.
+`TradeProposal._validate_legs_match_strategy` gained one `elif` branch
+per new strategy enforcing its exact leg count, strike ordering, side,
+and quantity ratio (fail-closed: malformed structures — missing wing,
+wrong option type, wrong strike order, wrong quantities, mismatched
+center strike, a long-iron-butterfly-shaped payload — are rejected at
+the Pydantic layer before reaching Python Quant at all).
+
+**Quantity ratios**: `OptionLeg.quantity_ratio` (default 1, additive)
+represents a leg's contract count relative to `contracts_requested` —
+needed because `LONG_CALL_BUTTERFLY`'s middle strike is short *2x* each
+wing's quantity (1:-2:1), the first non-uniform ratio this platform has
+had to represent. Every downstream consumer that turns a leg into an
+actual order/position quantity multiplies by this ratio:
+`src.risk.engine._build_quant_position`/`_build_approved_order`,
+`src.risk.trade_risk.compute_trade_greeks`, and (on the execution side)
+`src.brokers.paper.base_combo_quantity`/`compute_fill`/`_apply_fill`,
+which anchor PaperBroker's fill quantity, net-price weighting, and
+partial-fill tracking on the smallest per-leg quantity across an order
+("1 combo unit") rather than an arbitrary leg's own quantity — necessary
+because `TradeProposal.legs`/`ApprovedOrder.legs` carry no guaranteed
+submission order, so "the first leg" is not a safe proxy for "the
+combo's base size."
+
+**Economics**: three new functions in `src.quant.expected_value`
+(`long_call_butterfly_economics`, `short_iron_condor_economics`,
+`short_iron_butterfly_economics`) build a `Position` and delegate to the
+existing generic `payoff_profile` engine (§6/§13) for max profit/max
+loss/breakevens — an exact, piecewise-linear computation, not a new
+hand-derived formula — plus a full Monte Carlo simulation for
+probability-of-profit/expected-value, since these structures' profit
+zone sits *between* two breakevens (unlike every prior strategy's
+single-sided or symmetric-tail zone), so the existing
+probability_above/probability_below closed forms don't apply.
+`src.risk.trade_risk.compute_trade_economics`/`resolve_credit`/
+`check_collateral` dispatch to these via a new `_legs_sorted_by_strike`
+helper (sorting `(strike, put-before-call)` deterministically recovers
+each leg's structural role, since `_matching_by_right`'s single-match
+lookup is ambiguous once a strategy has two same-right legs).
+
+**Two breakevens, not a list**: `breakeven_upper: float | None`
+(additive, mirrors the pre-existing straddle/strangle field) now
+actually propagates all the way to `ApprovedOrder`/`FidelityTradeTicket`
+and `OpportunityView`, not just `StrategyEconomics` — a genuine
+pre-existing gap (straddle/strangle's second breakeven was computed but
+silently dropped before reaching a human-readable ticket) that Step 20A's
+"never discard extra breakevens" requirement caught and fixed for all
+four two-breakeven strategies at once.
+
+**Collateral**: `PaperBroker._required_collateral` and
+`src.backtest.engine._estimate_capital_at_risk` both gained explicit
+shape-detection for the butterfly (debit paid only, zero extra
+collateral — the previous fallback would have double-charged the short
+middle leg as if naked) and the two iron structures
+(`max(put_wing_width, call_wing_width)`, standard margin treatment —
+the previous fallback either summed both widths or reserved the full
+short-strike notional, both wrong) *before* falling through to the
+generic same-right short/long pairing logic, which cannot recognize a
+2x-ratio leg or two same-right short legs.
+
+**PaperBroker fill model**: `compute_fill` now separately tracks
+per-share leg prices (`raw_signs`, unweighted — used for actual cash
+flow/position updates) from the combo's net, per-unit price
+(`weighted_signs`, scaled by each leg's `quantity_ratio` — used for
+limit-price satisfaction and fillable-quantity checks), so a butterfly's
+net debit correctly reflects its middle leg counting double without
+distorting any individual leg's own per-share transaction price.
+Commission is charged per actual contract filled (so the middle leg
+pays 2x), consistent with a standard per-contract-per-leg commission
+schedule. Atomic-vs-per-leg model: this platform simulates all legs of
+one order filling together in a single `attempt_fill` pass (never a
+partial subset of an order's legs) — there is no intermediate state
+where a multi-leg position holds some legs and not others, so a
+multi-leg position can never become unintentionally naked through
+partial execution.
+
+**Backtest engine**: `BacktestLeg` gained the same `quantity_ratio`
+field (default 1), threaded through `_to_order_leg`/`flip_legs` so
+`compute_fill`'s ratio-aware pricing applies identically to a
+backtested butterfly. `src.backtest.simulator.EntrySignal` already took
+fully-formed legs from its caller (no internal per-strategy candidate
+generator exists to extend), so this is sufficient for correctness —
+see §12 open question 6 for what's still missing (a caller that
+actually constructs one).
+
+**Regime mapping**: `src.strategies.regime_mapping` gained
+`LONG_CALL_BUTTERFLY` under `NEUTRAL_RANGE_BOUND` and
+`HIGH_IV_CONTRACTION_EXPECTED` (a genuine gap — `SHORT_IRON_CONDOR`/
+`SHORT_IRON_BUTTERFLY` were already present in both views since Step
+19A, but the butterfly was never added to either).
+
+**Config**: `config/brokers.yaml` added all 3 strategies to every
+broker's `allowed_strategies` — done last, after the full pipeline was
+proven end-to-end by `tests/unit/risk/test_multileg_strategies.py` and
+`tests/unit/brokers/test_paper_broker_multileg.py`, per this file's own
+standing rule (never list a capability before it's backed up).
+
+**Not touched, deliberately**: `src.strategies.selector`/`comparison`/
+`portfolio_fit`/`suitability` needed no changes — they were already
+generic over `StrategyEvaluation` lists with no `StrategyKind`-specific
+branching. `src.validation.strategy_attribution` already iterates all
+15 `StrategyKind` values (built that way in Step 14B specifically so a
+future Tier2-to-Tier1 promotion would need no further changes there).

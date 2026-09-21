@@ -30,6 +30,7 @@ from src.quant.expected_value import (
     call_credit_spread_economics,
     covered_call_economics,
     csp_economics,
+    long_call_butterfly_economics,
     long_call_economics,
     long_put_economics,
     long_straddle_economics,
@@ -37,6 +38,8 @@ from src.quant.expected_value import (
     protective_collar_economics,
     protective_put_economics,
     put_credit_spread_economics,
+    short_iron_butterfly_economics,
+    short_iron_condor_economics,
 )
 from src.quant.greeks import Greeks, net_greeks
 from src.quant.position_sizing import PositionSizeResult, cap_requested_contracts, fixed_fractional_size
@@ -297,6 +300,20 @@ def check_collateral(proposal: TradeProposal, portfolio: Portfolio, contracts: i
         # already runs against capital_required.
         return
 
+    elif proposal.strategy in (
+        StrategyType.LONG_CALL_BUTTERFLY,
+        StrategyType.SHORT_IRON_CONDOR,
+        StrategyType.SHORT_IRON_BUTTERFLY,
+    ):
+        # Step 20A: defined-risk, fully wing-protected structures. The
+        # long wings ARE the collateral once every leg is held together
+        # (the middle/center short legs of a butterfly, or the two short
+        # legs of an iron condor/butterfly, are never naked -- each is
+        # always paired with a long leg the same distance or further
+        # out). No separate share/cash requirement beyond capital_required
+        # (already enforced as buying power in src.risk.engine).
+        return
+
     else:  # pragma: no cover - StrategyType is exhaustive today
         raise MissingCollateralError(f"no collateral rule defined for strategy {proposal.strategy!r}")
 
@@ -355,6 +372,24 @@ def resolve_credit(proposal: TradeProposal, contracts: list[OptionContract]) -> 
         _, call_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.CALL)
         _, put_contract = _matching_by_right(proposal.legs, contracts, DataOptionRight.PUT)
         return call_contract.mid + put_contract.mid  # total debit paid
+
+    if proposal.strategy == StrategyType.LONG_CALL_BUTTERFLY:
+        (_, lower_c), (_, middle_c), (_, upper_c) = _legs_sorted_by_strike(proposal, contracts)
+        debit = lower_c.mid - 2 * middle_c.mid + upper_c.mid
+        if debit <= 0:
+            raise UndefinedEconomicsError(
+                f"long_call_butterfly nets to a non-positive debit ({debit:.4f}) from current market prices"
+            )
+        return debit
+
+    if proposal.strategy in (StrategyType.SHORT_IRON_CONDOR, StrategyType.SHORT_IRON_BUTTERFLY):
+        (_, long_put_c), (_, short_put_c), (_, short_call_c), (_, long_call_c) = _legs_sorted_by_strike(proposal, contracts)
+        credit = (short_put_c.mid - long_put_c.mid) + (short_call_c.mid - long_call_c.mid)
+        if credit <= 0:
+            raise UndefinedEconomicsError(
+                f"{proposal.strategy.value} nets to a non-positive credit ({credit:.4f}) from current market prices"
+            )
+        return credit
 
     raise UndefinedEconomicsError(f"no credit formula for strategy {proposal.strategy!r}")  # pragma: no cover
 
@@ -468,6 +503,32 @@ def compute_trade_economics(
             t, rate, sigma, max(days_to_expiry, 1), num_contracts,
         )
 
+    if proposal.strategy == StrategyType.LONG_CALL_BUTTERFLY:
+        (_, lower_c), (_, middle_c), (_, upper_c) = _legs_sorted_by_strike(proposal, contracts)
+        sigma = _require_iv(middle_c)
+        return long_call_butterfly_economics(
+            spot, lower_c.strike, middle_c.strike, upper_c.strike,
+            lower_c.mid, middle_c.mid, upper_c.mid, t, rate, sigma, max(days_to_expiry, 1), num_contracts,
+        )
+
+    if proposal.strategy == StrategyType.SHORT_IRON_CONDOR:
+        (_, long_put_c), (_, short_put_c), (_, short_call_c), (_, long_call_c) = _legs_sorted_by_strike(proposal, contracts)
+        sigma = _require_iv(short_put_c)
+        return short_iron_condor_economics(
+            spot, long_put_c.strike, short_put_c.strike, short_call_c.strike, long_call_c.strike,
+            long_put_c.mid, short_put_c.mid, short_call_c.mid, long_call_c.mid,
+            t, rate, sigma, max(days_to_expiry, 1), num_contracts,
+        )
+
+    if proposal.strategy == StrategyType.SHORT_IRON_BUTTERFLY:
+        (_, put_wing_c), (_, center_put_c), (_, center_call_c), (_, call_wing_c) = _legs_sorted_by_strike(proposal, contracts)
+        sigma = _require_iv(center_put_c)
+        return short_iron_butterfly_economics(
+            spot, put_wing_c.strike, center_put_c.strike, call_wing_c.strike,
+            put_wing_c.mid, center_put_c.mid, center_call_c.mid, call_wing_c.mid,
+            t, rate, sigma, max(days_to_expiry, 1), num_contracts,
+        )
+
     raise UndefinedEconomicsError(f"no economics formula for strategy {proposal.strategy!r}")  # pragma: no cover
 
 
@@ -484,7 +545,7 @@ def compute_trade_greeks(proposal: TradeProposal, contracts: list[OptionContract
                 strike=leg.strike,
                 side=QuantSide.BUY if leg.side == LegSide.BUY else QuantSide.SELL,
                 entry_price=contract.mid,
-                quantity=1,
+                quantity=leg.quantity_ratio,
             )
         )
     # net_greeks needs a single sigma; use the first (short) leg's IV as
@@ -609,3 +670,19 @@ def _matching_by_right(
         if _leg_data_right(leg) == right:
             return leg, contract
     raise UndefinedEconomicsError(f"no leg with right={right!r}")  # pragma: no cover - schema-enforced
+
+
+def _legs_sorted_by_strike(
+    proposal: TradeProposal, contracts: list[OptionContract]
+) -> list[tuple[OptionLeg, OptionContract]]:
+    """Step 20A: for the 3-/4-leg strategies, `_matching`/`_matching_by_right`
+    (which return the FIRST leg matching a side/right) are ambiguous --
+    a short iron condor/butterfly has two put legs and two call legs.
+    `TradeProposal._validate_legs_match_strategy` already guarantees each
+    new strategy's exact strike ordering (e.g. long_put < short_put <
+    short_call < long_call for a short iron condor), so sorting by
+    strike -- with same-strike ties broken put-before-call, which only
+    the short iron butterfly's shared center strike ever produces --
+    deterministically recovers each leg's structural role."""
+    pairs = list(zip(proposal.legs, contracts))
+    return sorted(pairs, key=lambda pair: (pair[0].strike, 0 if _leg_data_right(pair[0]) == DataOptionRight.PUT else 1))
