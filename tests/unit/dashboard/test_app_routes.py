@@ -52,6 +52,16 @@ class TestReadRoutes:
         assert r.status_code == 200
         assert r.json()["state"] == "NORMAL"
 
+    def test_data_provider_health(self, client_and_trade_id):
+        client, _ = client_and_trade_id
+        r = client.get("/api/data-provider-health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["provider_selected"] == "mock"
+        assert body["connection_status"] == "MOCK_DATA"
+        assert body["equity_data_available"] is True
+        assert body["options_data_available"] is True
+
     def test_list_opportunities(self, client_and_trade_id):
         client, trade_id = client_and_trade_id
         r = client.get("/api/opportunities")

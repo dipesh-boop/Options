@@ -126,6 +126,7 @@ class TestNoExecutionShapedRoute:
         ("GET", "/"),
         ("GET", "/api/portfolio-header"),
         ("GET", "/api/risk-panel"),
+        ("GET", "/api/data-provider-health"),
         ("GET", "/api/opportunities"),
         ("GET", "/api/opportunities/{trade_id}"),
         ("GET", "/api/audit"),

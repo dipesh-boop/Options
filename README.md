@@ -250,7 +250,75 @@ history, not shared code.
   process crash mid-run and confirming every cohort, snapshot, trade,
   and decision record reconstructs identically afterward.
 
-## 14. Starting the 90-day validation (do this only when you're ready)
+## 14. Using real market data with Alpaca (optional)
+
+By default this platform runs on synthetic ("mock") market data so you
+can try it out without connecting to anything real. For the formal
+90-day validation, you'll want real current U.S. equity and options
+market data — this platform supports Alpaca (https://alpaca.markets/)
+as a **market-data-only** connection: it can only ever read prices, it
+can never place, cancel, or modify a real order. Every trade this
+platform proposes still only ever goes through the internal paper-
+trading simulator or a Fidelity ticket you type in yourself — switching
+to Alpaca changes where the *prices* come from, nothing else.
+
+1. **Create an Alpaca account** at https://alpaca.markets/ if you don't
+   already have one (their free/paper account is enough to get started;
+   you never need their live-trading account for anything this platform
+   does).
+2. **Obtain API credentials**: in the Alpaca dashboard, go to your
+   account's "API Keys" section and generate a key pair (an API Key ID
+   and a Secret Key). Treat the secret key like a password — Alpaca
+   only shows it to you once.
+3. **Select the correct market-data subscription/feed**: Alpaca offers
+   a free "indicative" (delayed) options feed and a paid "OPRA" feed
+   (the real, current, official options tape). For the formal 90-day
+   validation you want **OPRA** — check your Alpaca account's market-
+   data subscription page to confirm you have it before proceeding. For
+   just trying the platform out, the free indicative feed is fine.
+4. **Put your credentials in `.env`**: copy `.env.example` to `.env` if
+   you haven't already, then fill in:
+   ```
+   OPTIONS_AGENT_ALPACA_API_KEY=<your key id>
+   OPTIONS_AGENT_ALPACA_API_SECRET=<your secret key>
+   ```
+   Never commit `.env` to version control (it already isn't — see
+   `.gitignore`) and never paste these values anywhere else.
+5. **Select `alpaca`** as the active data provider, also in `.env`:
+   ```
+   OPTIONS_AGENT_DATA_PROVIDER=alpaca
+   OPTIONS_AGENT_ALPACA_OPTIONS_FEED=opra
+   ```
+   (Use `OPTIONS_AGENT_ALPACA_OPTIONS_FEED=indicative` instead if you're
+   only trying things out on the free feed.)
+6. **Run a provider health check**: start the dashboard (§6/§7) and
+   open it in your browser — the new "Market Data" panel at the top
+   shows the result immediately, or check the same thing yourself at
+   `http://127.0.0.1:8000/api/data-provider-health`.
+7. **Confirm you're actually getting OPRA, not mock/indicative/
+   delayed data**: the "Market Data" panel's "Options Feed" line should
+   read "OPRA (real)". If it instead says "indicative (free/delayed)",
+   your Alpaca account isn't entitled to OPRA yet (check step 3), and if
+   it says "mock (synthetic)" or "unavailable", double-check steps 4-5.
+   The platform never silently substitutes one for another — what you
+   see there is genuinely what it's using.
+8. **Start the dashboard** (§6/§7) as usual — nothing else about how
+   you run the application changes.
+9. **Verify the internal paper-trading simulator remains the execution
+   destination**: this is true structurally, not something you need to
+   configure — there is no code anywhere in this platform that can
+   place a real order through Alpaca, whatever `OPTIONS_AGENT_DATA_
+   PROVIDER` is set to (see `tests/acceptance/test_alpaca_market_data_
+   only.py` for the enforced proof). Trades you decide to place for
+   real still only ever become a Fidelity ticket you type in yourself.
+10. **Removing/revoking credentials**: to stop using Alpaca, either
+    remove the `OPTIONS_AGENT_ALPACA_API_KEY`/`_API_SECRET` lines from
+    `.env` (or set `OPTIONS_AGENT_DATA_PROVIDER=mock`) and restart the
+    dashboard, and/or revoke the key pair itself from your Alpaca
+    account's "API Keys" page — either is enough, and neither requires
+    any code change.
+
+## 15. Starting the 90-day validation (do this only when you're ready)
 
 **This has not been started yet, and nothing in this README starts it
 for you.** The steps below get you to the point of being *ready* to
@@ -271,7 +339,7 @@ effect of installing or running the software.
    Fidelity is still manual-only, and that live trading is still
    disabled. It should print:
    ```
-   PAPER_TRADING_V1.0 / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION
+   PAPER_TRADING_V1.1 / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION
    ```
    If it instead reports a failed check, do not proceed — that means
    something in the frozen configuration or code has changed since the
@@ -289,7 +357,7 @@ effect of installing or running the software.
    stops short of that so you get to make that call with a working,
    verified system in front of you, not a black box.
 
-## 15. How to troubleshoot common problems
+## 16. How to troubleshoot common problems
 
 - **"ANTHROPIC_API_KEY not set" / AI features fail**: make sure `.env`
   exists (copied from `.env.example`) and has a real key, and that you
@@ -332,8 +400,11 @@ effect of installing or running the software.
   remediation history.
 - `ACCEPTANCE_TEST_REPORT.md` — Step 21's final system integration and
   acceptance test results.
-- `STEP_22_FREEZE_REPORT.md` — the PAPER_TRADING_V1.0 pre-validation
-  hardening/freeze report, including whether validation has started.
-- `VALIDATION_MANIFEST.json` — the frozen version's own machine-checked
-  manifest (see §14, step 4).
+- `STEP_22_FREEZE_REPORT.md` — the original PAPER_TRADING_V1.0
+  pre-validation hardening/freeze report.
+- `STEP_22_1_FREEZE_REPORT.md` — the PAPER_TRADING_V1.1 amendment
+  (adds Alpaca as a market-data-only provider), including whether
+  validation has started.
+- `VALIDATION_MANIFEST.json` — the currently-frozen version's own
+  machine-checked manifest (see §15, step 4).
 - Run the test suite with `make test` (or `python -m pytest -q`).

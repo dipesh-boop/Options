@@ -75,6 +75,9 @@ main { padding: 20px 24px 60px; max-width: 1200px; margin: 0 auto; }
 .badge.WARNING { background: rgba(241,180,76,0.15); color: var(--yellow); }
 .badge.REDUCE_RISK { background: rgba(255,143,77,0.15); color: var(--orange); }
 .badge.HALT { background: rgba(244,106,106,0.18); color: var(--red); }
+.badge.REAL_DATA_CONNECTED { background: rgba(52,195,143,0.15); color: var(--green); }
+.badge.MOCK_DATA { background: rgba(241,180,76,0.15); color: var(--yellow); }
+.badge.REAL_DATA_UNAVAILABLE { background: rgba(244,106,106,0.18); color: var(--red); }
 
 .muted { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 

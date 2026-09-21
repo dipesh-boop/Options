@@ -860,3 +860,71 @@ generic over `StrategyEvaluation` lists with no `StrategyKind`-specific
 branching. `src.validation.strategy_attribution` already iterates all
 15 `StrategyKind` values (built that way in Step 14B specifically so a
 future Tier2-to-Tier1 promotion would need no further changes there).
+
+## 15. Alpaca market-data-only provider (pre-validation amendment, "Step 22.1")
+
+Adds Alpaca (`src/data/alpaca_provider.py`, `src/data/alpaca_historical.py`)
+as a third `MarketDataProvider` implementation alongside `mock` and `ibkr`,
+so the 90-day validation can run against real current U.S. equity and
+options market data (OPRA, when entitled) without requiring an IBKR
+account. **Structurally market-data-only**: `AlpacaMarketDataProvider`
+implements `src.data.provider.MarketDataProvider`'s two read methods
+(`get_option_chain`, `get_underlying_quote`) and nothing else — it is not
+a `Broker` subclass, defines no order-submission/cancellation/modification
+method, and never imports `alpaca.trading` (Alpaca's separate,
+order-submission client) anywhere. See
+`tests/acceptance/test_alpaca_market_data_only.py` for the full
+structural/security proof (repo-wide `alpaca.trading` import grep,
+public-surface-equals-`MarketDataProvider` check, credential-leakage
+checks, socket-level no-network-when-faked proof).
+
+**Official SDK**: `alpaca-py` (pinned in `requirements.txt`). Only two
+client classes/methods are called: `StockHistoricalDataClient
+.get_stock_latest_quote` and `OptionHistoricalDataClient.get_option_chain`
+(plus `.get_stock_bars` for the separate, minimal historical-bars adapter).
+Confirmed directly against the SDK source (not assumed) before
+implementation.
+
+**OCC symbol parsing, not a second Alpaca endpoint**: Alpaca's option
+chain response is keyed by standard OCC-format option symbols (root +
+YYMMDD expiration + C/P + zero-padded strike), which are fully
+self-describing — `parse_occ_option_symbol` decodes strike/expiration/
+right directly from the key string rather than calling Alpaca's separate
+option-contracts-metadata endpoint (which lives on the *trading* API this
+module deliberately never imports).
+
+**OPRA vs indicative, never silently substituted**: `AlpacaConfig
+.options_feed` (`"opra"` or `"indicative"`) is explicit config, requested
+exactly as configured — if Alpaca's account isn't entitled to the
+requested feed, `AlpacaFeedEntitlementError` raises immediately rather
+than silently falling back to the other feed. Every canonical
+`OptionContract`/`UnderlyingQuote`'s own `source` field records exactly
+which feed served it (e.g. `"alpaca_opra"`, `"alpaca_indicative"`,
+`"alpaca_sip"`, `"alpaca_iex"`) — reusing the pre-existing, deliberately
+open-string `source` field (`src.data.provider`'s own docstring: "not a
+closed enum... locking the type now would force a premature choice")
+rather than adding a new canonical-schema field for feed type.
+
+**Provider selection** (`src/data/factory.py`, new): the first place in
+this codebase that actually turns `OPTIONS_AGENT_DATA_PROVIDER`
+(`mock`/`ibkr`/`alpaca`) into a constructed provider instance — nothing
+before this selected a provider at runtime; `/morning-scan` (a Claude
+Code skill) and `src.dashboard.service`/`src.workflows.feed_health` all
+take already-fetched `OptionChain`s as plain parameters. Fails closed on
+a misconfigured/uncredentialed real provider — never silently falls back
+to `mock`.
+
+**Provider health check** (`src/data/provider_health.py`, new): probes
+the configured provider with one real (or synthetic, for `mock`) request
+each for equity/options data and reports REAL_DATA_CONNECTED / MOCK_DATA
+/ REAL_DATA_UNAVAILABLE, auth status, feed type, OPRA entitlement (when
+determinable), market-open state (`src.data.market_calendar`), and
+freshness — surfaced read-only via `GET /api/data-provider-health` and a
+small dashboard panel, so the owner never has to guess what kind of data
+is powering the system.
+
+**Dead code discovered, not touched**: `app/` (a very early
+`app/data/mock_provider.py`/`app/config.py` prototype) is not imported by
+anything under `src/` — `scripts/start.sh` runs `src.dashboard.app:app`
+exclusively. Left as-is; removing unrelated dead code was out of scope
+for this amendment.

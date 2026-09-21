@@ -12,3 +12,10 @@ PyYAML==6.0.2
 # Step 22: validation-cohort reporting/export layer.
 openpyxl==3.1.5
 reportlab==5.0.1
+
+# Step 22.1: Alpaca market-data-ONLY provider (src/data/alpaca_provider.py,
+# src/data/alpaca_historical.py). Only alpaca.data.* (read-only market-data
+# clients) is ever imported -- see those modules' own docstrings and
+# tests/acceptance/test_alpaca_market_data_only.py for the enforced
+# guarantee that alpaca.trading (the order-submission client) never is.
+alpaca-py==0.44.0

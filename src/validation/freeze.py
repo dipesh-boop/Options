@@ -56,9 +56,14 @@ from src.validation.session import DATABASE_SCHEMA_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-FREEZE_NAME = "PAPER_TRADING_V1.0"
+# Step 22.1 (Alpaca market-data amendment) bumped the freeze name/version
+# without touching the original V1.0 artifacts -- see progress.md and
+# STEP_22_1_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always reflect
+# the *current* frozen state; the original V1.0 manifest/report remain
+# recoverable from git history at the `paper-trading-v1.0` tag.
+FREEZE_NAME = "PAPER_TRADING_V1.1"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.0.0"
+MANIFEST_VERSION = "1.1.0"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -91,7 +96,18 @@ _CODE_MODULE_DIRS: dict[str, Path] = {
 _CODE_MODULE_FILES: dict[str, Path] = {
     "paper_broker_module": REPO_ROOT / "src" / "brokers" / "paper.py",
     "market_calendar_module": REPO_ROOT / "src" / "data" / "market_calendar.py",
+    # Step 22.1: Alpaca is market-data-only (never execution) -- hashing
+    # this file means any future change to it (including one that tried
+    # to add order-submission capability) is caught as material drift.
+    "alpaca_provider_module": REPO_ROOT / "src" / "data" / "alpaca_provider.py",
 }
+
+# For the formal 90-day validation, OPRA is the required options feed
+# (Part 5) -- recorded here as policy, not as a runtime-enforced value:
+# an operator may still run locally against `indicative`/`mock`/`ibkr`
+# for development, but a freeze verification against this manifest
+# records what the *validation* itself requires.
+REQUIRED_OPTIONS_FEED_FOR_VALIDATION = "opra"
 
 
 class FreezeManifestError(RuntimeError):
@@ -150,6 +166,12 @@ class FreezeManifest(BaseModel):
     market_calendar_module_hash: str
     market_data_provider_config_version: str  # no separate config file today -- see note field
     market_data_provider_config_note: str
+
+    # Step 22.1 (Alpaca market-data amendment).
+    freeze_version: str
+    alpaca_provider_module_hash: str
+    data_provider_at_freeze_time: str  # OPTIONS_AGENT_DATA_PROVIDER as configured when frozen (operator-changeable afterward)
+    required_options_feed_for_validation: str  # policy: OPRA required for the formal 90-day run
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -253,6 +275,12 @@ def _build_time_manifest_hash(manifest_data_without_hash: dict[str, Any]) -> str
     return compute_manifest_hash(json.loads(temp.model_dump_json()))
 
 
+def _current_data_provider_selection() -> str:
+    from src.data.factory import DataProviderSelection
+
+    return DataProviderSelection().data_provider
+
+
 def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeManifest:
     if generated_at is None:
         generated_at = datetime.now(timezone.utc)
@@ -314,11 +342,17 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         market_calendar_module_hash=compute_file_hash(_CODE_MODULE_FILES["market_calendar_module"]),
         market_data_provider_config_version="n/a",
         market_data_provider_config_note=(
-            "no separate market-data-provider config file exists -- provider behavior "
-            "(freshness thresholds, canonical quote shape) is defined directly in "
-            "src/data/provider.py, src/data/quotes.py, src/data/option_chain.py, which are "
-            "covered by risk_module_hash's sibling code but not independently hashed here"
+            "no separate market-data-provider config YAML file exists -- provider selection "
+            "(mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable "
+            "(src.data.factory.DataProviderSelection), and canonical quote/chain shape plus "
+            "freshness thresholds are defined directly in src/data/provider.py, "
+            "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
+            "sibling code but not independently hashed here"
         ),
+        freeze_version="1.1",
+        alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
+        data_provider_at_freeze_time=_current_data_provider_selection(),
+        required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -437,6 +471,7 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("risk_module_hash", _CODE_MODULE_DIRS["risk_module"], True),
         ("paper_broker_module_hash", _CODE_MODULE_FILES["paper_broker_module"], False),
         ("market_calendar_module_hash", _CODE_MODULE_FILES["market_calendar_module"], False),
+        ("alpaca_provider_module_hash", _CODE_MODULE_FILES["alpaca_provider_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -484,8 +519,31 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "manifest records True -- this freeze illegally claims validation already started",
     ))
 
+    alpaca_market_data_only_ok = _verify_alpaca_is_market_data_only()
+    checks.append(FreezeCheck(
+        name="alpaca_market_data_only", passed=alpaca_market_data_only_ok,
+        detail="no alpaca.trading import found anywhere in src/" if alpaca_market_data_only_ok
+        else "an alpaca.trading import was found in src/ -- Alpaca must remain market-data-only",
+    ))
+
     passed = all(c.passed for c in checks)
     return FreezeVerificationResult(passed=passed, checks=tuple(checks))
+
+
+def _verify_alpaca_is_market_data_only() -> bool:
+    """Step 22.1: a direct, executable proof (not just a file hash) that
+    no file under `src/` imports `alpaca.trading` (Alpaca's
+    order-submission client) -- re-checked on every `verify_freeze` run,
+    independent of `tests/acceptance/test_alpaca_market_data_only.py`."""
+    import re
+
+    pattern = re.compile(r"^\s*(from|import)\s+alpaca\.trading\b", re.MULTILINE)
+    for path in (REPO_ROOT / "src").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        if pattern.search(path.read_text(errors="ignore")):
+            return False
+    return True
 
 
 def _cli_build() -> int:

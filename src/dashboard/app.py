@@ -103,6 +103,20 @@ def risk_panel(state: DashboardState = Depends(get_state)) -> schemas.RiskPanelR
     return schemas.build_risk_panel_view(build_risk_panel(state.portfolio, state.limits))
 
 
+@app.get("/api/data-provider-health", response_model=schemas.DataProviderHealthView)
+async def data_provider_health() -> schemas.DataProviderHealthView:
+    """Read-only (Step 22.1, Part 16): reports which market-data
+    provider is configured, whether it's actually connected, and
+    whether options data is OPRA or indicative/delayed -- distinct from
+    `get_state`'s loaded-portfolio dependency, since this reflects
+    config, not a loaded `/morning-scan` run. Never accepts input, and
+    never touches Fidelity/PaperBroker/order-submission of any kind."""
+    from src.data.provider_health import check_provider_health
+
+    report = await check_provider_health(now=get_now())
+    return schemas.build_data_provider_health_view(report)
+
+
 @app.get("/api/opportunities", response_model=list[schemas.OpportunityView])
 def list_opportunities(
     state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),

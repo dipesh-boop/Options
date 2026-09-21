@@ -311,3 +311,40 @@ def build_audit_event_view(event: _AuditEvent) -> AuditEventView:
         event_id=event.event_id, trade_id=event.trade_id, event_type=event.event_type.value,
         at=event.at, actor=event.actor, detail=event.detail,
     )
+
+
+# --------------------------------------------------- data provider health
+
+
+class DataProviderHealthView(BaseModel):
+    """Step 22.1: so the owner never has to guess what kind of market
+    data the system is using -- REAL DATA CONNECTED / MOCK DATA / REAL
+    DATA UNAVAILABLE, plus whether options data is OPRA or indicative/
+    delayed. Read-only; this route never accepts input."""
+
+    provider_selected: str
+    connection_status: str
+    authenticated: bool | None
+    equity_data_available: bool
+    options_data_available: bool
+    equity_feed_type: str | None
+    options_feed_type: str | None
+    opra_entitled: bool | None
+    market_open: bool
+    market_status_detail: str
+    checked_at: datetime
+    last_successful_fetch_at: datetime | None
+    equity_quote_age_seconds: float | None
+    errors: list[str]
+
+
+def build_data_provider_health_view(report) -> DataProviderHealthView:
+    return DataProviderHealthView(
+        provider_selected=report.provider_selected, connection_status=report.connection_status,
+        authenticated=report.authenticated, equity_data_available=report.equity_data_available,
+        options_data_available=report.options_data_available, equity_feed_type=report.equity_feed_type,
+        options_feed_type=report.options_feed_type, opra_entitled=report.opra_entitled,
+        market_open=report.market_open, market_status_detail=report.market_status_detail,
+        checked_at=report.checked_at, last_successful_fetch_at=report.last_successful_fetch_at,
+        equity_quote_age_seconds=report.equity_quote_age_seconds, errors=list(report.errors),
+    )

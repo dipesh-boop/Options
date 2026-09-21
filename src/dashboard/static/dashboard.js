@@ -46,12 +46,14 @@ async function api(path, options = {}) {
 async function loadAll() {
   document.getElementById("clock").textContent = new Date().toLocaleString();
   try {
-    const [header, risk, opps, audit] = await Promise.all([
+    const [providerHealth, header, risk, opps, audit] = await Promise.all([
+      api("/api/data-provider-health"),
       api("/api/portfolio-header"),
       api("/api/risk-panel"),
       api("/api/opportunities"),
       api("/api/audit"),
     ]);
+    renderDataProviderHealth(providerHealth);
     renderPortfolioHeader(header);
     renderRiskPanel(risk);
     renderOpportunities(opps);
@@ -59,6 +61,32 @@ async function loadAll() {
   } catch (err) {
     console.error(err);
   }
+}
+
+// ------------------------------------------------- data provider health
+
+function renderDataProviderHealth(p) {
+  const badge = document.getElementById("data-provider-badge");
+  badge.textContent = p.connection_status.replace(/_/g, " ");
+  badge.className = `badge ${p.connection_status}`;
+
+  const feedLabel = (feed) => {
+    if (!feed) return "unavailable";
+    if (feed.endsWith("_opra")) return "OPRA (real)";
+    if (feed.endsWith("_indicative")) return "indicative (free/delayed)";
+    if (feed === "mock") return "mock (synthetic)";
+    return feed;
+  };
+
+  document.getElementById("data-provider-grid").innerHTML = [
+    statTile("Provider", p.provider_selected.toUpperCase()),
+    statTile("Authenticated", p.authenticated === null ? "n/a" : p.authenticated ? "yes" : "no", p.authenticated === false ? "neg" : ""),
+    statTile("Equity Data", p.equity_data_available ? "available" : "unavailable", p.equity_data_available ? "" : "neg"),
+    statTile("Options Data", p.options_data_available ? "available" : "unavailable", p.options_data_available ? "" : "neg"),
+    statTile("Options Feed", feedLabel(p.options_feed_type), p.opra_entitled === false ? "neg" : ""),
+    statTile("Market", p.market_open ? "OPEN" : "CLOSED", p.market_open ? "" : "na"),
+    statTile("Last Fetch", p.last_successful_fetch_at ? new Date(p.last_successful_fetch_at).toLocaleTimeString() : "never"),
+  ].join("");
 }
 
 // ------------------------------------------------------- portfolio header
