@@ -24,6 +24,7 @@ from typing import Callable
 
 from src.brokers.fidelity import FidelityTradeTicket, render_ticket_text
 from src.data.earnings import EarningsEvent, is_within_earnings_window
+from src.data.market_calendar import market_status as compute_market_status
 from src.data.option_chain import OptionChain
 from src.llm.context import MarketSnapshotContext
 from src.llm.schemas import MarketRegimeAssessment, RiskReviewNote, StrategyType, TradeProposal
@@ -75,6 +76,8 @@ class CandidateResult:
 @dataclass(frozen=True)
 class MorningScanReport:
     generated_at: datetime
+    market_open: bool
+    market_status_detail: str
     feed_health: FeedHealthReport
     freshness: FreshnessReport
     reconciliation: ReconciliationResult
@@ -116,6 +119,23 @@ def _screen_out_earnings_window(
 
 
 async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
+    # Step 22 Part 8: this run never fetches live data itself (see this
+    # module's own docstring/feed_health.py's -- `inputs.fetch_results`
+    # is always already-fetched), so this scan is never blocked by a
+    # closed market -- research, reporting, and candidate screening
+    # against `inputs.now`'s data remain valid and useful before/after
+    # hours. What changes is labeling: `market_open` here is the single
+    # explicit signal a caller (the dashboard, `/morning-scan`'s own
+    # renderer below) MUST check before treating any resulting
+    # FidelityTradeTicket as a CURRENTLY executable price rather than
+    # "as of the last available quote" -- never fabricated, always
+    # honestly labeled either way.
+    status = compute_market_status(inputs.now)
+    market_status_detail = (
+        "market open" if status.is_market_open
+        else f"market closed (next open: {status.next_market_open.isoformat()})"
+    )
+
     feed_health = verify_market_data_feeds(inputs.fetch_results)
     fresh_chains: dict[str, OptionChain] = {t: c for t, c in inputs.fetch_results.items() if not isinstance(c, Exception)}
     freshness = verify_data_freshness(fresh_chains, inputs.now)
@@ -205,6 +225,8 @@ async def run_morning_scan(inputs: MorningScanInputs) -> MorningScanReport:
 
     return MorningScanReport(
         generated_at=inputs.now,
+        market_open=status.is_market_open,
+        market_status_detail=market_status_detail,
         feed_health=feed_health,
         freshness=freshness,
         reconciliation=reconciliation,
@@ -250,6 +272,15 @@ def render_morning_scan_report(report: MorningScanReport) -> str:
     PORTFOLIO, TOP OPPORTUNITIES, DEVIL'S ADVOCATE, RISK ENGINE,
     FIDELITY TRADE TICKET (or NO TRADE)."""
     lines: list[str] = []
+
+    if not report.market_open:
+        lines += [
+            "*** MARKET CLOSED ***",
+            f"({report.market_status_detail})",
+            "Every price/ticket below reflects the LAST AVAILABLE quote, not a currently executable price.",
+            "Do not manually enter any ticket into Fidelity until the market reopens and prices are refreshed.",
+            "",
+        ]
 
     lines += ["MARKET REGIME", ""]
     lines += [f"Regime: {report.market_regime.regime}"]

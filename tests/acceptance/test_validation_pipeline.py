@@ -38,14 +38,25 @@ class TestNoRealValidationCohortHasEverStarted:
         ]
         assert matches == [], f"unexpected persisted database file(s) found (would imply cohort data exists): {matches}"
 
-    def test_config_declares_no_fixed_production_store_path_that_could_be_pre_populated(self):
-        """`config/validation.yaml` has no `db_path`/`store_path`
-        entry -- the store path is always supplied explicitly by
-        whatever process starts a real cohort, never an implicit
-        default a stray process could silently write to."""
-        content = (REPO_ROOT / "config" / "validation.yaml").read_text()
-        assert "db_path" not in content.lower()
-        assert "store_path" not in content.lower()
+    def test_configured_store_path_exists_only_as_a_location_not_as_populated_data(self):
+        """Step 22 update: `config/validation.yaml` now DOES declare a
+        default `db_path` (`data/options_agent.db`) -- required so a
+        real 90-day cohort can survive an application/Mac restart (see
+        `src.validation.session.SqliteValidationStore`). This is only a
+        LOCATION default: naming a path in YAML does not create the
+        file, open a connection, or record anything. The real invariant
+        this test protects -- "no cohort has actually started" -- is
+        now checked directly against that configured path: the file it
+        names must not exist (nothing has ever connected to it and
+        written a table), exactly like the repo-wide db-file check
+        above, just anchored to the specific path production code would
+        actually use."""
+        from src.validation.protocol import load_validation_config
+
+        config = load_validation_config()
+        assert config.db_path  # a real, non-empty default is configured
+        db_path = REPO_ROOT / config.db_path if not Path(config.db_path).is_absolute() else Path(config.db_path)
+        assert not db_path.exists(), f"the configured validation db_path already has a file on disk: {db_path}"
 
     def test_a_genuinely_fresh_store_has_not_started(self):
         assert has_cohort_started(InMemoryValidationStore()) is False

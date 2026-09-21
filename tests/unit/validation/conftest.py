@@ -79,6 +79,7 @@ def _validation_config(**overrides) -> ValidationConfig:
         rejected_trade_min_sample_size=20,
         consecutive_loss_alert_count=5,
         weekly_loss_alert_pct=0.05,
+        db_path="data/options_agent_test.db",
     )
     defaults.update(overrides)
     return ValidationConfig(**defaults)

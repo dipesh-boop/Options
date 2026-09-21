@@ -213,24 +213,32 @@ class TestFidelityTradeTicket:
             FidelityTradeTicket(**_ticket_kwargs(status=TicketStatus.AWAITING_HUMAN, execution_confirmation=conf))
 
     def test_filled_status_with_confirmation_accepted(self):
+        # Step 22 (FS-005 fix): FidelityTradeTicket can only ever be
+        # directly constructed at AWAITING_HUMAN -- every other status
+        # is reached via model_copy(), exactly like the real
+        # transition()/confirm_fill() functions do, never by
+        # constructing a new instance directly at that status.
         conf = ExecutionConfirmation(confirmed_by="human:jane", confirmation_source="human_manual_entry", filled_quantity=2, fill_price=1.35, confirmed_at=NOW)
-        ticket = FidelityTradeTicket(**_ticket_kwargs(status=TicketStatus.FILLED, execution_confirmation=conf))
+        base = FidelityTradeTicket(**_ticket_kwargs())
+        ticket = base.model_copy(update={"status": TicketStatus.FILLED, "execution_confirmation": conf})
         assert ticket.status == TicketStatus.FILLED
 
     def test_is_terminal_true_for_filled_cancelled_rejected_expired(self):
         conf = ExecutionConfirmation(confirmed_by="x", confirmation_source="human_manual_entry", filled_quantity=1, fill_price=1.0, confirmed_at=NOW)
+        base = FidelityTradeTicket(**_ticket_kwargs())
         for status in (TicketStatus.CANCELLED, TicketStatus.REJECTED, TicketStatus.EXPIRED):
-            ticket = FidelityTradeTicket(**_ticket_kwargs(status=status))
+            ticket = base.model_copy(update={"status": status})
             assert ticket.is_terminal is True
-        filled = FidelityTradeTicket(**_ticket_kwargs(status=TicketStatus.FILLED, execution_confirmation=conf))
+        filled = base.model_copy(update={"status": TicketStatus.FILLED, "execution_confirmation": conf})
         assert filled.is_terminal is True
 
     def test_is_terminal_false_for_non_terminal_statuses(self):
+        base = FidelityTradeTicket(**_ticket_kwargs())
         for status in (
             TicketStatus.PROPOSED, TicketStatus.QUANT_APPROVED, TicketStatus.LLM_REVIEWED,
             TicketStatus.RISK_APPROVED, TicketStatus.AWAITING_HUMAN, TicketStatus.ORDER_ENTERED,
         ):
-            ticket = FidelityTradeTicket(**_ticket_kwargs(status=status))
+            ticket = base.model_copy(update={"status": status})
             assert ticket.is_terminal is False
 
     def test_extra_field_rejected(self):

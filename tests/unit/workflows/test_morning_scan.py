@@ -354,3 +354,45 @@ class TestNeverPlacesAFidelityOrder:
         for r in report.results:
             if r.outcome.fidelity_ticket is not None:
                 assert r.outcome.fidelity_ticket.status == TicketStatus.AWAITING_HUMAN
+
+
+class TestStep22Part8MarketClosedLabeling:
+    """`NOW` (this fixture file's fixed timestamp) is a Sunday --
+    confirms the scan still runs (research/screening is never blocked
+    by a closed market) but honestly labels its output as not
+    currently executable, per Step 22 Part 8."""
+
+    @pytest.mark.asyncio
+    async def test_a_sunday_scan_is_labeled_market_closed(self):
+        report = await run_morning_scan(_base_inputs())
+        assert report.market_open is False
+        assert "closed" in report.market_status_detail.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_sunday_scan_report_text_carries_the_closed_market_banner(self):
+        report = await run_morning_scan(_base_inputs())
+        text = render_morning_scan_report(report)
+        assert "MARKET CLOSED" in text
+        assert "not a currently executable price" in text.lower() or "not currently executable" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_weekday_trading_hours_scan_is_labeled_market_open_with_no_banner(self):
+        from datetime import datetime, timezone
+
+        # 2026-09-21 15:00 UTC = 11:00 ET on a Monday -- ordinary trading hours.
+        weekday_now = datetime(2026, 9, 21, 15, 0, tzinfo=timezone.utc)
+        report = await run_morning_scan(_base_inputs(now=weekday_now))
+        assert report.market_open is True
+        text = render_morning_scan_report(report)
+        assert "MARKET CLOSED" not in text
+
+    @pytest.mark.asyncio
+    async def test_market_closed_never_prevents_candidate_screening_itself(self):
+        """The closed-market label is informational, not a block --
+        research/screening still runs and can still produce a
+        (clearly-labeled) candidate/ticket for later human review, per
+        Part 8's own explicit "research/reporting/backtesting outside
+        market hours" allowance."""
+        report = await run_morning_scan(_base_inputs())
+        assert report.market_open is False
+        assert len(report.results) > 0  # candidates were still screened despite the closed market

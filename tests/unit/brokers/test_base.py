@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from src.brokers.base import (
     Account,
     Broker,
+    BrokerEnvironment,
     Fill,
     InMemoryIdempotencyStore,
     Order,
@@ -94,6 +95,67 @@ class TestPlaceOrderRequest:
                 client_order_id="co-1",
                 legs=[OrderLeg(symbol="AAPL", action=OrderAction.SELL, quantity=1)],
                 limit_price=0,
+            )
+
+
+class TestPlaceOrderRequestLegRatioValidatorRegressionOP003:
+    """SECURITY_AUDIT.md OP-003: every leg's quantity must be an exact
+    integer multiple of the smallest leg's quantity (`base_combo_quantity`
+    in `PaperBroker`), and the resulting ratio must match a shape this
+    platform's strategy library actually defines -- uniform 1:1:...:1 on
+    every leg, or (long_call_butterfly only) 1:2:1 on exactly 3 legs.
+    A future/malformed caller supplying an arbitrary mismatch (e.g.
+    [2, 5]) must fail closed here rather than reach `PaperBroker`, which
+    would otherwise silently treat it as "2 combo units, with the qty=5
+    leg over-filled relative to what was intended."""
+
+    def _leg(self, quantity: int, action: OrderAction = OrderAction.SELL) -> OrderLeg:
+        return OrderLeg(symbol="AAPL", action=action, quantity=quantity)
+
+    def test_single_leg_always_valid(self):
+        req = PlaceOrderRequest(client_order_id="co-1", legs=[self._leg(3)], limit_price=1.0)
+        assert req.legs[0].quantity == 3
+
+    def test_uniform_two_leg_ratio_valid(self):
+        req = PlaceOrderRequest(client_order_id="co-1", legs=[self._leg(4), self._leg(4)], limit_price=1.0)
+        assert [leg.quantity for leg in req.legs] == [4, 4]
+
+    def test_uniform_four_leg_ratio_valid(self):
+        # Shape of a short iron condor / short iron butterfly order.
+        req = PlaceOrderRequest(client_order_id="co-1", legs=[self._leg(2)] * 4, limit_price=1.0)
+        assert len(req.legs) == 4
+
+    def test_butterfly_one_two_one_ratio_valid(self):
+        # Shape of a long_call_butterfly order: middle (short) leg is 2x.
+        req = PlaceOrderRequest(
+            client_order_id="co-1",
+            legs=[self._leg(1, OrderAction.BUY), self._leg(2, OrderAction.SELL), self._leg(1, OrderAction.BUY)],
+            limit_price=1.0,
+        )
+        assert [leg.quantity for leg in req.legs] == [1, 2, 1]
+
+    def test_non_integer_multiple_rejected(self):
+        # 5 is not an integer multiple of the smaller leg's quantity (2).
+        with pytest.raises(ValidationError):
+            PlaceOrderRequest(client_order_id="co-1", legs=[self._leg(2), self._leg(5)], limit_price=1.0)
+
+    def test_uneven_two_leg_ratio_rejected(self):
+        # An exact integer multiple (2x) but not a ratio this platform
+        # defines for a 2-leg order -- every real 2-leg strategy is 1:1.
+        with pytest.raises(ValidationError):
+            PlaceOrderRequest(client_order_id="co-1", legs=[self._leg(1), self._leg(2)], limit_price=1.0)
+
+    def test_three_leg_ratio_with_two_twos_rejected(self):
+        # Not the platform's actual 1:2:1 butterfly shape (two legs at 2x).
+        with pytest.raises(ValidationError):
+            PlaceOrderRequest(
+                client_order_id="co-1", legs=[self._leg(1), self._leg(2), self._leg(2)], limit_price=1.0,
+            )
+
+    def test_four_leg_non_uniform_ratio_rejected(self):
+        with pytest.raises(ValidationError):
+            PlaceOrderRequest(
+                client_order_id="co-1", legs=[self._leg(1), self._leg(1), self._leg(1), self._leg(2)], limit_price=1.0,
             )
 
 
@@ -237,3 +299,22 @@ class TestSqliteIdempotencyStoreRegressionSY002:
 def test_broker_is_abstract():
     with pytest.raises(TypeError):
         Broker()  # type: ignore[abstract]
+
+
+class TestBrokerEnvironmentRegressionStep22Part19:
+    """Step 22 Part 19 safety-invariant re-verification: "no real-money/
+    live auto-execution path exists anywhere" depended, until now, only
+    on indirect/behavioral test coverage (IBKR paper-port enforcement,
+    Fidelity's no-submission tests) -- this is the one direct,
+    structural assertion of the claim itself: `BrokerEnvironment` has
+    and can only ever have exactly one member. Adding a `LIVE` value
+    would be a real, deliberate code change to this enum (and to every
+    concrete adapter's connection-validation logic, per this type's own
+    docstring), never a config flip -- this test is what would actually
+    break if that line were ever crossed."""
+
+    def test_broker_environment_has_exactly_one_member_paper(self):
+        assert list(BrokerEnvironment) == [BrokerEnvironment.PAPER]
+
+    def test_broker_environment_member_count_is_exactly_one(self):
+        assert len(BrokerEnvironment) == 1

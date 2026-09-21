@@ -64,3 +64,16 @@ decision_quality:
 alerts:
   consecutive_loss_alert_count: 5
   weekly_loss_alert_pct: 0.05
+
+# Step 22: where the durable SqliteValidationStore lives. This is a
+# LOCATION default only -- naming a path here does not create the file,
+# open a connection, or start a cohort; the file is created only when
+# something actually constructs a SqliteValidationStore against this
+# path (see src.validation.session), which happens at explicit,
+# human-initiated cohort start (src.validation.cohort.start_new_cohort),
+# never on import or on every application boot. A relative path is
+# resolved against the current working directory (normally the repo
+# root, matching scripts/start.sh's own `cd`).
+storage:
+  db_path: data/options_agent.db
+  db_path_env: OPTIONS_AGENT_VALIDATION_DB_PATH

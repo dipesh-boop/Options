@@ -7,3 +7,30 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# Step 22: the durable validation database and its backups are runtime
+# data, never committed -- config/validation.yaml's db_path default
+# (data/options_agent.db) is a LOCATION, not a file that should exist
+# in version control. See scripts/backup.sh for how to actually back
+# this up, and README.md's "Where the database lives" section.
+#
+# These are anchored to the repository root (leading `/`) deliberately
+# -- an unanchored `data/`/`reports/` would also match, and silently
+# exclude from git, the unrelated *source* directories `src/data/` and
+# `tests/unit/data/` (a real bug caught during Step 22: it was quietly
+# hiding `src/data/market_calendar.py` and its test file from every
+# `git add` until this anchor was added).
+/data/
+/backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Step 22: generated validation reports/exports are runtime output,
+# never committed. (`reports/validation/` is a pre-existing, deliberately
+# tracked exception -- see its own README.md -- so this is scoped to the
+# repo-root `exports/` directory only, plus report OUTPUT under
+# `reports/` that isn't already tracked; anchoring to the root avoids
+# ever matching a same-named subdirectory elsewhere in the source tree.)
+/exports/

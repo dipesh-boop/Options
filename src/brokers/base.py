@@ -18,7 +18,7 @@ from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from src.data.option_chain import OptionChain, OptionRight
 from src.data.provider import StrictModel, TimestampedModel
@@ -84,6 +84,45 @@ class PlaceOrderRequest(StrictModel):
     order_type: OrderType = OrderType.LIMIT
     limit_price: float = Field(gt=0)
     time_in_force: str = Field(default="DAY", min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def _leg_quantities_form_a_recognized_combo_ratio(self) -> "PlaceOrderRequest":
+        """Step 22 (SECURITY_AUDIT.md OP-003) defense-in-depth: the one
+        real production call site (`src.risk.engine._build_approved_order`)
+        already derives every leg's quantity from an already
+        ratio-validated `TradeProposal` (see
+        `src.llm.schemas.TradeProposal`'s own per-strategy leg-ratio
+        validators), so this never fires today -- it exists purely so a
+        future or malformed caller that constructs a `PlaceOrderRequest`
+        with an arbitrary, non-strategy-shaped per-leg quantity mismatch
+        (e.g. `[2, 5]`) fails closed here instead of reaching
+        `PaperBroker`, which would otherwise silently absorb it as "2
+        combo units, with the qty=5 leg over-filled relative to what was
+        intended" (`base_combo_quantity` is the *minimum* leg quantity).
+        Every strategy this platform defines uses either a uniform
+        1:1:...:1 ratio on every leg, or (`long_call_butterfly` only, its
+        short middle leg) a 1:2:1 ratio on exactly 3 legs -- so those are
+        the only two shapes accepted here."""
+        quantities = [leg.quantity for leg in self.legs]
+        base = min(quantities)
+        ratios = []
+        for q in quantities:
+            if q % base != 0:
+                raise ValueError(
+                    f"leg quantities {quantities} do not form a valid combo ratio -- every "
+                    f"leg's quantity must be an exact integer multiple of the smallest leg's "
+                    f"quantity ({base}), matching one of this platform's own defined strategy "
+                    "ratios (see SECURITY_AUDIT.md OP-003)"
+                )
+            ratios.append(q // base)
+        if not (all(r == 1 for r in ratios) or (len(ratios) == 3 and sorted(ratios) == [1, 1, 2])):
+            raise ValueError(
+                f"leg quantity ratios {ratios} (relative to base combo quantity {base}) do not "
+                "match any strategy ratio this platform defines -- every strategy uses either a "
+                "uniform 1:1:...:1 ratio on every leg, or (long_call_butterfly only) a 1:2:1 "
+                "ratio on exactly 3 legs (see SECURITY_AUDIT.md OP-003)"
+            )
+        return self
 
 
 class Order(TimestampedModel):

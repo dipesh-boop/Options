@@ -312,8 +312,8 @@ reach this result.
 | ACCEPT-002 | LOW | `src/risk/trade_risk.py` (`check_liquidity`) | **FIXED**, regression test added |
 | — | LOW | `src/strategies/base.py` docstrings (stale "evaluation only" language) | **FIXED** |
 | — | LOW | `SECURITY_AUDIT.md` OP-003 (stale factual claims, now-legitimate 2x ratio) | **FIXED** (documentation corrected) |
-| OP-003 | MEDIUM | `src/brokers/base.py`/`src/brokers/paper.py` (no type-level leg-ratio validator) | **OPEN** (pre-existing, defense-in-depth only, no live exploit path — see updated description in `SECURITY_AUDIT.md`) |
-| FS-005 | LOW | `src/brokers/fidelity.py` (`FidelityTradeTicket` constructible at a terminal status directly) | **OPEN** (pre-existing, no live exploit path, now regression-tested that the one real construction site is safe) |
+| OP-003 | MEDIUM | `src/brokers/base.py`/`src/brokers/paper.py` (no type-level leg-ratio validator) | **OPEN as of Step 21** (pre-existing, defense-in-depth only, no live exploit path — see updated description in `SECURITY_AUDIT.md`); **FIXED in Step 22** |
+| FS-005 | LOW | `src/brokers/fidelity.py` (`FidelityTradeTicket` constructible at a terminal status directly) | **OPEN as of Step 21** (pre-existing, no live exploit path, now regression-tested that the one real construction site is safe); **FIXED in Step 22** |
 | Other `SECURITY_AUDIT.md` OPEN items | MEDIUM/LOW | various | **OPEN** (pre-existing, out of this Step's scope — none is CRITICAL or HIGH) |
 
 **#### ACCEPT-003 — HIGH — Backtest butterfly settlement ignored the 2x middle-leg quantity ratio**

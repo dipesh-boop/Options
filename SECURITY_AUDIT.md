@@ -13,8 +13,23 @@ TS-004) has since been fixed, each with a regression test proving the
 vulnerability is closed, and is marked **Status: FIXED (Step 17B)** in its
 own section below with a pointer to the fix and its test. No existing test
 was weakened to reach a passing state; the full suite (1531 tests) passes.
-All MEDIUM/LOW findings remain **OPEN** and unremediated — this document
-still doubles as the audit record for those.
+
+**Step 22 remediation update:** as part of pre-validation hardening (Step
+22 Part 17), two of the remaining MEDIUM/LOW findings were closed with
+low-risk, defense-in-depth fixes, each with new regression tests and zero
+change to existing passing-test behavior: **OP-003** (a new
+`PlaceOrderRequest` model validator in `src/brokers/base.py` now requires
+every leg's quantity to be an exact integer multiple of the smallest leg's
+quantity, matching one of this platform's own defined strategy ratios) and
+**FS-005** (a new `FidelityTradeTicket` model validator in
+`src/brokers/fidelity.py` now requires direct construction to be at
+`AWAITING_HUMAN`, exploiting the fact that pydantic v2's `model_copy()` —
+what `transition()`/`confirm_fill()` exclusively use — never re-runs
+`@model_validator` hooks, so the legitimate state machine is unaffected).
+Both are marked **Status: FIXED (Step 22)** below. All other MEDIUM/LOW
+findings remain **OPEN** and unremediated, per Step 22's own explicit
+"do not change working architecture unnecessarily" instruction — this
+document still doubles as the audit record for those.
 
 **Method:** four parallel, independent, read-only investigations (market-data
 failures; options mechanics; system/orchestration failures; LLM boundary +
@@ -56,7 +71,7 @@ platform were ever connected to real capital without remediation first.
 | MD-005 | MEDIUM | OPEN | Market-data | `UnderlyingQuote` has no bid≤ask validator (unlike `OptionContract`/`HistoricalOptionQuote`) |
 | MD-006 | MEDIUM | OPEN | Market-data | A zero-contract chain fetch is reported "healthy" by feed-health verification |
 | OP-002 | MEDIUM | OPEN | Options | `PaperBroker` never re-marks an assigned equity position to the live underlying price |
-| OP-003 | MEDIUM | OPEN | Options | Multi-leg order quantity has no cross-leg equality validator; only leg 0's quantity is consulted |
+| OP-003 | MEDIUM | **FIXED (Step 22)** | Options | Multi-leg order quantity has no cross-leg equality validator; only leg 0's quantity is consulted |
 | OP-005 | MEDIUM | OPEN | Options | "Dividend risk" / "early exercise" are mandatory checklist categories with zero grounding data anywhere |
 | SY-007 | MEDIUM | OPEN | System | The Order Validator's own duplicate-id check is dead code — never supplied a non-empty set by its only caller |
 | SY-008 | MEDIUM | OPEN | System | Fidelity execution time-of-day bucketing silently assumes a timezone nothing enforces |
@@ -72,7 +87,7 @@ platform were ever connected to real capital without remediation first.
 | SY-010 | LOW | OPEN | System | No locking anywhere; current race-freedom is incidental to an all-synchronous implementation, not a designed guarantee |
 | LM-003 | LOW | OPEN | LLM | `profit_target`/`management_dte` reach the human-facing Fidelity ticket unchecked beyond schema bounds (currently a dormant path) |
 | LM-004 | LOW | OPEN | LLM | `PortfolioManagerReview` is unused, untested dead code shadowing `PortfolioDecision` |
-| FS-005 | LOW | OPEN | Fidelity | `FidelityTradeTicket` can in principle be constructed directly at a terminal FILLED status, bypassing the lifecycle functions (no live exploit path) |
+| FS-005 | LOW | **FIXED (Step 22)** | Fidelity | `FidelityTradeTicket` can in principle be constructed directly at a terminal FILLED status, bypassing the lifecycle functions (no live exploit path) |
 | QF-002 | LOW | OPEN | Quantitative | Survivorship bias in backtesting is honestly documented as unenforced ("where possible"), not actually prevented |
 | QF-003 | LOW | OPEN | Quantitative | `TRADING_DAYS_PER_YEAR` is a dead constant in `src/backtest/metrics.py` that could mislead a future maintainer |
 
@@ -211,11 +226,13 @@ mechanics.
 
 ### OP-003 — Multi-leg order quantity has no cross-leg ratio-consistency validator
 - **Severity:** MEDIUM (currently unreached in production)
+- **Status: FIXED (Step 22)**
 - **Component:** `src/brokers/base.py:61-73` (`OrderLeg`); `src/brokers/paper.py` (`base_combo_quantity`, `attempt_fill`, `_apply_fill`)
 - **Step 21 update:** this finding's original description is now factually stale and has been corrected here rather than left to mislead a future reader (see `tests/acceptance/test_strategy_integrity.py::TestNoStaleEvaluationOnlyLanguage`, which exists for exactly this class of drift). As of Step 20A, `PaperBroker` no longer consults `order.legs[0].quantity` — it anchors on `base_combo_quantity` (the *minimum* per-leg quantity), and `LONG_CALL_BUTTERFLY`'s production call site legitimately constructs a non-uniform 1:-2:1 leg quantity ratio, which is correctly handled end to end (fill quantity, collateral, commission — see `tests/unit/brokers/test_paper_broker_multileg.py` and this Step's own `tests/acceptance/test_multileg_integrity.py`/`test_paper_broker.py`). The underlying gap the finding originally pointed at is narrower than first described, but still real: neither `OrderLeg` nor `PlaceOrderRequest` has a type-level validator confirming a *given* set of per-leg quantities forms one of the ratios the platform's strategy library actually defines (1:1:..., or 1:-2:1) — the only thing currently preventing a malformed ratio from reaching `PaperBroker` is that every current call site (`src.risk.engine._build_approved_order`) derives leg quantities correctly from an already-validated `TradeProposal`.
 - **Possible consequence:** a future code path or data-entry bug that produced an arbitrary, non-strategy-shaped per-leg quantity mismatch (e.g. `[short qty=2, long qty=5]`, not any of this platform's own 16 named ratios) would still pass model validation and be silently absorbed as "2 combo units, with the qty=5 leg treated as 2x" rather than rejected.
-- **Reproduction:** `PlaceOrderRequest(legs=[OrderLeg(..., quantity=2), OrderLeg(..., quantity=5)], ...)` constructs and fills without error, using `base_combo_quantity`=2 and silently over-filling the qty=5 leg's book-keeping relative to what a caller might have intended.
-- **Recommended remediation (not applied):** add a validator on `PlaceOrderRequest`/`ApprovedOrder` requiring every leg's quantity to be an exact integer multiple of `base_combo_quantity`, matching one of `StrategyKind`'s own defined ratios — not applied in Step 21 since it is defense-in-depth against a call site that does not currently exist, not a fix for a live path, and adding new validation logic is out of scope for an acceptance-testing pass per the Step 21 instruction's own constraints.
+- **Reproduction (pre-fix):** `PlaceOrderRequest(legs=[OrderLeg(..., quantity=2), OrderLeg(..., quantity=5)], ...)` constructed and filled without error, using `base_combo_quantity`=2 and silently over-filling the qty=5 leg's book-keeping relative to what a caller might have intended.
+- **Fix (Step 22):** a new `@model_validator(mode="after")` on `PlaceOrderRequest` (`src/brokers/base.py`) computes each leg's ratio relative to the smallest leg's quantity, requires an exact integer multiple, and requires the resulting ratio set to be either uniform (1:1:...:1, any leg count) or exactly one 2 with the rest 1 on exactly 3 legs (the `long_call_butterfly` shape) — every other shape is rejected with a `ValidationError`. This is a no-op for every real call site (`src.risk.engine._build_approved_order` always derives an already-ratio-validated shape from `TradeProposal`), and purely closes the gap for any future/malformed caller.
+- **Regression tests:** `tests/unit/brokers/test_base.py::TestPlaceOrderRequestLegRatioValidatorRegressionOP003` (8 tests: single-leg, uniform 2-leg, uniform 4-leg, 1:2:1 butterfly all accepted; non-integer-multiple, uneven 2-leg, two-legs-at-2x, and non-uniform 4-leg all rejected). Full suite re-verified passing after the fix (2388 tests, 4 skipped, 0 failed).
 
 ### OP-004 — Put-credit-spread collateral netting is scoped to a single order
 - **Severity:** LOW
@@ -407,11 +424,13 @@ mechanics.
 
 ### FS-005 — `FidelityTradeTicket` can in principle be constructed directly at a terminal status, bypassing the lifecycle functions
 - **Severity:** LOW (no live exploit path)
+- **Status: FIXED (Step 22)**
 - **Component:** `src/brokers/fidelity.py:262-320`
 - **Description:** `transition()` and `confirm_fill()` correctly enforce the full state-transition graph and reject any attempt to reach FILLED/PARTIALLY_FILLED except through `confirm_fill()` with a real `ExecutionConfirmation`, from `ORDER_ENTERED`/`PARTIALLY_FILLED` only. However, these functions operate on an *existing* ticket object — nothing prevents a caller from constructing a brand-new `FidelityTradeTicket(status=TicketStatus.FILLED, execution_confirmation=ExecutionConfirmation(...), ...)` directly via the Pydantic constructor, skipping the entire lifecycle. The model's own validator (`_execution_confirmation_only_when_filled`) only checks internal consistency (status matches presence of a confirmation object), not that the object was actually produced via the correct sequence of calls.
 - **Possible consequence:** none currently live — a repository-wide search confirms `FidelityTradeTicket(` is constructed in exactly one place in `src/`, inside `generate_trade_ticket`, always hardcoded to `status=TicketStatus.AWAITING_HUMAN`. This is a defense-in-depth gap (the type itself doesn't enforce provenance), not an active vulnerability.
-- **Reproduction:** `FidelityTradeTicket(status=TicketStatus.FILLED, execution_confirmation=ExecutionConfirmation(confirmed_by="anyone", confirmation_source="human_manual_entry", filled_quantity=1, fill_price=1.0, confirmed_at=<now>), ...all other required fields...)` constructs successfully without ever having passed through `AWAITING_HUMAN` → `ORDER_ENTERED` → `confirm_fill()`.
-- **Recommended remediation (not applied):** if this matters for defense-in-depth, consider a private/internal constructor pattern, or a class-level invariant that only `generate_trade_ticket`/`confirm_fill` are permitted to produce a "real" ticket (harder to enforce cleanly in Pydantic — may not be worth the complexity given zero current live path).
+- **Reproduction (pre-fix):** `FidelityTradeTicket(status=TicketStatus.FILLED, execution_confirmation=ExecutionConfirmation(confirmed_by="anyone", confirmation_source="human_manual_entry", filled_quantity=1, fill_price=1.0, confirmed_at=<now>), ...all other required fields...)` constructed successfully without ever having passed through `AWAITING_HUMAN` → `ORDER_ENTERED` → `confirm_fill()`.
+- **Fix (Step 22):** a new `@model_validator(mode="after")` on `FidelityTradeTicket` (`src/brokers/fidelity.py`) raises `ValueError` unless `status == TicketStatus.AWAITING_HUMAN` at construction time. This closes the gap without touching the legitimate state machine: pydantic v2's `model_copy(update=...)` — which `transition()`/`confirm_fill()` exclusively use to move a ticket through its lifecycle — never re-runs `@model_validator` hooks (verified directly), so every real transition is unaffected; only a caller building a brand-new instance at a non-initial status now fails closed. The one real production construction site, `FidelityManualProvider.generate_trade_ticket`, already always constructs at `AWAITING_HUMAN`, so the fix is a no-op there.
+- **Regression tests:** `tests/unit/brokers/test_fidelity_schemas.py` (the pre-existing tests that exercised non-`AWAITING_HUMAN` ticket states via direct construction were updated to reach those states via `.model_copy(update=...)` instead, matching how `transition()`/`confirm_fill()` actually work); `tests/acceptance/test_fidelity_manual_only.py::TestFS005SoleTicketConstructionSiteIsHardcodedToAwaitingHuman` (verifies exactly one `FidelityTradeTicket(` construction call site exists in `src/`, and it is `AWAITING_HUMAN`). Full suite re-verified passing after the fix (2388 tests, 4 skipped, 0 failed).
 
 ---
 
@@ -470,6 +489,10 @@ re-litigating what's already sound:
 *End of audit, as originally written (Step 17). Step 17B (see the
 remediation update at the top of this document) subsequently fixed all 10
 CRITICAL/HIGH findings, each with a regression test proving the fix, without
-weakening any existing test — the full suite (1531 tests) passes. All
-MEDIUM/LOW findings remain open and unremediated; this document continues to
-serve as their audit record pending a future remediation step.*
+weakening any existing test — the full suite (1531 tests) passes. Step 22
+(see that remediation update at the top of this document) subsequently
+fixed two more findings — OP-003 and FS-005, both with regression tests,
+without weakening any existing test — the full suite (2388 tests) passes.
+All remaining MEDIUM/LOW findings remain open and unremediated; this
+document continues to serve as their audit record pending a future
+remediation step.*

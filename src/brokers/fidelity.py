@@ -336,6 +336,33 @@ class FidelityTradeTicket(TimestampedModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _only_ever_constructed_at_awaiting_human(self) -> "FidelityTradeTicket":
+        """Step 22 (SECURITY_AUDIT.md FS-005) fix: pydantic model
+        validators run on `__init__`-time construction but NOT on
+        `model_copy()` (verified: a `model_copy(update=...)` call never
+        re-invokes `@model_validator`), so this closes the exact gap
+        FS-005 named — a caller directly constructing this class with
+        `status=TicketStatus.FILLED` (or any other non-initial status)
+        passed straight to `__init__`, bypassing the entire
+        `AWAITING_HUMAN -> ... -> confirm_fill()` lifecycle —
+        without touching `transition()`/`confirm_fill()` at all, since
+        both of those exclusively use `model_copy()` (confirmed: this
+        validator does not fire for either, by the same pydantic
+        behavior). The one real production construction site,
+        `FidelityManualProvider.generate_trade_ticket`, already always
+        constructs at `AWAITING_HUMAN` (regression-tested in
+        `tests/acceptance/test_fidelity_manual_only.py`), so this is a
+        no-op there and a hard failure for anything else."""
+        if self.status != TicketStatus.AWAITING_HUMAN:
+            raise ValueError(
+                f"FidelityTradeTicket can only ever be directly constructed at "
+                f"TicketStatus.AWAITING_HUMAN (got {self.status.value!r}) — every other status is "
+                "reachable only through transition()/confirm_fill() acting on an existing ticket, "
+                "never by building a new one at that status directly (see SECURITY_AUDIT.md FS-005)."
+            )
+        return self
+
     @property
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATUSES

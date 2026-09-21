@@ -1,17 +1,16 @@
 """Sections 16 (database failure), 17 (time/calendar), 23 (dashboard),
 and 25 (failure recovery/kill switch) acceptance coverage.
 
-Section 17 finding, stated plainly rather than tested around: this
-platform has NO market-hours/trading-calendar/DST-aware module
-anywhere in `src/` (confirmed by repo-wide grep for `market_hours`,
-`is_market_open`, `trading_calendar`, `market_calendar`,
-`exchange_calendar` -- zero matches). `ARCHITECTURE.md` itself lists
-"Clock/timezone bugs around market hours and expiration" as a KNOWN,
-documented, not-yet-built mitigation (an exchange-calendar library is
-named as future work), not a claimed-working feature. There is
-therefore no market-hours/holiday logic to hostile-test; what IS
-built and testable is universal tz-aware-datetime enforcement, tested
-below.
+Section 17 finding AS OF STEP 21 (superseded by Step 22): this
+platform had NO market-hours/trading-calendar/DST-aware module
+anywhere in `src/`. `ARCHITECTURE.md` listed "Clock/timezone bugs
+around market hours and expiration" as a known, not-yet-built
+mitigation. Step 22 Part 7-9 closed that gap with
+`src.data.market_calendar` (see `tests/unit/data/test_market_calendar.py`
+for the full deterministic test suite: holidays, early closes, DST,
+UTC/Eastern conversion) -- this file's own check below now confirms
+the module exists and is wired to fail closed, rather than confirming
+its absence.
 """
 from __future__ import annotations
 
@@ -59,21 +58,22 @@ class TestSection17TimezoneEnforcementIsUniversal:
         with pytest.raises(ValidationError):
             base_proposal(fx.strategy, fx.legs, contracts_requested=1, timestamp=datetime(2026, 9, 20, 14, 0))
 
-    def test_no_market_hours_or_trading_calendar_module_exists(self):
-        """Documents the actual, current state rather than asserting a
-        feature that was never built: confirms the absence is
-        deliberate/known (named in ARCHITECTURE.md's own risk list),
-        not an accidental gap this acceptance pass silently missed."""
-        import subprocess
+    def test_market_calendar_module_exists_and_fails_closed_on_naive_datetimes(self):
+        """Step 22's resolution of the Step 21 finding: a real,
+        deterministic market-hours/holiday module now exists (see
+        `tests/unit/data/test_market_calendar.py` for its own
+        exhaustive test suite) -- this is a light smoke check that it's
+        actually importable and wired to the same fail-closed,
+        never-naive-datetime discipline as every other timestamp check
+        in this platform, not a re-test of its internals."""
+        from src.data.market_calendar import NaiveDatetimeError, is_market_open
 
-        result = subprocess.run(
-            ["grep", "-rlE", "market_hours|is_market_open|trading_calendar|market_calendar|exchange_calendar", "--include=*.py", "src/"],
-            capture_output=True, text=True, cwd="/home/user/Options",
-        )
-        assert result.stdout.strip() == ""
-        with open("/home/user/Options/ARCHITECTURE.md") as f:
-            arch = f.read()
-        assert "Clock/timezone bugs" in arch and "market hours" in arch
+        with pytest.raises(NaiveDatetimeError):
+            is_market_open(datetime(2026, 9, 21, 10, 0))  # naive -- rejected
+
+        # A real, known-closed instant (a Saturday) -- proves it isn't
+        # a stub that always returns True.
+        assert is_market_open(datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)) is False
 
 
 class TestSection16DatabaseCrashRecovery:

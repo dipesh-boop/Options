@@ -387,9 +387,21 @@ A single `BrokerClient` interface (`connect`, `get_account`,
   filled put credit spread is treated as naked exposure by Python Risk
   Engine until the fill completes or is unwound; this is itself a hard
   limit check, not an afterthought.
-- **Clock/timezone bugs** around market hours and expiration → an exchange
-  calendar library (e.g. `pandas_market_calendars`), UTC internally, all
-  market-hours logic centralized in one module rather than repeated.
+- **Clock/timezone bugs** around market hours and expiration →
+  **resolved in Step 22**: `src.data.market_calendar` is the single,
+  centralized module for every market-hours/holiday question (is
+  today a trading day, is the market open right now, regular/early
+  close time, next trading day/open), computed from stable NYSE
+  observance rules (not a hardcoded date table) using stdlib
+  `zoneinfo` for correct Eastern/UTC/DST handling — deliberately not a
+  third-party exchange-calendar dependency (see that module's own
+  docstring for why: this codebase has never taken a `pandas`
+  dependency, and `pandas_market_calendars` would pull in `pandas`
+  plus several unrelated calendar packages for a single-market need).
+  Every function rejects a naive datetime outright. See
+  `tests/unit/data/test_market_calendar.py` for the full deterministic
+  test suite (holidays, early closes, weekends, DST transitions,
+  UTC/Eastern conversion).
 - **Corporate actions** (splits, dividends, ticker/OCC symbol changes)
   breaking contract identity → an instrument-mapping/adjustment layer;
   screener, quant, and risk engine must not silently misprice a

@@ -74,6 +74,11 @@ class ValidationConfig(BaseModel):
     consecutive_loss_alert_count: int = Field(gt=0)
     weekly_loss_alert_pct: float = Field(gt=0)
 
+    # Step 22: where the durable SqliteValidationStore lives (see
+    # src.validation.session). A location default only -- reading this
+    # value never creates the file or opens a connection.
+    db_path: str = Field(min_length=1)
+
     @model_validator(mode="after")
     def _validate_orderings(self) -> "ValidationConfig":
         if self.minimum_completed_trades > self.preferred_completed_trades:
@@ -112,6 +117,7 @@ def load_validation_config(config_path: Path | str | None = None) -> ValidationC
         stats = data["statistics"]
         dq = data["decision_quality"]
         alerts = data["alerts"]
+        storage = data.get("storage", {})
 
         return ValidationConfig(
             duration_days=int(_resolved(period, "duration_days")),
@@ -132,6 +138,7 @@ def load_validation_config(config_path: Path | str | None = None) -> ValidationC
             rejected_trade_min_sample_size=int(dq["rejected_trade_min_sample_size"]),
             consecutive_loss_alert_count=int(alerts["consecutive_loss_alert_count"]),
             weekly_loss_alert_pct=float(alerts["weekly_loss_alert_pct"]),
+            db_path=str(_resolved(storage, "db_path")),
         )
     except KeyError as exc:
         raise ValidationConfigError(f"{path} is missing required section {exc}") from exc

@@ -190,31 +190,106 @@ performs any of those steps for you.
 
 Press `Ctrl-C` in the terminal where `./scripts/start.sh` is running.
 
-## 11. How to restart it
+## 11. How to restart it safely
 
-Press `Ctrl-C` to stop it, then run `./scripts/start.sh` again. Nothing
-about your configuration or historical data is lost between restarts —
-the dashboard's in-memory state resets, but the underlying reports,
-validation records, and config files on disk are untouched.
+Press `Ctrl-C` to stop it, then run `./scripts/start.sh` again. This is
+always safe: the dashboard's in-memory state resets, but nothing about
+your configuration, validation history, or generated reports is lost —
+the 90-day validation database (see §13) is a real file on disk, not
+something the running process holds only in memory, and it survives a
+normal shutdown, a crash, or a full machine restart identically. There
+is no special shutdown sequence you need to follow (no "let it finish
+writing first") — every write to the validation database is its own
+completed transaction before the dashboard ever reports success back to
+you, so there is nothing left in an unsafe half-written state to worry
+about when you stop it.
 
-## 12. Where reports are stored
+## 12. Where reports and exports are stored
 
-Daily, weekly, and monthly reports are generated on demand by the
-`src/workflows/` modules (morning scan, weekly review) and returned as
-text/data — there is currently no automatic "save every report to a
-folder" step. If you want to keep a report, save the output somewhere
-of your choosing when you generate it.
+Two different things live under this heading:
 
-## 13. Where validation results are stored
+- **On-demand text reports** (morning scan, weekly review) come from
+  the `src/workflows/` modules and are returned as text/data when you
+  ask for one — there is no automatic "save every report to a folder"
+  step for these. If you want to keep one, save the output somewhere of
+  your choosing when you generate it.
+- **Validation-cohort exports** (CSV/JSON/XLSX/PDF — validation
+  summary, daily portfolio history, trades, strategy performance, risk
+  metrics, execution quality, counterfactuals, and more) are produced
+  by `src.reporting.export.export_validation_cohort` and written to
+  whatever `output_dir` you give it (nothing is exported automatically
+  yet — this is a deliberate, on-demand action once the validation
+  cohort has real data to report on). By convention this repository's
+  own `.gitignore` reserves a local `reports/`/`exports/` folder for
+  this at the repository root, so nothing you generate this way is ever
+  accidentally committed to version control.
 
-The 90-day validation protocol's trades, snapshots, and scorecards are
-held by the `ValidationStore` (see `src/validation/session.py`) for the
-process's lifetime. As with reports, persisting this to a database file
-on disk for long-term, cross-restart tracking is a known next step, not
-yet wired up automatically — see `progress.md`'s "Next up" section for
-the current status.
+## 13. Where validation results (the database) are stored
 
-## 14. How to troubleshoot common problems
+The 90-day validation protocol's cohort, daily NAV snapshots, trades,
+strategy alternatives ("what else was considered and why it lost"),
+Risk Engine decisions, and Fidelity ticket records are all written to a
+real SQLite database file on disk — by default `data/options_agent.db`
+(configurable via `config/validation.yaml`'s `storage.db_path`, or the
+`OPTIONS_AGENT_VALIDATION_DB_PATH` environment variable for an ops-time
+override without editing config). This file is never committed to
+version control (see `.gitignore`) since it is your own real trading
+history, not shared code.
+
+- **How to back it up:** `make backup` (or `./scripts/backup.sh`).
+  Writes a timestamped copy to `backups/options_agent_YYYYMMDD_HHMMSS.db`.
+  Safe to run at any time, including while the dashboard is running.
+- **How to restore it:** `make restore FILE=backups/options_agent_20260921_140000.db`
+  (or `./scripts/restore.sh <path>`). This asks you to type `YES` to
+  confirm before it touches anything, and it always makes a safety copy
+  of whatever database is currently there before overwriting it — it
+  never restores automatically or silently.
+- **Does it survive a restart?** Yes — this is not a "best effort"
+  claim; it is tested directly (see `tests/acceptance
+  /test_persistence_restart_recovery.py`), including simulating a
+  process crash mid-run and confirming every cohort, snapshot, trade,
+  and decision record reconstructs identically afterward.
+
+## 14. Starting the 90-day validation (do this only when you're ready)
+
+**This has not been started yet, and nothing in this README starts it
+for you.** The steps below get you to the point of being *ready* to
+start it — actually beginning the 90-day clock is a separate, explicit
+action you take deliberately, not something that happens as a side
+effect of installing or running the software.
+
+1. **Install** the application (§4).
+2. **Configure an API key** if you want the AI-assisted proposal/review
+   layer (§5) — optional; the deterministic Quant Engine and Risk
+   Engine work without it. The Risk Engine's decision is never affected
+   either way.
+3. **Start the application** (§6).
+4. **Verify the V1.0 freeze** by running `make verify-freeze` (or
+   `./scripts/verify_freeze.sh`) from a terminal in the project
+   directory. This checks that `VALIDATION_MANIFEST.json` exists, that
+   nothing material has changed since the platform was frozen, that
+   Fidelity is still manual-only, and that live trading is still
+   disabled. It should print:
+   ```
+   PAPER_TRADING_V1.0 / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION
+   ```
+   If it instead reports a failed check, do not proceed — that means
+   something in the frozen configuration or code has changed since the
+   freeze, and needs a human look before validation begins.
+5. **Open the dashboard** (§7) and confirm it loads normally.
+6. **Verify the market/data status** shown on the dashboard (or in a
+   morning-scan report) looks correct — e.g. it correctly reports
+   whether the market is currently open, per `src.data.market_calendar`.
+7. **Only when you are explicitly ready** to begin the real 90-day
+   clock: that initialization is a separate, deliberately-gated step
+   (this repository calls it "Step 23") that has not been built into
+   this release. It must be separately authorized by you before any
+   code creates a validation cohort, records a Day 1 snapshot, or
+   starts counting toward the 90 days — this release intentionally
+   stops short of that so you get to make that call with a working,
+   verified system in front of you, not a black box.
+
+## 15. How to troubleshoot common problems
 
 - **"ANTHROPIC_API_KEY not set" / AI features fail**: make sure `.env`
   exists (copied from `.env.example`) and has a real key, and that you
@@ -255,4 +330,10 @@ the current status.
   built, what was tested, and what remains open.
 - `SECURITY_AUDIT.md` — the platform's own security self-audit and
   remediation history.
+- `ACCEPTANCE_TEST_REPORT.md` — Step 21's final system integration and
+  acceptance test results.
+- `STEP_22_FREEZE_REPORT.md` — the PAPER_TRADING_V1.0 pre-validation
+  hardening/freeze report, including whether validation has started.
+- `VALIDATION_MANIFEST.json` — the frozen version's own machine-checked
+  manifest (see §14, step 4).
 - Run the test suite with `make test` (or `python -m pytest -q`).

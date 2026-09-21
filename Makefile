@@ -1,4 +1,4 @@
-.PHONY: run install test
+.PHONY: run install test backup restore verify-freeze freeze-manifest
 
 install:
 	pip install -r requirements.txt -r requirements-dev.txt
@@ -8,3 +8,20 @@ run:
 
 test:
 	python -m pytest -q
+
+backup:
+	./scripts/backup.sh
+
+# Usage: make restore FILE=backups/options_agent_20260921_140000.db
+restore:
+	./scripts/restore.sh "$(FILE)"
+
+verify-freeze:
+	./scripts/verify_freeze.sh
+
+# Regenerates VALIDATION_MANIFEST.json from the current working tree.
+# Only run this deliberately, as part of freezing/re-freezing a
+# version -- never as a routine step, and never to "fix" a failed
+# `make verify-freeze` (that means investigate the drift first).
+freeze-manifest:
+	python -m src.validation.freeze build

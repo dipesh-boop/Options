@@ -8,3 +8,7 @@ ib_insync==0.9.86
 python-dotenv==1.0.1
 anthropic==0.39.0
 PyYAML==6.0.2
+
+# Step 22: validation-cohort reporting/export layer.
+openpyxl==3.1.5
+reportlab==5.0.1
