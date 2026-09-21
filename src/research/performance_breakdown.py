@@ -4,6 +4,18 @@ sector, entry day, entry time, holding period, profit target, management
 DTE. Every number here is plain Python arithmetic over already-computed
 `src.backtest.simulator.TradeRecord`s (never a number the LLM invents),
 consumed as read-only reference data by `src.llm.strategy_research`.
+
+**Multi-strategy attribution reporting addition**: a 13th dimension,
+`volatility_regime`, was added on top of Step 14's original 12 —
+deliberately distinct from `iv_percentile` (a numeric bucket like
+"50-75") and from `src.validation.regime_analysis.ValidationRegime`
+(direction + volatility combined, for the 90-day validation run's own
+regime coverage question). `volatility_regime` is a plain,
+caller-supplied qualitative label (e.g. "low_vol"/"normal"/
+"elevated_vol"/"crisis", the same vocabulary
+`MarketRegimeAssessment.regime` already uses) — a third, deliberately
+distinct taxonomy for a fourth purpose (per-strategy performance
+attribution), not a redefinition of either existing one.
 """
 from __future__ import annotations
 
@@ -18,6 +30,7 @@ AnalysisDimension = Literal[
     "dte",
     "iv_percentile",
     "market_regime",
+    "volatility_regime",
     "underlying",
     "sector",
     "entry_day",
@@ -49,6 +62,7 @@ class TradeContext:
     profit_target_pct: float
     management_dte: int
     entry_time_of_day: str | None = None
+    volatility_regime: str | None = None  # e.g. "low_vol"/"normal"/"elevated_vol"/"crisis" -- see module docstring
 
 
 @dataclass(frozen=True)
@@ -143,6 +157,8 @@ def _group_key(dimension: AnalysisDimension, obs: ResearchTradeObservation) -> s
         return _iv_percentile_bucket(ctx.iv_percentile)
     if dimension == "market_regime":
         return ctx.market_regime
+    if dimension == "volatility_regime":
+        return ctx.volatility_regime or "unspecified"
     if dimension == "underlying":
         return trade.ticker
     if dimension == "sector":

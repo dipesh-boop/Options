@@ -686,10 +686,12 @@ def ensure_trade_proposal(obj: object) -> TradeProposal:
     return obj
 
 
-# The 12 dimensions Step 14 names for performance analysis. Mirrored
-# (not imported) from `src.research.performance_breakdown.AnalysisDimension`
-# for the same decoupling reason `QuantitativeAnalysisContext` doesn't
-# import `src.quant` — kept in sync by
+# The 13 dimensions (Step 14's original 12 plus `volatility_regime`,
+# added for multi-strategy attribution reporting) for performance
+# analysis. Mirrored (not imported) from
+# `src.research.performance_breakdown.AnalysisDimension` for the same
+# decoupling reason `QuantitativeAnalysisContext` doesn't import
+# `src.quant` — kept in sync by
 # `tests/unit/llm/test_strategy_research_review_schema.py`'s literal-drift
 # check rather than by a shared import.
 AnalysisDimension = Literal[
@@ -698,6 +700,7 @@ AnalysisDimension = Literal[
     "dte",
     "iv_percentile",
     "market_regime",
+    "volatility_regime",
     "underlying",
     "sector",
     "entry_day",
@@ -740,7 +743,7 @@ class StrategyResearchReview(_StrictModel):
     review_id: str = Field(min_length=1, max_length=64)
     hypothesis_id: str = Field(min_length=1, max_length=64)
     hypothesis_statement: str = Field(min_length=1, max_length=1000)
-    supporting_dimensions: list[AnalysisDimension] = Field(min_length=1, max_length=12)
+    supporting_dimensions: list[AnalysisDimension] = Field(min_length=1, max_length=13)
     observation_summary: str = Field(min_length=1, max_length=2000)
     overfitting_concerns: list[str] = Field(default_factory=list, max_length=10)
     fidelity_practicality_rating: FidelityPracticalityRatingLiteral

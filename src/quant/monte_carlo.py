@@ -111,6 +111,36 @@ def monte_carlo_pop_and_ev(
     return MonteCarloResult(n_paths=n_paths, probability_of_profit=pop, expected_value=ev, standard_error=se)
 
 
+def simulated_terminal_payoffs(
+    position: Position, spot: float, sigma: float, t: float, rate: float, n_paths: int, *, seed: int | None = None
+) -> np.ndarray:
+    """The raw simulated payoff sample `monte_carlo_pop_and_ev` computes
+    internally, exposed directly so a caller needing more than
+    pop/EV/standard-error (expected shortfall, a paired hedged-vs-
+    unhedged comparison under the *same* simulated price path) doesn't
+    have to re-simulate. Passing the same `seed` to two calls against
+    two different `Position`s (e.g. `src.strategies.hedge_effectiveness`
+    comparing a hedge to its unhedged baseline) draws both from the
+    identical terminal-price sample — a fair, paired comparison, not two
+    independently-sampled Monte Carlo runs."""
+    terminal_prices = simulate_terminal_prices(spot, sigma, t, rate, n_paths, seed=seed)
+    return np.array([payoff_at_expiration(position, float(s)) for s in terminal_prices])
+
+
+def tail_mean_payoff(payoffs: np.ndarray, tail_fraction: float = 0.05) -> float:
+    """Mean payoff among the worst `tail_fraction` of an already-
+    simulated payoff sample (build one with `simulated_terminal_payoffs`)
+    -- expected shortfall / CVaR at that tail. Pulled out as its own
+    function so `src.strategies.base.build_strategy_evaluation` and
+    `src.strategies.hedge_effectiveness` share one implementation
+    instead of two independently-maintained tail-mean calculations."""
+    if len(payoffs) == 0:
+        raise ValueError("payoffs must be non-empty")
+    tail_count = max(1, int(len(payoffs) * tail_fraction))
+    worst = np.sort(payoffs)[:tail_count]
+    return float(np.mean(worst))
+
+
 @dataclass(frozen=True)
 class StressScenario:
     spot_shock_pct: float

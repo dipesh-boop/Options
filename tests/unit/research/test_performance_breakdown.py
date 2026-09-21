@@ -15,10 +15,30 @@ from tests.unit.research.conftest import make_context, make_observation, make_tr
 
 class TestAllTwelveDimensionsSupported:
     def test_all_dimensions_are_the_exact_spec_list(self):
+        # 13, not 12: `volatility_regime` was added on top of Step 14's
+        # original 12 for multi-strategy attribution reporting -- see
+        # this module's own docstring for why it's a third, deliberately
+        # distinct taxonomy from market_regime/ValidationRegime.
         assert set(ALL_ANALYSIS_DIMENSIONS) == {
-            "strategy", "delta", "dte", "iv_percentile", "market_regime", "underlying",
+            "strategy", "delta", "dte", "iv_percentile", "market_regime", "volatility_regime", "underlying",
             "sector", "entry_day", "entry_time", "holding_period", "profit_target", "management_dte",
         }
+
+    def test_volatility_regime_buckets_by_the_supplied_label(self):
+        from tests.unit.research.conftest import make_observation
+
+        obs = [
+            make_observation(100.0, day_offset=0, volatility_regime="low_vol"),
+            make_observation(-40.0, day_offset=1, volatility_regime="crisis"),
+        ]
+        report = breakdown_by(obs, "volatility_regime")
+        assert {b.bucket for b in report.buckets} == {"low_vol", "crisis"}
+
+    def test_volatility_regime_buckets_missing_label_as_unspecified(self):
+        from tests.unit.research.conftest import make_observation
+
+        report = breakdown_by([make_observation(50.0)], "volatility_regime")
+        assert report.buckets[0].bucket == "unspecified"
 
     def test_breakdown_all_dimensions_covers_every_one(self):
         obs = [make_observation(50.0, day_offset=0)]

@@ -296,3 +296,70 @@ class TestFunnelCountsByStrategy:
         ]
         counts = funnel_counts_by_strategy(records)
         assert counts["put_credit_spread"].trades_rejected == 0
+
+
+class TestMultiStrategyAttributionReport:
+    """The dedicated multi-strategy attribution report: one row per all
+    15 StrategyKind values (Tier1 and Tier2 alike), funnel counts and
+    completed-trade performance combined."""
+
+    def test_covers_all_15_strategies_even_absent_ones(self):
+        from src.strategies.base import StrategyKind
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report
+
+        report = build_multi_strategy_attribution_report([], [])
+        assert set(report.rows) == {k.value for k in StrategyKind}
+        assert len(report.rows) == 15
+
+    def test_absent_strategy_row_is_zeroed_and_insufficient_sample(self):
+        from src.validation.protocol import SampleSizeStatus
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report
+
+        report = build_multi_strategy_attribution_report([], [])
+        row = report.rows["long_call_butterfly"]
+        assert row.opportunities_identified == 0
+        assert row.completed_trades == 0
+        assert row.sample_status == SampleSizeStatus.INSUFFICIENT_SAMPLE
+        assert row.performance is None
+
+    def test_funnel_and_performance_merged_for_a_present_strategy(self):
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report
+
+        observations = [_obs(100.0, strategy=StrategyType.PUT_CREDIT_SPREAD)]
+        records = [
+            StrategyAlternativeRecord(opportunity_id="opp-1", evaluation=_pcs_evaluation(), was_selected=True, risk_decision="approve", selection_or_rejection_reason="best score"),
+        ]
+        report = build_multi_strategy_attribution_report(observations, records)
+        row = report.rows["put_credit_spread"]
+        assert row.opportunities_identified == 1
+        assert row.trades_proposed == 1
+        assert row.trades_approved == 1
+        assert row.completed_trades == 1
+        assert row.performance is not None
+        assert row.performance.net_pnl == pytest.approx(100.0)
+
+    def test_meets_preferred_sample_threshold_at_50_completed_trades(self):
+        from src.validation.protocol import SampleSizeStatus
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report
+
+        observations = [_obs(10.0, strategy=StrategyType.PUT_CREDIT_SPREAD, day_offset=i) for i in range(50)]
+        report = build_multi_strategy_attribution_report(observations, [])
+        assert report.rows["put_credit_spread"].sample_status == SampleSizeStatus.PREFERRED_SAMPLE
+
+
+class TestRenderMultiStrategyAttributionReport:
+    def test_renders_insufficient_sample_marker(self):
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report, render_multi_strategy_attribution_report
+
+        report = build_multi_strategy_attribution_report([], [])
+        text = render_multi_strategy_attribution_report(report)
+        assert "INSUFFICIENT SAMPLE" in text
+        assert "LONG_CALL_BUTTERFLY" in text
+
+    def test_renders_both_average_pnl_and_expectancy_labels_for_the_same_number(self):
+        from src.validation.strategy_attribution import build_multi_strategy_attribution_report, render_multi_strategy_attribution_report
+
+        observations = [_obs(100.0, strategy=StrategyType.PUT_CREDIT_SPREAD)]
+        report = build_multi_strategy_attribution_report(observations, [])
+        text = render_multi_strategy_attribution_report(report)
+        assert "Average P&L / Expectancy: $100.00" in text

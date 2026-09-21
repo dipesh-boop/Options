@@ -37,8 +37,9 @@ from src.quant.monte_carlo import (
     monte_carlo_pop_and_ev,
     payoff_at_expiration,
     payoff_profile,
-    simulate_terminal_prices,
+    simulated_terminal_payoffs,
     stress_test,
+    tail_mean_payoff,
 )
 from src.risk.limits import RiskLimitsConfig
 
@@ -365,13 +366,11 @@ def build_strategy_evaluation(
 
     # Expected shortfall / CVaR from the same Monte Carlo sample: the
     # mean payoff among the worst _VAR_TAIL_FRACTION of simulated
-    # outcomes -- reuses simulate_terminal_prices' own paths rather than
-    # a second simulation.
-    terminal_prices = simulate_terminal_prices(spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
-    payoffs = np.array([payoff_at_expiration(position, float(p)) for p in terminal_prices])
-    tail_count = max(1, int(len(payoffs) * _VAR_TAIL_FRACTION))
-    worst = np.sort(payoffs)[:tail_count]
-    expected_shortfall = float(np.mean(worst))
+    # outcomes -- `simulated_terminal_payoffs`/`tail_mean_payoff` are the
+    # same shared functions `src.strategies.hedge_effectiveness` uses for
+    # its own hedged-vs-unhedged comparison, not a second implementation.
+    payoffs = simulated_terminal_payoffs(position, spot, sigma, t, rate, _MC_PATHS, seed=_MC_SEED)
+    expected_shortfall = tail_mean_payoff(payoffs, _VAR_TAIL_FRACTION)
     prob_of_max_loss = float(np.mean(payoffs <= -profile.max_loss + 1e-6)) if math.isfinite(profile.max_loss) else None
 
     current_mtm = payoff_at_expiration(position, spot)  # today's intrinsic-only snapshot; see docstring note below

@@ -126,3 +126,77 @@ def summarize_by_regime(
         label = getattr(o, key) or "unspecified"
         buckets.setdefault(label, []).append(o)
     return {label: summarize_selection_effectiveness(bucket, min_sample_size=min_sample_size) for label, bucket in buckets.items()}
+
+
+@dataclass(frozen=True)
+class FixedStrategyBaseline:
+    """What portfolio expectancy would have looked like if every
+    opportunity this strategy was ever considered for had used it,
+    always -- the "simpler fixed-strategy approach" the dynamic
+    Strategy Selector is being compared against. Computed only over the
+    opportunities where this strategy actually WAS a candidate (its own
+    `CounterfactualOutcome` records), never extrapolated to opportunities
+    it was never evaluated against."""
+
+    strategy: str
+    expectancy: float
+    sample_size: int
+    meaningful_sample: bool
+
+
+@dataclass(frozen=True)
+class DynamicVsFixedComparison:
+    """Answers "is dynamic strategy selection outperforming a simpler
+    fixed-strategy approach?" -- `dynamic_outperforms_best_fixed` is
+    `None`, never a guessed True/False, whenever either side lacks a
+    meaningful sample."""
+
+    dynamic_expectancy: float
+    dynamic_sample_size: int
+    dynamic_meaningful_sample: bool
+    fixed_strategy_baselines: dict[str, FixedStrategyBaseline]
+    best_fixed_strategy: str | None
+    best_fixed_strategy_expectancy: float | None
+    dynamic_outperforms_best_fixed: bool | None
+
+
+def dynamic_vs_fixed_strategy_comparison(
+    outcomes: list[CounterfactualOutcome], *, min_sample_size: int = MIN_SAMPLE_SIZE_FOR_SELECTION_CONCLUSIONS
+) -> DynamicVsFixedComparison:
+    selected = [o for o in outcomes if o.was_selected]
+    dynamic_sample = len({o.opportunity_id for o in selected})
+    dynamic_expectancy = _mean([o.hypothetical_pnl for o in selected])
+    dynamic_meaningful = dynamic_sample >= min_sample_size
+
+    by_strategy: dict[str, list[CounterfactualOutcome]] = {}
+    for o in outcomes:
+        by_strategy.setdefault(o.strategy_kind.value, []).append(o)
+
+    baselines: dict[str, FixedStrategyBaseline] = {}
+    for strategy, group in by_strategy.items():
+        sample = len({o.opportunity_id for o in group})
+        baselines[strategy] = FixedStrategyBaseline(
+            strategy=strategy, expectancy=_mean([o.hypothetical_pnl for o in group]),
+            sample_size=sample, meaningful_sample=sample >= min_sample_size,
+        )
+
+    meaningful_baselines = {s: b for s, b in baselines.items() if b.meaningful_sample}
+    best_strategy: str | None = None
+    best_expectancy: float | None = None
+    if meaningful_baselines:
+        best_strategy = max(meaningful_baselines, key=lambda s: meaningful_baselines[s].expectancy)
+        best_expectancy = meaningful_baselines[best_strategy].expectancy
+
+    outperforms: bool | None = None
+    if dynamic_meaningful and best_expectancy is not None:
+        outperforms = dynamic_expectancy > best_expectancy
+
+    return DynamicVsFixedComparison(
+        dynamic_expectancy=dynamic_expectancy,
+        dynamic_sample_size=dynamic_sample,
+        dynamic_meaningful_sample=dynamic_meaningful,
+        fixed_strategy_baselines=baselines,
+        best_fixed_strategy=best_strategy,
+        best_fixed_strategy_expectancy=best_expectancy,
+        dynamic_outperforms_best_fixed=outperforms,
+    )

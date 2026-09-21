@@ -42,8 +42,27 @@ from dataclasses import dataclass
 from src.research.performance_breakdown import ResearchTradeObservation, breakdown_by
 from src.strategies.base import STRATEGY_FAMILIES, StrategyFamily, StrategyKind
 from src.validation.counterfactual import StrategyAlternativeRecord
+from src.validation.protocol import SampleSizeStatus
 
 _RISK_APPROVAL_DECISIONS = ("approve", "resize")
+
+# Deliberately smaller than src.validation.protocol's own
+# minimum/preferred_completed_trades (50/100) -- those thresholds are
+# calibrated for the whole 90-day portfolio run's total trade count,
+# not a single strategy's slice of it. Reuses the SampleSizeStatus
+# *type* for a consistent vocabulary, with its own per-strategy
+# thresholds, matching the "20" convention src.validation.counterfactual
+# and this module's own Sharpe gate already established.
+MIN_TRADES_FOR_ATTRIBUTION = 20
+PREFERRED_TRADES_FOR_ATTRIBUTION = 50
+
+
+def _per_strategy_sample_status(completed_trades: int) -> SampleSizeStatus:
+    if completed_trades < MIN_TRADES_FOR_ATTRIBUTION:
+        return SampleSizeStatus.INSUFFICIENT_SAMPLE
+    if completed_trades < PREFERRED_TRADES_FOR_ATTRIBUTION:
+        return SampleSizeStatus.MINIMUM_SAMPLE
+    return SampleSizeStatus.PREFERRED_SAMPLE
 
 DEFAULT_MIN_SAMPLE_FOR_SHARPE = 20  # same default src.validation.protocol's rejected_trade_min_sample_size already uses
 _REGIME_DOMINANCE_THRESHOLD = 0.80  # same threshold src.validation.regime_analysis.RegimeCoverageSummary already uses
@@ -87,6 +106,7 @@ class StrategyPerformanceSummary:
     avg_slippage: float  # dollars per trade, same (theoretical - realistic - commission) definition build_backtest_result uses
     avg_capital_deployed: float  # dollars per trade -- mean capital_at_risk, this strategy's own "capital utilization" figure
     performance_by_regime: dict[str, "RegimeSlice"]
+    performance_by_volatility_regime: dict[str, "RegimeSlice"]
 
 
 @dataclass(frozen=True)
@@ -155,6 +175,13 @@ def per_strategy_performance(
                 total_pnl=regime_bucket.total_pnl, average_pnl=regime_bucket.average_pnl,
             )
 
+        vol_regime_slices: dict[str, RegimeSlice] = {}
+        for vol_bucket in breakdown_by(group, "volatility_regime").buckets:
+            vol_regime_slices[vol_bucket.bucket] = RegimeSlice(
+                regime=vol_bucket.bucket, trade_count=vol_bucket.trade_count, win_rate=vol_bucket.win_rate,
+                total_pnl=vol_bucket.total_pnl, average_pnl=vol_bucket.average_pnl,
+            )
+
         summaries[bucket.bucket] = StrategyPerformanceSummary(
             strategy=bucket.bucket,
             trades=bucket.trade_count,
@@ -173,6 +200,7 @@ def per_strategy_performance(
             avg_slippage=statistics.mean(slippage),
             avg_capital_deployed=capital_total / len(group),
             performance_by_regime=regime_slices,
+            performance_by_volatility_regime=vol_regime_slices,
         )
     return summaries
 
@@ -252,6 +280,7 @@ class StrategyFunnelCounts:
     strategy: str
     opportunities_considered: int  # distinct opportunities where this strategy was generated as a candidate at all
     trades_proposed: int  # won the internal risk-adjusted comparison and was put forward as the opportunity's trade
+    trades_approved: int  # this candidate's own Risk Engine verdict was an approval/resize, whether or not it was selected
     trades_rejected: int  # the Risk Engine's own verdict on this candidate was not an approval/resize
     trades_entered: int  # proposed AND risk-approved -- became a real position
 
@@ -264,13 +293,108 @@ def funnel_counts_by_strategy(records: list[StrategyAlternativeRecord]) -> dict[
     counts: dict[str, StrategyFunnelCounts] = {}
     for strategy, group in grouped.items():
         proposed = [r for r in group if r.was_selected]
+        approved = [r for r in group if r.risk_decision.lower() in _RISK_APPROVAL_DECISIONS]
         rejected = [r for r in group if r.risk_decision.lower() not in _RISK_APPROVAL_DECISIONS]
         entered = [r for r in proposed if r.risk_decision.lower() in _RISK_APPROVAL_DECISIONS]
         counts[strategy] = StrategyFunnelCounts(
             strategy=strategy,
             opportunities_considered=len({r.opportunity_id for r in group}),
             trades_proposed=len(proposed),
+            trades_approved=len(approved),
             trades_rejected=len(rejected),
             trades_entered=len(entered),
         )
     return counts
+
+
+@dataclass(frozen=True)
+class MultiStrategyAttributionRow:
+    """One strategy's full attribution row — funnel counts and
+    completed-trade performance side by side. `performance` is `None`
+    when the strategy has zero completed trades (nothing to compute a
+    win rate or P&L from), never a fabricated zero-filled summary."""
+
+    strategy: str
+    opportunities_identified: int
+    trades_proposed: int
+    trades_approved: int
+    trades_rejected: int
+    completed_trades: int
+    sample_status: SampleSizeStatus
+    performance: StrategyPerformanceSummary | None
+
+
+@dataclass(frozen=True)
+class MultiStrategyAttributionReport:
+    """Always one row per strategy this platform approves (all 15
+    `StrategyKind` values, Tier1 and Tier2 alike — Tier2's 3-4 leg
+    structures are backtestable and evaluable even though they cannot
+    become a live order, see `ARCHITECTURE.md` §13), never only the
+    strategies that happen to appear in the supplied data. A strategy
+    with zero opportunities this period still gets a row, showing
+    zeros and `INSUFFICIENT_SAMPLE`, not silently omitted."""
+
+    rows: dict[str, MultiStrategyAttributionRow]
+
+
+def build_multi_strategy_attribution_report(
+    observations: list[ResearchTradeObservation],
+    funnel_records: list[StrategyAlternativeRecord],
+    *,
+    min_sample_for_sharpe: int = DEFAULT_MIN_SAMPLE_FOR_SHARPE,
+) -> MultiStrategyAttributionReport:
+    performance = per_strategy_performance(observations, min_sample_for_sharpe=min_sample_for_sharpe)
+    funnels = funnel_counts_by_strategy(funnel_records)
+
+    rows: dict[str, MultiStrategyAttributionRow] = {}
+    for kind in StrategyKind:
+        name = kind.value
+        funnel = funnels.get(name)
+        perf = performance.get(name)
+        completed = perf.trades if perf is not None else 0
+        rows[name] = MultiStrategyAttributionRow(
+            strategy=name,
+            opportunities_identified=funnel.opportunities_considered if funnel is not None else 0,
+            trades_proposed=funnel.trades_proposed if funnel is not None else 0,
+            trades_approved=funnel.trades_approved if funnel is not None else 0,
+            trades_rejected=funnel.trades_rejected if funnel is not None else 0,
+            completed_trades=completed,
+            sample_status=_per_strategy_sample_status(completed),
+            performance=perf,
+        )
+    return MultiStrategyAttributionReport(rows=rows)
+
+
+def render_multi_strategy_attribution_report(report: MultiStrategyAttributionReport) -> str:
+    lines: list[str] = ["MULTI-STRATEGY ATTRIBUTION REPORT", ""]
+    for name in sorted(report.rows):
+        row = report.rows[name]
+        lines += [f"{name.upper()}", "-" * len(name)]
+        lines += [
+            f"  Opportunities identified: {row.opportunities_identified}",
+            f"  Trades proposed: {row.trades_proposed}",
+            f"  Trades approved: {row.trades_approved}",
+            f"  Trades rejected: {row.trades_rejected}",
+            f"  Completed trades: {row.completed_trades}",
+        ]
+        if row.sample_status == SampleSizeStatus.INSUFFICIENT_SAMPLE:
+            lines += ["  INSUFFICIENT SAMPLE -- performance figures below are not statistically meaningful"]
+        if row.performance is None:
+            lines += ["  (no completed trades this period)"]
+        else:
+            p = row.performance
+            lines += [
+                f"  Win rate: {p.win_rate:.1%}",
+                f"  Net P&L: ${p.net_pnl:,.2f}",
+                f"  Average P&L / Expectancy: ${p.expectancy:,.2f}",
+                f"  Profit factor: {p.profit_factor:.2f}" if p.profit_factor is not None else "  Profit factor: n/a (no losing trades)",
+                f"  Return on capital: {p.return_on_capital:.1%}",
+                f"  Maximum drawdown (contribution): ${p.max_drawdown_contribution:,.2f}",
+                f"  Average capital required: ${p.avg_capital_deployed:,.2f}",
+                f"  Average holding period: {p.avg_holding_period_days:.1f} days",
+                f"  Average slippage: ${p.avg_slippage:,.2f}",
+                "  By market regime: " + (", ".join(f"{r}={s.total_pnl:,.2f}" for r, s in sorted(p.performance_by_regime.items())) or "none"),
+                "  By volatility regime: " + (", ".join(f"{r}={s.total_pnl:,.2f}" for r, s in sorted(p.performance_by_volatility_regime.items())) or "none"),
+            ]
+        lines += [""]
+    return "\n".join(lines)

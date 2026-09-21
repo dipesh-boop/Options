@@ -3187,3 +3187,189 @@ direction. The same three priorities stand (live-chain candidate
 generation, the 90-day daily driver, the Tier2 leg-cap decision), plus
 the hedge-effectiveness counterfactual and the Strategy Research Agent
 scope question, neither decided here.
+
+## 2026-09-21 (cont'd) — Multi-Strategy Attribution, Selection, and Hedge Effectiveness Reports
+
+**Explicit instruction for this step:** three dedicated reports on top
+of the already-built per-strategy tracking — a Multi-Strategy
+Attribution Report (one row per all 15 strategies, 17 named fields
+including two new dimensions), a Strategy Selection Report answering
+whether the Strategy Selector itself adds value (including "is dynamic
+selection outperforming a simpler fixed-strategy approach," never
+asked before), and a Hedge Effectiveness Report for protective
+put/collar specifically ("do NOT label a hedge unsuccessful merely
+because its standalone P&L is negative"). All three are genuinely new
+reporting surfaces — the underlying per-strategy tracking they draw on
+(Step 14B's `strategy_attribution.py`, Step 19A's `counterfactual.py`)
+already existed and was extended, never rebuilt.
+
+**`src/research/performance_breakdown.py`** — a 13th `AnalysisDimension`,
+`volatility_regime` (a plain qualitative label like
+`MarketRegimeAssessment.regime` already uses — `low_vol`/`normal`/
+`elevated_vol`/`crisis` — deliberately distinct from `iv_percentile`'s
+numeric buckets and from `ValidationRegime`'s combined direction+
+volatility taxonomy, a third taxonomy for a fourth purpose).
+`TradeContext` gained a matching `volatility_regime: str | None = None`
+field (additive). **Kept `src.llm.schemas.AnalysisDimension` in sync**
+(added the same value, bumped `supporting_dimensions`'
+`max_length` 12→13) — that mirrored Literal has its own drift-check
+test (`test_strategy_research_review_schema.py`) which would have
+failed otherwise; updating both together, not one, is what "stays in
+sync" actually requires.
+
+**`src/validation/strategy_attribution.py`** — `StrategyFunnelCounts`
+gained `trades_approved` (any candidate the Risk Engine approved,
+selected or not — broader than the existing `trades_entered`, which
+requires both proposed *and* approved). `StrategyPerformanceSummary`
+gained `performance_by_volatility_regime` (mirrors
+`performance_by_regime`, bucketed on the new dimension instead). New
+`MultiStrategyAttributionRow`/`MultiStrategyAttributionReport`/
+`build_multi_strategy_attribution_report`/
+`render_multi_strategy_attribution_report`: always one row per all 15
+`StrategyKind` values (Tier1 and Tier2 alike, since Tier2 is fully
+backtestable/evaluable even though it can't become a live order) —
+never only the strategies present in the supplied data. A strategy with
+zero opportunities still gets a row: zeros plus `INSUFFICIENT_SAMPLE`
+(reusing `src.validation.protocol.SampleSizeStatus`'s *type* with a new,
+smaller per-strategy threshold pair — 20/50 rather than the whole
+90-day run's 50/100 — since a single strategy's slice of the run needs
+its own, lower bar). "Average P&L" and "Expectancy" are rendered as two
+labels on the one already-computed `expectancy` number rather than a
+duplicated field, since they are mathematically the same figure.
+
+**`src/quant/monte_carlo.py`** — two new reusable functions,
+`simulated_terminal_payoffs` and `tail_mean_payoff`, extracted from
+`src.strategies.base.build_strategy_evaluation`'s own previously-inline
+expected-shortfall calculation (`base.py` now calls them instead of
+repeating the calculation — a refactor verified byte-for-byte
+equivalent by the full existing test suite, not a behavior change).
+Built as shared infrastructure specifically so a caller needing a
+*paired* comparison across two different `Position`s under the
+identical simulated terminal-price sample (same seed) — exactly what
+hedge effectiveness needs — doesn't have to re-simulate or duplicate
+the tail-mean math a third time.
+
+**`src/validation/counterfactual.py`** — new
+`FixedStrategyBaseline`/`DynamicVsFixedComparison`/
+`dynamic_vs_fixed_strategy_comparison`: what portfolio expectancy would
+have looked like if every opportunity a given strategy was ever
+*considered* for had used that strategy, always (computed only over
+opportunities that strategy actually was a candidate for, never
+extrapolated) — compared against the dynamic selector's own actual
+blended expectancy. `dynamic_outperforms_best_fixed` is `None`,
+never a guessed boolean, whenever either side lacks a meaningful
+sample.
+
+**`src/validation/selection_report.py`** (new) — the Strategy Selection
+Report. Deliberately a third module, not added into `counterfactual.py`
+or `strategy_attribution.py`, because it needs both (and
+`strategy_attribution` already imports `counterfactual`, so importing
+`strategy_attribution` back into `counterfactual` would cycle). Four of
+the six named questions ("primarily reduce portfolio risk," "consume
+capital without sufficient benefit," "work only in specific regimes,"
+"excessive execution costs") are answered by directly reusing
+`answer_attribution_questions`' existing output — never re-answered by
+a second implementation. The two new questions: "selected most often"
+(`SelectionFrequency`, a plain count+share per strategy) and
+"risk-adjusted value" (expectancy per dollar of capital deployed — the
+realized-trade-data analogue of `src.strategies.ranking
+.risk_adjusted_score`, which uses ex-ante numbers this module doesn't
+have). `render_strategy_selection_report` follows the established
+`render_*_report` plain-text style
+(`src.workflows.weekly_review.render_weekly_review_report`).
+
+**`src/strategies/hedge_effectiveness.py`** (new) — the Hedge
+Effectiveness Report's actual computation. Structurally enforces "do
+NOT label a hedge unsuccessful merely because its standalone P&L is
+negative" by never having a success/failure field anywhere in either
+`HedgeEffectivenessReport` or `AggregateHedgeEffectiveness` (verified
+directly by a test that inspects the dataclasses' own field names, the
+same technique `src.validation.scorecard`'s own "never collapses into
+one number" test already established). Computed via a **paired** Monte
+Carlo comparison — the hedge's real `Position` (shares + hedging
+option legs) against a synthetic all-shares "unhedged" `Position`
+(`Position(legs=[], underlying_shares=..., underlying_cost_basis=...)`,
+confirmed to work directly with the existing `payoff_profile`/
+`payoff_at_expiration` with no changes needed), both simulated from the
+identical terminal-price sample via the new `simulated_terminal_payoffs`
+(same seed — a fair comparison under identical market outcomes, not
+two independently-sampled runs). Reports: hedge cost, drawdown avoided
+(unhedged max_loss − hedged max_loss), tail loss avoided (hedged CVaR
+− unhedged CVaR, via `tail_mean_payoff`), CVaR reduction %, portfolio
+volatility reduction % (simulated payoff stdev), upside sacrificed
+(capped-gains-only, net of the hedge's own constant premium cost — see
+the two bugs below), and net hedge benefit (one reasonable combined
+figure, explicitly documented as not the only possible combination).
+`aggregate_hedge_effectiveness`/`build_hedge_effectiveness_report`/
+`render_hedge_effectiveness_report` average the same seven measures
+across many recorded evaluations, gated by a meaningful-sample flag,
+still with no verdict field anywhere.
+
+**Two real bugs caught by direct numeric testing before this landed,
+both in the first implementation of this same file, not in
+already-shipped code:**
+1. `hedge_cost` was computed directly from `net_credit_or_debit`
+   without scaling — that field is a **per-share, per-contract unit
+   price** (already true of every strategy since Step 19A, just never
+   previously consumed outside `src.risk`/`src.brokers.fidelity`,
+   which apply their own ×100×contracts scaling at the point of use).
+   A $1.50 put premium was reporting as `hedge_cost=$1.50` instead of
+   the correct $150 for one 100-share contract — caught by printing
+   and checking the actual numbers from a real `evaluate_protective_put`
+   call, not assumed correct from the formula alone.
+2. `upside_sacrificed`'s first formula compared unhedged vs. hedged
+   payoffs at the best simulated outcomes without netting out the
+   hedge's own constant premium cost — which shows up in *every*
+   scenario, including the best ones, and isn't actually a capped-
+   upside effect at all. This made a **protective put** (which has no
+   short call leg and therefore never caps gains) incorrectly report
+   $150 of "upside sacrificed" — exactly its own premium, double-
+   counted from `hedge_cost`. Fixed by subtracting `hedge_cost` from
+   the raw top-tail gap before flooring at zero; a protective put now
+   correctly reports `0.0`, and a protective collar's sold call still
+   correctly reports a positive figure. Caught by a test asserting the
+   protective-put-specific zero, not assumed from the formula.
+
+**Tests**: 46 new — `tests/unit/research/test_performance_breakdown.py`
+(+2, volatility_regime bucketing), `tests/unit/validation
+/test_strategy_attribution.py` (+6, the multi-strategy report),
+`tests/unit/validation/test_counterfactual.py` (+5,
+dynamic-vs-fixed), `tests/unit/validation/test_selection_report.py`
+(new file, 10), `tests/unit/strategies/test_hedge_effectiveness.py`
+(new file, 23, including the two bug-catching regression tests above
+and a direct dataclass-field-name check that no verdict field exists).
+
+Full repo suite: **2078 passed, 4 skipped** (up from 2032 at the end of
+the previous pass; +46 new tests, 0 regressions, 0 weakened or deleted
+existing tests, 4 skips unchanged).
+
+## Open decisions carried forward (updated an eleventh time)
+
+- [ ] **New from this step**: `net_hedge_benefit`
+      (`tail_loss_avoided - hedge_cost - upside_sacrificed`) is
+      explicitly documented as one reasonable combination of the six
+      underlying measures into a single dollar figure, not derived from
+      any authoritative hedge-pricing theory — a human reading the
+      report should look at the six components individually before
+      trusting this one number, the same "never collapse away the
+      detail" instinct this report otherwise follows throughout.
+- [ ] **New from this step**: hedge effectiveness is computed per
+      decision (one `StrategyEvaluation`, point-in-time), not yet wired
+      to any real validation-run data source — nothing in this
+      codebase yet calls `evaluate_hedge_effectiveness` automatically
+      when a protective put/collar opportunity is evaluated, mirroring
+      the same "engine built, daily driver doesn't exist yet" gap every
+      other validation-adjacent module in this codebase has carried
+      since Step 19.
+- Every open decision already carried forward from Step 19A/14B/the
+  prior gap-check pass remains open, unchanged by this step.
+
+## Next up
+
+Unchanged in substance: do not proceed further without direction. The
+concrete gaps: (1) live-chain candidate generation; (2) the 90-day
+daily driver that would actually populate these three new reports with
+real data; (3) the Tier2 leg-cap decision; (4) wiring
+`evaluate_hedge_effectiveness` into whatever eventually generates
+protective put/collar candidates, so hedge reports accumulate
+automatically rather than requiring a caller to invoke it by hand.

@@ -692,3 +692,41 @@ genuine, previously-unbuilt pieces, both additive:
   .counterfactual.StrategyAlternativeRecord` (already captured at
   decision time for every serious candidate, selected or not) rather
   than a second decision-tracking mechanism.
+
+**Three dedicated reports, built on the tracking above.**
+
+- **Multi-Strategy Attribution Report**
+  (`src.validation.strategy_attribution.build_multi_strategy_attribution_report`)
+  — one row per all 15 `StrategyKind` values always, funnel counts and
+  completed-trade performance (now including a `volatility_regime`
+  breakdown, a 13th `src.research.performance_breakdown
+  .AnalysisDimension` added alongside Step 14's original 12) merged
+  side by side, `INSUFFICIENT_SAMPLE`-labeled per row via a dedicated
+  20/50-trade threshold pair (deliberately smaller than the whole
+  90-day run's own 50/100, since a single strategy's slice needs a
+  lower bar).
+- **Strategy Selection Report**
+  (`src.validation.selection_report.build_strategy_selection_report`)
+  — whether the Selector itself adds value: selection frequency,
+  risk-adjusted value (expectancy per dollar deployed), and a new
+  `dynamic_vs_fixed_strategy_comparison` (`src.validation.counterfactual`)
+  answering "is dynamic selection beating a simpler always-use-this-
+  strategy baseline" — `None`, never a guessed answer, below a
+  meaningful sample on either side. Four of its six named questions
+  reuse `answer_attribution_questions` directly rather than
+  re-answering them.
+- **Hedge Effectiveness Report** (`src.strategies.hedge_effectiveness`)
+  — protective put/collar evaluated by a **paired** Monte Carlo
+  comparison against a synthetic unhedged all-shares baseline, both
+  drawn from the identical simulated terminal-price sample (new
+  `simulated_terminal_payoffs`/`tail_mean_payoff` in `src.quant
+  .monte_carlo`, also now the single implementation
+  `src.strategies.base.build_strategy_evaluation`'s own expected-
+  shortfall calculation calls, replacing what used to be inline,
+  duplicated logic). Reports hedge cost, drawdown avoided, tail loss
+  avoided, CVaR reduction, portfolio volatility reduction, upside
+  sacrificed, and net hedge benefit — structurally incapable of
+  emitting a success/failure verdict, since neither
+  `HedgeEffectivenessReport` nor its aggregate has a field for one,
+  directly enforcing "never label a hedge unsuccessful merely because
+  its standalone P&L is negative."
