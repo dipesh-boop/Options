@@ -9,9 +9,21 @@ from src.portfolio.actions import ControlLoopAction
 from src.portfolio.alerts import ControlLoopAlertType, raise_alert_if_new, resolve_alert
 from src.portfolio.cycle_record import ControlCycleRecord
 from src.portfolio.decision_snapshot import PortfolioControlDecisionSnapshot
+from src.portfolio.exposure import PortfolioExposureSnapshot
 from src.portfolio.persistence import InMemoryControlLoopStore, SqliteControlLoopStore
 
 NOW = datetime(2026, 9, 22, 15, 0, tzinfo=timezone.utc)
+
+
+def _exposure(as_of=NOW) -> PortfolioExposureSnapshot:
+    return PortfolioExposureSnapshot(
+        as_of=as_of, underlying_exposure_pct={"SPY": 0.1}, sector_exposure_pct={"ETF": 0.1},
+        strategy_exposure_pct={"put_credit_spread": 0.1}, expiration_concentration_pct={},
+        directional_exposure="neutral", portfolio_delta=None, volatility_exposure="neutral",
+        portfolio_vega=None, short_option_capital_pct=0.1, assignment_risk_position_ids=(),
+        wheel_cash_commitment_pct=0.0, owned_share_exposure_pct=0.0, owned_share_prices_missing=(),
+        covered_call_encumbered_shares={}, correlated_pairs=(),
+    )
 
 
 def _snapshot(cycle_id="c1", position_id="p1", action=ControlLoopAction.HOLD) -> PortfolioControlDecisionSnapshot:
@@ -101,6 +113,28 @@ class TestAlerts:
         assert len(store.all_unresolved_alerts()) == 0
 
 
+class TestExposureSnapshots:
+    """Step 22.4A: one `PortfolioExposureSnapshot` persisted per cycle --
+    `src.portfolio.control_loop.run_control_cycle` never persisted it,
+    `src.portfolio.orchestrator.run_outer_cycle` is the first caller
+    that does, immediately after the cycle completes."""
+
+    def test_save_and_get(self, store):
+        store.save_exposure_snapshot("c1", _exposure())
+        got = store.get_exposure_snapshot("c1")
+        assert got is not None
+        assert got.underlying_exposure_pct == {"SPY": 0.1}
+
+    def test_get_missing_returns_none(self, store):
+        assert store.get_exposure_snapshot("nonexistent") is None
+
+    def test_replace_on_save_keeps_one_row_per_cycle(self, store):
+        store.save_exposure_snapshot("c1", _exposure())
+        updated = _exposure().model_copy(update={"short_option_capital_pct": 0.5})
+        store.save_exposure_snapshot("c1", updated)
+        assert store.get_exposure_snapshot("c1").short_option_capital_pct == 0.5
+
+
 class TestSqliteRestartSurvival:
     def test_survives_restart(self, tmp_path):
         path = tmp_path / "control.db"
@@ -109,6 +143,7 @@ class TestSqliteRestartSurvival:
         store1.save_cycle_record(_cycle())
         alert = raise_alert_if_new([], scope="p1", alert_type=ControlLoopAlertType.PROFIT_TARGET, reason="x", now=NOW)
         store1.save_alert(alert)
+        store1.save_exposure_snapshot("c1", _exposure())
         del store1
 
         store2 = SqliteControlLoopStore(path)
@@ -116,3 +151,4 @@ class TestSqliteRestartSurvival:
         assert store2.get_cycle_record("c1") is not None
         assert len(store2.alerts_for_scope("p1")) == 1
         assert store2.schema_version_on_disk() == "1.0.0"
+        assert store2.get_exposure_snapshot("c1") is not None

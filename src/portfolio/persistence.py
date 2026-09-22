@@ -21,6 +21,17 @@ REPLACE-on-save keyed by `alert_id` -- the same one-mutation-ever
 pattern (`resolved`/`resolved_at` flip exactly once)
 `src.lifecycle.persistence.SqliteLifecycleStore.save_alert` already
 uses for `Alert`.
+
+**Step 22.4A**: also persists one `PortfolioExposureSnapshot` per cycle
+(REPLACE-on-save keyed by `cycle_id`, exactly like `ControlCycleRecord`
+itself) -- `run_control_cycle` (Part 12) computes and returns a fresh
+exposure snapshot every cycle but was deliberately never given the job
+of persisting it (it persists only decision snapshots and the cycle
+record). Without this, a dashboard restart could never honestly show
+"the most recently completed cycle's exposure," since nothing durable
+would exist to reload -- `src.portfolio.orchestrator` (the outer
+production orchestrator) is the one caller that saves it, immediately
+after `run_control_cycle` returns, never `run_control_cycle` itself.
 """
 from __future__ import annotations
 
@@ -31,6 +42,7 @@ from pathlib import Path
 from src.portfolio.alerts import ControlLoopAlert
 from src.portfolio.cycle_record import ControlCycleRecord
 from src.portfolio.decision_snapshot import PortfolioControlDecisionSnapshot
+from src.portfolio.exposure import PortfolioExposureSnapshot
 
 CONTROL_LOOP_DATABASE_SCHEMA_VERSION = "1.0.0"
 
@@ -63,6 +75,12 @@ class ControlLoopStore(ABC):
     @abstractmethod
     def all_unresolved_alerts(self) -> list[ControlLoopAlert]: ...
 
+    @abstractmethod
+    def save_exposure_snapshot(self, cycle_id: str, exposure: PortfolioExposureSnapshot) -> None: ...
+
+    @abstractmethod
+    def get_exposure_snapshot(self, cycle_id: str) -> PortfolioExposureSnapshot | None: ...
+
 
 class InMemoryControlLoopStore(ControlLoopStore):
     """Process-local only -- lost on restart. For tests and any caller
@@ -73,6 +91,7 @@ class InMemoryControlLoopStore(ControlLoopStore):
         self._cycles: dict[str, ControlCycleRecord] = {}
         self._cycle_order: list[str] = []
         self._alerts: dict[str, ControlLoopAlert] = {}
+        self._exposures: dict[str, PortfolioExposureSnapshot] = {}
 
     def append_decision_snapshot(self, snapshot: PortfolioControlDecisionSnapshot) -> None:
         self._snapshots.append(snapshot)
@@ -103,6 +122,12 @@ class InMemoryControlLoopStore(ControlLoopStore):
 
     def all_unresolved_alerts(self) -> list[ControlLoopAlert]:
         return [a for a in self._alerts.values() if not a.resolved]
+
+    def save_exposure_snapshot(self, cycle_id: str, exposure: PortfolioExposureSnapshot) -> None:
+        self._exposures[cycle_id] = exposure
+
+    def get_exposure_snapshot(self, cycle_id: str) -> PortfolioExposureSnapshot | None:
+        return self._exposures.get(cycle_id)
 
 
 class SqliteControlLoopStore(ControlLoopStore):
@@ -142,6 +167,10 @@ class SqliteControlLoopStore(ControlLoopStore):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_control_loop_alerts_scope ON control_loop_alerts(scope)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS control_exposure_snapshots ("
+                "cycle_id TEXT PRIMARY KEY, schema_version TEXT NOT NULL, exposure_json TEXT NOT NULL)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -221,3 +250,19 @@ class SqliteControlLoopStore(ControlLoopStore):
         with self._connect() as conn:
             rows = conn.execute("SELECT alert_json FROM control_loop_alerts WHERE resolved = 0").fetchall()
         return [ControlLoopAlert.model_validate_json(r[0]) for r in rows]
+
+    def save_exposure_snapshot(self, cycle_id: str, exposure: PortfolioExposureSnapshot) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO control_exposure_snapshots (cycle_id, schema_version, exposure_json) "
+                "VALUES (?, ?, ?) ON CONFLICT(cycle_id) DO UPDATE SET "
+                "schema_version=excluded.schema_version, exposure_json=excluded.exposure_json",
+                (cycle_id, CONTROL_LOOP_DATABASE_SCHEMA_VERSION, exposure.model_dump_json()),
+            )
+
+    def get_exposure_snapshot(self, cycle_id: str) -> PortfolioExposureSnapshot | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT exposure_json FROM control_exposure_snapshots WHERE cycle_id = ?", (cycle_id,)
+            ).fetchone()
+        return PortfolioExposureSnapshot.model_validate_json(row[0]) if row is not None else None

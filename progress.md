@@ -4597,3 +4597,141 @@ Day 1 snapshot was recorded, no trades were generated, starting NAV was
 not altered, and no scheduling was enabled. Work stops here per this
 step's own explicit instruction — Step 23 remains separately
 authorized, not started.
+
+## Step 22.4A — Final pre-validation orchestration & dashboard
+## integration remediation (controlled acceptance-gap fix to PAPER_TRADING_V1.4)
+
+Post-freeze acceptance review of V1.4 found three genuine integration
+gaps between otherwise-working, independently-tested modules: (1)
+`src.portfolio.control_loop.run_control_cycle`'s own docstring
+documented that a "thin outer wrapper" was expected to run
+new-opportunity scanning and pending-ticket monitoring and merge their
+counts in, but no such wrapper existed anywhere in the repository, so
+`opportunities_scanned`/`candidates_generated`/`candidates_rejected`
+stayed permanently zero/caller-supplied and neither stage was ever
+invoked from a production entry point; (2) `DashboardState.latest_cycle_record`/
+`latest_exposure`/`control_loop_alerts` were declared but nothing ever
+projected persisted control-loop output into them, so a real dashboard
+session's `/api/control-loop/*` routes could never show real data; (3)
+no operator-run Tradier production smoke test existed. This step closes
+all three gaps without redesigning any already-working component.
+
+**New modules:**
+- `src/portfolio/orchestrator.py` — `run_outer_cycle`, the thin
+  production orchestrator `run_control_cycle`'s own docstring called
+  for. Coordinates pending-ticket monitoring
+  (`src.portfolio.ticket_monitor`) and new-opportunity scanning
+  (`src.portfolio.opportunity_scan`) around the existing, UNMODIFIED
+  `run_control_cycle`, feeding it real opportunity counts instead of
+  caller-supplied zeros, then persists this cycle's exposure snapshot
+  (never durably saved before this step), builds one additional
+  `PortfolioControlDecisionSnapshot` for a scan's best Risk-approved
+  candidate (`ControlLoopAction.REVIEW` — Risk approval is never
+  execution), and generates/persists deduplicated alerts. Existing-
+  position/risk monitoring (`run_control_cycle` itself) carries no
+  rate-limit gate at all in this module and always runs; pending-ticket
+  monitoring is gated at `RateLimitPriority.P3_PENDING_TICKET_REPRICING`,
+  new-opportunity scanning at `P4_OPPORTUNITY_SCANNING` — since the
+  existing `src.data.rate_limiter` priority-ceiling table already
+  throttles P4 before P3 before P0/P1/P2, opportunity scanning is always
+  the first thing sacrificed under provider-capacity constraints, ticket
+  monitoring second, and existing-position/risk monitoring is never
+  sacrificed by this module at all.
+- `src/dashboard/control_loop_projection.py` — `load_latest_control_loop_state`,
+  the one production-safe projection from
+  `src.portfolio.persistence.ControlLoopStore` into `DashboardState`.
+  Never fabricates: an empty store leaves every field at its honest
+  default. `src.dashboard.app.set_state` gained an optional
+  `control_loop_store` keyword that invokes this projection at session-
+  initialization time — the one place the dashboard now becomes capable
+  of showing the most recently completed cycle right after normal
+  application startup, without inventing a portfolio or a cycle that
+  never ran. The three states (no session / session with no cycle yet /
+  session with real cycle data) were verified to render as 503 / 404 /
+  200 respectively, never collapsed into each other.
+- `scripts/smoke_tradier_market_data.py` — operator-run, GET-only,
+  market-data-only production connectivity check (one quote, the
+  expirations list, one option chain, contract count, rate-limit
+  state). Never places/previews/cancels an order, never starts
+  validation, never mutates any store, never prints the bearer token.
+  Documented in README.md §19.
+
+**Extended:**
+- `src/portfolio/persistence.py` — `ControlLoopStore` gained
+  `save_exposure_snapshot`/`get_exposure_snapshot` (REPLACE-on-save
+  keyed by `cycle_id`, both `InMemory*`/`Sqlite*` implementations,
+  restart-survival verified) — the missing durable home for
+  `run_control_cycle`'s own `PortfolioExposureSnapshot` output, which
+  `run_control_cycle` itself was never given the job of persisting.
+
+**Bugs/gaps found and fixed during this step, before any formal test
+existed against them:**
+1. A negative-EV opportunity-scan test fixture with `broker_capabilities=None`
+   always rejected at Risk regardless of `no_trade_hurdle`, masking
+   whether the new opportunity-decision-snapshot wiring worked at all —
+   traced to "no broker capability explicitly configured" being a
+   distinct Risk rejection reason from "didn't clear the hurdle"; fixed
+   by using a real `BrokerCapabilities` fixture in the new orchestrator
+   tests, matching `tests/unit/portfolio/test_opportunity_scan.py`'s own
+   established pattern.
+2. `_verify_dashboard_has_no_live_trading_client` (the new freeze check
+   for Part 14) initially flagged `src.dashboard.service.cancel_order`
+   itself — a legitimate, pre-existing Step 18 action (pulling back an
+   already-entered Fidelity ticket via the existing `transition()` state
+   machine, never a live broker call) that happens to share a name with
+   the forbidden order-submission vocabulary every other module's
+   equivalent check already uses. Fixed by excluding `cancel_order`
+   specifically from this one check's pattern (documented inline), since
+   that capability is already independently, exhaustively proven safe by
+   `tests/unit/dashboard/test_app_security.py`'s route-inventory tests.
+3. The fourth-through-sixth instances of the "documented negation"
+   false-positive pattern first seen in Step 22.4's own freeze work: a
+   new `TradierBroker` mention inside a `#` comment (not a docstring) in
+   the new security test file tripped `tests/acceptance
+   /test_tradier_market_data_only.py`'s own repo-wide scan; fixed by
+   rewording the comment to avoid the literal contiguous substring,
+   exactly as `src/validation/freeze.py`'s equivalent comment was fixed
+   during Step 22.4's own freeze task.
+
+**Tests added:** 19 in `tests/unit/portfolio/test_orchestrator.py`
+(existing-position monitoring always runs regardless of rate limit;
+opportunity-scan wiring including the forced-`best` REVIEW-snapshot
+path and honest zero-counts on skip; ticket-monitor wiring; the full
+P4-before-P3-before-P0 rate-limit priority ordering; exposure
+persistence; alert deduplication across repeated cycles; the Part 9
+degraded-data isolation scenario), 6 new in
+`tests/unit/portfolio/test_persistence.py` (exposure-snapshot save/get/
+replace, parametrized memory+sqlite, plus restart-survival), 11 in
+`tests/unit/dashboard/test_control_loop_projection.py` (the projection
+function directly, plus the three-state 503/404/200 distinction and
+proof no control-loop route can mutate anything), 1 optional live-data
+acceptance test in `tests/acceptance/test_tradier_live_outer_cycle.py`
+(skipped without a real `OPTIONS_AGENT_TRADIER_TOKEN`; never hard-codes
+an expected lifecycle action), 25 in `tests/acceptance
+/test_orchestrator_security.py` (hostile-audit-style: Tradier remains
+market-data-only through the new surface; the orchestrator cannot
+bypass Risk/Lifecycle, infer a fill, start live trading, or start
+validation; the dashboard projection stays read-only; Fidelity remains
+manual; the P4>P3>P0 priority ordering holds structurally). Full
+repository suite: **3319 passed, 5 skipped, 0 failed** (the 5 skips are
+the 4 pre-existing documented false positives plus the new live-data
+acceptance test's own soft skip).
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.1** —
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place;
+`smoke_tradier_script_hash`/`control_loop_projection_module_hash` added
+(orchestrator.py needs no separate hash, already covered by
+`portfolio_module_hash`'s existing whole-directory hash); three new
+standing `make verify-freeze` checks —
+`dashboard_cannot_execute_trades`, `orchestrator_cannot_bypass_risk_or_lifecycle`,
+`opportunity_scan_never_outranks_risk_monitoring` — each re-derived
+directly from the current working tree on every run, independent of the
+acceptance test suite.
+
+**PAPER_TRADING_V1.4.1: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER:
+MARKET_DATA_ONLY.** See `STEP_22_4A_FREEZE_REPORT.md` for the freeze
+commit SHA, manifest hash, and remote tag verification. No cohort was
+created, no Day 1 snapshot was recorded, no trades were generated,
+starting NAV was not altered, and no scheduling was enabled. Work stops
+here per this step's own explicit instruction.

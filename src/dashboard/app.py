@@ -36,9 +36,11 @@ from src.risk.broker_constraints import BrokerCapabilities
 from src.risk.reason_codes import RiskDecision
 
 from src.dashboard import schemas, service
+from src.dashboard.control_loop_projection import load_latest_control_loop_state
 from src.dashboard.models import DashboardState
 from src.dashboard.risk_state import build_risk_panel
 from src.dashboard.service import DashboardActionError, OpportunityNotFoundError
+from src.portfolio.persistence import ControlLoopStore
 
 app = FastAPI(title="Fidelity Human-Execution Dashboard", version="1.0.0")
 
@@ -70,10 +72,27 @@ def get_state() -> DashboardState:
     return _dashboard_state
 
 
-def set_state(state: DashboardState) -> None:
+def set_state(state: DashboardState, *, control_loop_store: ControlLoopStore | None = None) -> None:
     """Called by whatever loads a `/morning-scan` run (or a test) into
-    this process — the only place `_dashboard_state` is ever assigned."""
+    this process — the only place `_dashboard_state` is ever assigned.
+
+    Step 22.4A Part 6: when a caller also passes `control_loop_store`,
+    this is the one point where the dashboard becomes "capable of
+    showing the most recently completed [control-loop] cycle after
+    normal application initialization" — it projects whatever's already
+    persisted there (Part 5's `load_latest_control_loop_state`) into
+    `state` before publishing it, honestly leaving
+    `latest_cycle_record`/`latest_exposure`/`control_loop_alerts` at
+    their empty defaults when nothing has run yet. Omitting
+    `control_loop_store` (the default) leaves control-loop visibility
+    exactly as empty as it always was — this never becomes mandatory,
+    and never fabricates a session on its own: a caller must still
+    supply a real `Portfolio`/`RiskLimitsConfig` via `state` itself,
+    exactly as before (see `get_state`'s 503 for what an app started
+    with no session at all still, correctly, reports)."""
     global _dashboard_state
+    if control_loop_store is not None:
+        load_latest_control_loop_state(state, control_loop_store=control_loop_store)
     _dashboard_state = state
 
 

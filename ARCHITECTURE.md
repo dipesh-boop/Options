@@ -1393,3 +1393,75 @@ PUT/DELETE verb is issued against the injected HTTP client, `config
 /brokers.yaml` lists no `tradier` entry, the Risk Engine module never
 imports Tradier, and the bearer token never appears in a raised
 exception's text.
+
+## 19. Outer Portfolio Control Loop orchestrator + dashboard projection
+## (acceptance-gap remediation, "Step 22.4A")
+
+`src/portfolio/control_loop.py`'s own module docstring called for a
+"thin outer wrapper" to run new-opportunity scanning and pending-ticket
+monitoring around it and merge their counts in — Step 22.4 built those
+two stages (`src.portfolio.opportunity_scan`/`ticket_monitor`) as
+independently-testable modules but never built that wrapper, so neither
+stage was ever invoked from a production entry point and
+`ControlCycleRecord.opportunities_scanned`/`candidates_generated`/
+`candidates_rejected` stayed permanently zero. `src/portfolio/orchestrator.py`
+(`run_outer_cycle`) is that wrapper.
+
+**Still not a second Risk Engine or Lifecycle Engine.** `run_outer_cycle`
+calls `run_control_cycle` (unmodified), `scan_and_rank_opportunities`
+(which itself calls the unmodified `src.risk.engine.evaluate_trade_proposal`),
+and `monitor_pending_tickets` (which itself calls the unmodified
+`src.brokers.fidelity.transition`) — never overriding any of their
+verdicts, never importing `src.risk.engine`/`src.lifecycle.engine`
+directly, and never calling `confirm_fill` (so a Risk approval or a
+scanned opportunity can never be silently treated as an executed fill).
+
+**Priority: existing-position/risk monitoring > pending-ticket safety
+monitoring > new-opportunity scanning.** `run_control_cycle` itself
+carries no rate-limit gate in this module at all — whatever market data
+the caller already fetched for open positions is evaluated every cycle,
+unconditionally. Only the two stages this module adds are ever skipped
+under provider-capacity constraints: pending-ticket monitoring is gated
+at `RateLimitPriority.P3_PENDING_TICKET_REPRICING`, opportunity scanning
+at `P4_OPPORTUNITY_SCANNING`. Since `src.data.rate_limiter`'s existing
+per-priority utilization ceilings throttle P4 before P3 before P0-P2 as
+headroom shrinks, opportunity scanning is always sacrificed first,
+ticket monitoring second, and existing-position/risk monitoring never at
+all.
+
+**Exposure persistence gap closed**: `ControlLoopStore` gained
+`save_exposure_snapshot`/`get_exposure_snapshot` (Step 22.4's
+`run_control_cycle` computed a fresh `PortfolioExposureSnapshot` every
+cycle but was never given the job of persisting it) — `run_outer_cycle`
+saves it immediately after the cycle completes.
+
+**Dashboard projection** (`src/dashboard/control_loop_projection.py`,
+`load_latest_control_loop_state`): the one production-safe read from a
+persisted `ControlLoopStore` into `DashboardState.latest_cycle_record`/
+`latest_exposure`/`control_loop_alerts` — never fabricates; an empty
+store leaves every field at its honest default. `src.dashboard.app
+.set_state` gained an optional `control_loop_store` keyword that invokes
+this projection at session-initialization time, so the dashboard is
+capable of showing the most recently completed cycle right after normal
+application startup. Three states are kept structurally distinct, never
+collapsed: no session at all (503, `get_state`'s pre-existing behavior,
+unchanged), a session with no cycle yet (404, the control-loop routes'
+pre-existing honest behavior, unchanged), and a session with real
+persisted cycle data (200, now actually reachable).
+
+**Tradier production smoke test** (`scripts/smoke_tradier_market_data.py`):
+operator-run, GET-only, market-data-only (one quote, the expirations
+list, one option chain), never places/previews/cancels an order, never
+starts validation, never writes to any store, never prints the bearer
+token — documented in README.md §19.
+
+**Security proof**: `tests/acceptance/test_orchestrator_security.py` —
+the orchestrator never imports `src.risk.engine`/`src.lifecycle.engine`
+directly or calls `confirm_fill`/an order-submission method; the
+dashboard projection module has exactly one public function and no
+route can resolve a `ControlLoopAlert`; the P4>P3>P0 rate-limit priority
+ordering holds structurally, re-verified independently by
+`src/validation/freeze.py`'s new `orchestrator_cannot_bypass_risk_or_lifecycle`/
+`opportunity_scan_never_outranks_risk_monitoring`/
+`dashboard_cannot_execute_trades` checks on every `make verify-freeze`
+run.

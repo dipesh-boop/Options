@@ -58,18 +58,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Step 22.1 (Alpaca market-data amendment), Step 22.2 (stateful Wheel
 # strategy amendment), Step 22.3 (Strategy Lifecycle Management Engine
-# amendment), and Step 22.4 (Tradier market data + Portfolio Control
-# Loop amendment) each bumped the freeze name/version in place without
-# touching the prior versions' own artifacts -- see progress.md and
-# STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
-# STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md.
-# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen
-# state; the original V1.0/V1.1/V1.2/V1.3 manifests/reports remain
-# recoverable from git history at the `paper-trading-v1.0` /
-# `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4"
+# amendment), Step 22.4 (Tradier market data + Portfolio Control Loop
+# amendment), and Step 22.4A (outer orchestrator + dashboard projection
+# acceptance remediation) each bumped the freeze name/version in place
+# without touching the prior versions' own artifacts -- see progress.md
+# and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
+# STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
+# STEP_22_4A_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
+# reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
+# V1.4 manifests/reports remain recoverable from git history at the
+# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
+# `paper-trading-v1.3` / `paper-trading-v1.4` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.1"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.0"
+MANIFEST_VERSION = "1.4.1"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -127,6 +129,18 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     "tradier_provider_module": REPO_ROOT / "src" / "data" / "tradier_provider.py",
     "rate_limiter_module": REPO_ROOT / "src" / "data" / "rate_limiter.py",
     "quality_gate_module": REPO_ROOT / "src" / "data" / "quality_gate.py",
+    # Step 22.4A: the operator-run Tradier production smoke test --
+    # hashing it means any future change (including one that tried to
+    # add an order/trading call or print the raw token) is caught as
+    # material drift, exactly like the provider module it exercises.
+    "smoke_tradier_script": REPO_ROOT / "scripts" / "smoke_tradier_market_data.py",
+    # Step 22.4A: the dashboard's control-loop projection/loading
+    # mechanism -- the one place persisted control-loop output is read
+    # into `DashboardState`. `src/portfolio/orchestrator.py` (the new
+    # outer orchestrator) needs no separate entry here: it lives inside
+    # `src/portfolio/`, already covered by `portfolio_module_hash`'s
+    # whole-directory hash below.
+    "control_loop_projection_module": REPO_ROOT / "src" / "dashboard" / "control_loop_projection.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -215,6 +229,13 @@ class FreezeManifest(BaseModel):
     portfolio_module_hash: str
     tradier_market_data_only: bool  # must always be True -- Tradier has no order-submission code path
     control_loop_cannot_execute_trades: bool  # must always be True -- src/portfolio/ places no order, ever
+
+    # Step 22.4A (outer orchestrator + dashboard projection amendment).
+    smoke_tradier_script_hash: str
+    control_loop_projection_module_hash: str
+    dashboard_cannot_execute_trades: bool  # must always be True -- src/dashboard/ places no order, ever
+    orchestrator_cannot_bypass_risk_or_lifecycle: bool  # must always be True -- no direct src.risk.engine/src.lifecycle.engine import, no confirm_fill call
+    opportunity_scan_never_outranks_risk_monitoring: bool  # must always be True -- P4 opportunity scan priority is strictly lower than P3/P0 risk monitoring priorities
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -404,7 +425,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4",
+        freeze_version="1.4.1",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -418,6 +439,11 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         portfolio_module_hash=_hash_directory(_CODE_MODULE_DIRS["portfolio_module"]),
         tradier_market_data_only=_verify_tradier_is_market_data_only(),
         control_loop_cannot_execute_trades=_verify_portfolio_has_no_live_trading_client(),
+        smoke_tradier_script_hash=compute_file_hash(_CODE_MODULE_FILES["smoke_tradier_script"]),
+        control_loop_projection_module_hash=compute_file_hash(_CODE_MODULE_FILES["control_loop_projection_module"]),
+        dashboard_cannot_execute_trades=_verify_dashboard_has_no_live_trading_client(),
+        orchestrator_cannot_bypass_risk_or_lifecycle=_verify_orchestrator_does_not_bypass_risk_or_lifecycle(),
+        opportunity_scan_never_outranks_risk_monitoring=_verify_opportunity_scan_never_outranks_risk_monitoring(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -543,6 +569,8 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("rate_limiter_module_hash", _CODE_MODULE_FILES["rate_limiter_module"], False),
         ("quality_gate_module_hash", _CODE_MODULE_FILES["quality_gate_module"], False),
         ("portfolio_module_hash", _CODE_MODULE_DIRS["portfolio_module"], True),
+        ("smoke_tradier_script_hash", _CODE_MODULE_FILES["smoke_tradier_script"], False),
+        ("control_loop_projection_module_hash", _CODE_MODULE_FILES["control_loop_projection_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -649,6 +677,42 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "a live trading-client import or order-submission method name was found in src/portfolio/, "
         "or the manifest wrongly claims the control loop cannot execute trades -- the Portfolio Control "
         "Loop must remain a read-only orchestrator over the existing Risk Engine/PaperBroker/Fidelity paths",
+    ))
+
+    dashboard_no_live_client_ok = (
+        _verify_dashboard_has_no_live_trading_client() and manifest.dashboard_cannot_execute_trades
+    )
+    checks.append(FreezeCheck(
+        name="dashboard_cannot_execute_trades", passed=dashboard_no_live_client_ok,
+        detail="no live trading-client import and no order-submission method name found anywhere in "
+        "src/dashboard/, and manifest records True" if dashboard_no_live_client_ok
+        else "a live trading-client import or order-submission method name was found in src/dashboard/, "
+        "or the manifest wrongly claims the dashboard cannot execute trades -- every dashboard route "
+        "must remain read-only over the existing Risk Engine/Fidelity-manual-ticket paths",
+    ))
+
+    orchestrator_no_bypass_ok = (
+        _verify_orchestrator_does_not_bypass_risk_or_lifecycle() and manifest.orchestrator_cannot_bypass_risk_or_lifecycle
+    )
+    checks.append(FreezeCheck(
+        name="orchestrator_cannot_bypass_risk_or_lifecycle", passed=orchestrator_no_bypass_ok,
+        detail="no direct src.risk.engine/src.lifecycle.engine import and no confirm_fill call found in "
+        "src/portfolio/orchestrator.py, and manifest records True" if orchestrator_no_bypass_ok
+        else "src/portfolio/orchestrator.py directly imports src.risk.engine/src.lifecycle.engine or calls "
+        "confirm_fill, or the manifest wrongly claims otherwise -- the outer orchestrator must only ever "
+        "reach the Risk Engine/Lifecycle Engine/Fidelity fill-confirmation through the existing, unmodified "
+        "run_control_cycle/scan_and_rank_opportunities/monitor_pending_tickets functions",
+    ))
+
+    priority_ok = (
+        _verify_opportunity_scan_never_outranks_risk_monitoring() and manifest.opportunity_scan_never_outranks_risk_monitoring
+    )
+    checks.append(FreezeCheck(
+        name="opportunity_scan_never_outranks_risk_monitoring", passed=priority_ok,
+        detail="RateLimitPriority.P4_OPPORTUNITY_SCANNING > P3_PENDING_TICKET_REPRICING > P0_POSITION_RISK "
+        "holds, and manifest records True" if priority_ok
+        else "the rate-limit priority ordering no longer places new-opportunity scanning strictly below "
+        "pending-ticket and existing-position risk monitoring, or the manifest wrongly claims otherwise",
     ))
 
     passed = all(c.passed for c in checks)
@@ -774,6 +838,84 @@ def _verify_portfolio_has_no_live_trading_client() -> bool:
         if import_pattern.search(text) or order_method_pattern.search(text):
             return False
     return True
+
+
+def _verify_dashboard_has_no_live_trading_client() -> bool:
+    """Step 22.4A: a direct, executable proof (not just a file hash)
+    that no file under `src/dashboard/` imports a live trading client
+    (Alpaca's order-submission client, ib_insync, ibapi) or calls an
+    order-submission-shaped method name -- re-checked on every
+    `verify_freeze` run, the same methodology
+    `_verify_portfolio_has_no_live_trading_client` already establishes,
+    applied to the dashboard's new control-loop projection surface."""
+    import re
+
+    import_pattern = re.compile(r"^\s*(from|import)\s+(alpaca\.trading|ib_insync|ibapi)\b", re.MULTILINE)
+    # `cancel_order` is deliberately excluded from this vocabulary here
+    # (unlike `_verify_portfolio_has_no_live_trading_client`'s identical
+    # list, where no such collision exists): `src.dashboard.service
+    # .cancel_order`/the matching `app.py` route are Step 18's own
+    # pre-existing, legitimate CANCELLED action -- pulling back a
+    # Fidelity ticket that was already manually entered, purely through
+    # the existing `transition()` state machine, never a live
+    # broker-order-cancellation API call. That capability is already
+    # independently, exhaustively proven safe by
+    # `tests/unit/dashboard/test_app_security.py`'s route-inventory and
+    # no-credential tests; this check instead targets the genuinely
+    # order-placement-shaped vocabulary no legitimate dashboard action
+    # is ever named after.
+    order_method_pattern = re.compile(
+        r"\b(place_order|submit_order|modify_order|amend_order|"
+        r"preview_order|replace_order|submit_trade|execute_trade|place_trade|send_order)\s*\(",
+        re.IGNORECASE,
+    )
+    for path in (REPO_ROOT / "src" / "dashboard").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        if import_pattern.search(text) or order_method_pattern.search(text):
+            return False
+    return True
+
+
+def _verify_orchestrator_does_not_bypass_risk_or_lifecycle() -> bool:
+    """Step 22.4A: a direct, executable proof that
+    `src/portfolio/orchestrator.py` -- the new outer production
+    orchestrator -- never imports `src.risk.engine`/`src.lifecycle.engine`
+    directly (it must only ever reach them indirectly, through the
+    existing, unmodified `run_control_cycle`/`scan_and_rank_opportunities`)
+    and never calls `confirm_fill` (the one function anywhere in this
+    codebase that can transition a Fidelity ticket to FILLED --
+    a Risk approval or a scanned opportunity must never be silently
+    treated as an executed fill)."""
+    import re
+
+    path = REPO_ROOT / "src" / "portfolio" / "orchestrator.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    import_pattern = re.compile(r"^\s*(from|import)\s+src\.(risk\.engine|lifecycle\.engine)\b", re.MULTILINE)
+    if import_pattern.search(text):
+        return False
+    if "confirm_fill" in text:
+        return False
+    return True
+
+
+def _verify_opportunity_scan_never_outranks_risk_monitoring() -> bool:
+    """Step 22.4A Part 10/14: re-reads the orchestrator's own
+    `RateLimitPriority` constants at verify time (not a hardcoded
+    assumption) and confirms new-opportunity scanning is strictly the
+    lowest of the three -- P4 (opportunity scanning) > P3 (pending-ticket
+    monitoring) > P0 (existing-position risk monitoring, never gated by
+    rate limit in this module at all, see its own module docstring)."""
+    from src.data.rate_limiter import RateLimitPriority
+    from src.portfolio.orchestrator import _OPPORTUNITY_SCAN_PRIORITY, _TICKET_MONITOR_PRIORITY
+
+    return (
+        _OPPORTUNITY_SCAN_PRIORITY > _TICKET_MONITOR_PRIORITY
+        and _TICKET_MONITOR_PRIORITY > RateLimitPriority.P0_POSITION_RISK
+    )
 
 
 def _cli_build() -> int:

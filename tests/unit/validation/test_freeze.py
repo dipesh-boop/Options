@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4"
-        assert manifest.freeze_version == "1.4"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.1"
+        assert manifest.freeze_version == "1.4.1"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -37,6 +37,11 @@ class TestBuildFreezeManifest:
         assert len(manifest.portfolio_module_hash) == 64
         assert manifest.tradier_market_data_only is True
         assert manifest.control_loop_cannot_execute_trades is True
+        assert len(manifest.smoke_tradier_script_hash) == 64
+        assert len(manifest.control_loop_projection_module_hash) == 64
+        assert manifest.dashboard_cannot_execute_trades is True
+        assert manifest.orchestrator_cannot_bypass_risk_or_lifecycle is True
+        assert manifest.opportunity_scan_never_outranks_risk_monitoring is True
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -232,6 +237,34 @@ class TestVerifyFreezeDetectsDrift:
         finally:
             portfolio_module.write_text(original, encoding="utf-8")
 
+    def test_tampering_with_the_smoke_tradier_script_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/smoke_tradier_market_data.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            script.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "smoke_tradier_script_hash" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_control_loop_projection_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        projection_module = Path("src/dashboard/control_loop_projection.py")
+        original = projection_module.read_text(encoding="utf-8")
+        try:
+            projection_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "control_loop_projection_module_hash" and not c.passed for c in result.checks)
+        finally:
+            projection_module.write_text(original, encoding="utf-8")
+
 
 class TestAlpacaMarketDataOnlyCheck:
     def test_alpaca_market_data_only_check_passes_on_the_real_repository(self, tmp_path):
@@ -421,3 +454,120 @@ class TestPortfolioControlLoopSafetyChecks:
         result = verify_freeze(path)
         assert result.passed is False
         assert any(c.name == "control_loop_cannot_execute_trades" and not c.passed for c in result.checks)
+
+
+class TestDashboardCannotExecuteTradesCheck:
+    def test_dashboard_cannot_execute_trades_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "dashboard_cannot_execute_trades" and c.passed for c in result.checks)
+
+    def test_live_trading_client_import_added_to_dashboard_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/dashboard/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("from alpaca.trading.client import TradingClient\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "dashboard_cannot_execute_trades" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_order_submission_method_call_added_to_dashboard_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/dashboard/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("def f(client):\n    client.place_order(1)\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "dashboard_cannot_execute_trades" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_the_dashboards_own_legitimate_cancel_order_action_never_trips_this_check(self, tmp_path):
+        # `src.dashboard.service.cancel_order` (Step 18's own pre-existing
+        # CANCELLED action, pulling back an already-entered Fidelity
+        # ticket via the existing `transition()` state machine) must
+        # never be confused with a live broker order-cancellation call.
+        manifest = build_freeze_manifest(generated_at=NOW)
+        assert manifest.dashboard_cannot_execute_trades is True
+
+    def test_a_manifest_falsely_claiming_dashboard_cannot_execute_trades_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["dashboard_cannot_execute_trades"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "dashboard_cannot_execute_trades" and not c.passed for c in result.checks)
+
+
+class TestOrchestratorCannotBypassRiskOrLifecycleCheck:
+    def test_orchestrator_cannot_bypass_risk_or_lifecycle_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "orchestrator_cannot_bypass_risk_or_lifecycle" and c.passed for c in result.checks)
+
+    def test_a_direct_risk_engine_import_added_to_the_orchestrator_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        orchestrator_module = Path("src/portfolio/orchestrator.py")
+        original = orchestrator_module.read_text(encoding="utf-8")
+        try:
+            orchestrator_module.write_text(original + "\nfrom src.risk.engine import evaluate_trade_proposal\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "orchestrator_cannot_bypass_risk_or_lifecycle" and not c.passed for c in result.checks)
+        finally:
+            orchestrator_module.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_orchestrator_does_not_bypass_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["orchestrator_cannot_bypass_risk_or_lifecycle"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "orchestrator_cannot_bypass_risk_or_lifecycle" and not c.passed for c in result.checks)
+
+
+class TestOpportunityScanNeverOutranksRiskMonitoringCheck:
+    def test_priority_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "opportunity_scan_never_outranks_risk_monitoring" and c.passed for c in result.checks)
+
+    def test_a_manifest_falsely_claiming_the_priority_ordering_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["opportunity_scan_never_outranks_risk_monitoring"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "opportunity_scan_never_outranks_risk_monitoring" and not c.passed for c in result.checks)

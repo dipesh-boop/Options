@@ -500,9 +500,21 @@ yourself.
    ```
    OPTIONS_AGENT_DATA_PROVIDER=tradier
    ```
-5. **Start the dashboard** (§6/§7) as usual — nothing else about how you
+5. **Verify the connection** with the read-only production smoke test
+   before relying on it for anything else:
+   ```
+   python scripts/smoke_tradier_market_data.py SPY
+   ```
+   It fetches one underlying quote, the expirations list, and one
+   option chain — nothing else — and reports PASS/FAIL plus the
+   contract count and current rate-limit headroom. It never places,
+   previews, or cancels an order, never starts the 90-day validation
+   cohort, never writes to any database, and never prints your token
+   (only whether one is configured). Safe to re-run at any time as a
+   connectivity health check.
+6. **Start the dashboard** (§6/§7) as usual — nothing else about how you
    run the application changes.
-6. **Verify the internal paper-trading simulator remains the execution
+7. **Verify the internal paper-trading simulator remains the execution
    destination**: this is true structurally, not something you need to
    configure — there is no order-placement/preview/cancellation code of
    any kind anywhere in `src/data/tradier_provider.py`, whatever
@@ -517,16 +529,27 @@ yourself.
 ### The Portfolio Control Loop (optional, advanced)
 
 With a real provider (Alpaca or Tradier) configured, the deterministic
-Portfolio Control Loop (`src/portfolio/control_loop.py`) is the engine
-that continuously revalues your open positions from current market
-data, re-runs the unmodified Strategy Lifecycle Management Engine (§16)
-against each one, monitors any pending Fidelity ticket for staleness,
-and surfaces the results as read-only dashboard panels
-(`/api/control-loop/status`, `/exposure`, `/alerts`) — never a second
-place where a trade gets approved or an order gets placed. It contains
-no scheduler of its own in this release; running it on a recurring
-cadence is a deployment choice for whoever operates this platform, not
-something this README prescribes.
+Portfolio Control Loop is the engine that continuously revalues your
+open positions from current market data, re-runs the unmodified
+Strategy Lifecycle Management Engine (§16) against each one, monitors
+any pending Fidelity ticket for staleness, scans for new Risk-approved
+opportunities, raises deduplicated alerts, and surfaces the results as
+read-only dashboard panels (`/api/control-loop/status`, `/exposure`,
+`/alerts`) — never a second place where a trade gets approved or an
+order gets placed. `src.portfolio.orchestrator.run_outer_cycle` is the
+one production entry point that runs a full cycle (existing-position
+monitoring, pending-ticket monitoring, and new-opportunity scanning
+together, in that priority order — see its own module docstring);
+`src.portfolio.control_loop.run_control_cycle` underneath it handles
+only the existing-position half and is never rate-limited on its own,
+so open-position risk monitoring is never sacrificed even when provider
+capacity is constrained. It contains no scheduler of its own in this
+release; running it on a recurring cadence is a deployment choice for
+whoever operates this platform, not something this README prescribes.
+`src.dashboard.app.set_state(state, control_loop_store=store)` is how a
+dashboard session picks up the most recently completed persisted cycle
+at startup (see `src.dashboard.control_loop_projection` for the
+underlying, reusable projection).
 
 ---
 
