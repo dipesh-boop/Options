@@ -714,3 +714,71 @@ def build_control_loop_alert_view(alert: ControlLoopAlert) -> ControlLoopAlertVi
         severity=alert.severity.value, reason=alert.reason, created_at=alert.created_at,
         resolved=alert.resolved, resolved_at=alert.resolved_at,
     )
+
+
+class CandidateReviewView(BaseModel):
+    """Step 22.5 (PAPER_TRADING_V1.4.4): read-only view of one Review-Only
+    new-position candidate. There is no POST/PUT route anywhere for this
+    resource -- confirmation only ever happens via the separate
+    `scripts/confirm_candidate.py` operator command, never through this
+    dashboard, exactly the same "recommendation surfaced here, action
+    happens elsewhere" boundary the Wheel/Lifecycle read views already
+    establish."""
+
+    candidate_id: str
+    cohort_id: str
+    cycle_id: str
+    created_at: datetime
+    expires_at: datetime
+    status: str
+    ticker: str
+    strategy: str
+    expiration: date
+    legs: list[LegView]
+    quantity: int
+    estimated_credit_debit: float | None
+    max_profit: float | None
+    max_loss: float | None
+    capital_required: float
+    probability_of_profit: float
+    entry_delta: float
+    entry_iv: float | None
+    portfolio_exposure_before_pct: float
+    portfolio_exposure_after_pct: float
+    sector_exposure_before_pct: float
+    sector_exposure_after_pct: float
+    management_policy_name: str
+    llm_review_performed: bool
+    risk_decision: RiskDecision
+    risk_message: str
+    resolved_at: datetime | None
+    resolution_reason: str | None
+    paper_order_id: str | None
+
+
+def build_candidate_review_view(candidate) -> CandidateReviewView:  # ReviewedCandidate, kept untyped to avoid a src.review -> src.dashboard import cycle
+    approved = candidate.risk_decision.approved_order
+    legs = (
+        [LegView(action=leg.action, put_call=leg.put_call, strike=leg.strike, contracts=leg.contracts) for leg in approved.legs]
+        if approved is not None else []
+    )
+    return CandidateReviewView(
+        candidate_id=candidate.candidate_id, cohort_id=candidate.cohort_id, cycle_id=candidate.cycle_id,
+        created_at=candidate.created_at, expires_at=candidate.expires_at, status=candidate.status.value,
+        ticker=candidate.proposal.ticker, strategy=candidate.proposal.strategy.value,
+        expiration=candidate.proposal.expiration, legs=legs,
+        quantity=approved.quantity if approved is not None else candidate.proposal.contracts_requested,
+        estimated_credit_debit=approved.estimated_credit_debit if approved is not None else None,
+        max_profit=candidate.quantitative_analysis.max_profit, max_loss=candidate.quantitative_analysis.max_loss,
+        capital_required=candidate.quantitative_analysis.capital_required,
+        probability_of_profit=candidate.quantitative_analysis.probability_of_profit,
+        entry_delta=candidate.entry_delta, entry_iv=candidate.entry_iv,
+        portfolio_exposure_before_pct=candidate.portfolio_exposure_before_pct,
+        portfolio_exposure_after_pct=candidate.portfolio_exposure_after_pct,
+        sector_exposure_before_pct=candidate.sector_exposure_before_pct,
+        sector_exposure_after_pct=candidate.sector_exposure_after_pct,
+        management_policy_name=candidate.management_policy_name, llm_review_performed=candidate.llm_review_performed,
+        risk_decision=candidate.risk_decision.decision, risk_message=candidate.risk_decision.message,
+        resolved_at=candidate.resolved_at, resolution_reason=candidate.resolution_reason,
+        paper_order_id=candidate.paper_order_id,
+    )

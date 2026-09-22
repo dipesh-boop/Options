@@ -1,0 +1,30 @@
+# Step 22.5 (PAPER_TRADING_V1.4.4): the frozen-universe opportunity-scan
+# list for the unattended daily validation-cycle runner
+# (scripts/run_validation_cycle.py).
+#
+# Application code never hard-codes a ticker list -- src.data.universe
+# reads it from here, the same YAML-plus-per-value-env-override pattern
+# config/risk_limits.yaml/config/validation.yaml already establish. This
+# is an operator-maintained trading decision, not a technical one: the
+# starter list below is a placeholder the operator must review before
+# the first real validation cycle runs.
+#
+# `strategies` is filtered at load time to the strategies
+# src.workflows.candidate_generation.generate_candidates actually
+# implements today -- CASH_SECURED_PUT, COVERED_CALL, PUT_CREDIT_SPREAD.
+# Listing any other strategy here is harmless (it is silently filtered,
+# never silently dropped without being reported) but will never
+# produce a candidate, since no candidate-generation logic exists yet
+# for the remaining 12 approved strategies.
+
+tickers:
+  - ticker: SPY
+    sector: ETF
+  - ticker: QQQ
+    sector: ETF
+
+strategies:
+  - CASH_SECURED_PUT
+  - COVERED_CALL
+  - PUT_CREDIT_SPREAD
+strategies_env: OPTIONS_AGENT_UNIVERSE_STRATEGIES

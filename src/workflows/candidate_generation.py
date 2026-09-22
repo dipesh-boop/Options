@@ -301,3 +301,34 @@ def generate_candidates(
             candidates.append(Candidate(proposal=proposal, entry_delta=short_put.delta, entry_iv=short_put.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
 
     return candidates
+
+
+# Step 22.5 (PAPER_TRADING_V1.4.4): the only strategies with real
+# candidate-generation logic today -- see this function's own
+# `if StrategyType.X in strategies:` branches above. Lives here (not in
+# `src.data.universe`, the config loader that feeds a *configured*
+# strategy list into `candidate_eligible_strategies` below) because
+# `src.data` must never import `src.llm` (see
+# `tests/unit/data/test_architecture_boundary.py` -- the Market Data
+# Layer sits strictly beneath the Multi-Agent Layer, ARCHITECTURE.md
+# §3/§9) and `StrategyType` lives in `src.llm.schemas`. This module
+# already depends on both, and is the authoritative source of "which
+# strategies can this module actually produce a candidate for" in the
+# first place.
+CANDIDATE_GENERATION_ELIGIBLE_STRATEGIES: tuple[StrategyType, ...] = (
+    StrategyType.CASH_SECURED_PUT,
+    StrategyType.COVERED_CALL,
+    StrategyType.PUT_CREDIT_SPREAD,
+)
+
+
+def candidate_eligible_strategies(strategies: tuple[StrategyType, ...]) -> tuple[StrategyType, ...]:
+    """Narrows a configured strategy list down to the ones
+    `generate_candidates` can actually produce a candidate for today,
+    preserving the configured order. See
+    `CANDIDATE_GENERATION_ELIGIBLE_STRATEGIES`'s own docstring for why the
+    other 12 approved strategies are excluded here -- not a rejection of
+    those strategies, just an honest statement that no scan logic exists
+    for them yet."""
+    eligible = set(CANDIDATE_GENERATION_ELIGIBLE_STRATEGIES)
+    return tuple(s for s in strategies if s in eligible)

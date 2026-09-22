@@ -19,4 +19,4 @@ HOST="${OPTIONS_AGENT_DASHBOARD_HOST:-127.0.0.1}"
 PORT="${OPTIONS_AGENT_DASHBOARD_PORT:-8000}"
 
 echo "Starting dashboard at http://${HOST}:${PORT} ..."
-exec python3 -m uvicorn src.dashboard.app:app --host "${HOST}" --port "${PORT}"
+exec python3 -m uvicorn src.dashboard.bootstrap:app --host "${HOST}" --port "${PORT}"

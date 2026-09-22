@@ -10,8 +10,10 @@ from src.llm.schemas import StrategyType
 from src.risk.limits import get_default_limits
 from src.risk.portfolio_risk import Portfolio, UnderlyingHolding
 from src.workflows.candidate_generation import (
+    CANDIDATE_GENERATION_ELIGIBLE_STRATEGIES,
     QuantFilterConfig,
     UniverseEntry,
+    candidate_eligible_strategies,
     generate_candidates,
     passes_liquidity_filter,
 )
@@ -278,3 +280,21 @@ class TestGeneratedProposalsAreValid:
         )
         assert len(candidates) == 1
         assert candidates[0].proposal.management_dte <= 10
+
+
+class TestCandidateEligibleStrategies:
+    """Step 22.5 (PAPER_TRADING_V1.4.4): moved here from
+    tests/unit/data/test_universe.py -- narrowing a configured strategy
+    list to the ones this module can actually generate a candidate for
+    requires `StrategyType`, which `src.data` must never import (see
+    `tests/unit/data/test_architecture_boundary.py`)."""
+
+    def test_candidate_eligible_strategies_filters_to_the_three_implemented(self):
+        all_15 = tuple(StrategyType)
+        eligible = candidate_eligible_strategies(all_15)
+        assert set(eligible) == set(CANDIDATE_GENERATION_ELIGIBLE_STRATEGIES)
+        assert StrategyType.LONG_CALL_BUTTERFLY not in eligible
+
+    def test_candidate_eligible_strategies_preserves_configured_order(self):
+        ordered = (StrategyType.PUT_CREDIT_SPREAD, StrategyType.CASH_SECURED_PUT)
+        assert candidate_eligible_strategies(ordered) == ordered

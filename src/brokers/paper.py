@@ -53,6 +53,7 @@ from src.brokers.base import (
 from src.data.option_chain import OptionChain, OptionContract, OptionRight
 from src.data.provider import StaleDataError
 from src.data.quotes import UnderlyingQuote
+from src.portfolio.account_state import PaperAccountState
 
 SOURCE_PAPER = "paper"
 _CONTRACT_MULTIPLIER = 100
@@ -344,6 +345,10 @@ class PaperBroker(Broker):
         self._rejection_reasons: dict[str, str] = {}
         self._order_legs_cache: dict[str, list[OrderLeg]] = {}
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
     # ---------------------------------------------------------- market data
 
     def set_clock(self, now: datetime) -> None:
@@ -358,6 +363,46 @@ class PaperBroker(Broker):
 
     def get_rejection_reason(self, client_order_id: str) -> str | None:
         return self._rejection_reasons.get(client_order_id)
+
+    # -------------------------------------------------- account persistence
+
+    def export_state(self) -> PaperAccountState:
+        """Step 22.5: a snapshot of exactly this instance's six private,
+        account-level attributes, for a caller to persist durably (see
+        `src.portfolio.account_state`). Deliberately excludes market data
+        (`_chains`/`_underlyings` -- a caller re-feeds those every cycle via
+        `update_market_data`) and order idempotency (already durable via
+        `self._idempotency`, typically a `SqliteIdempotencyStore`). Purely
+        additive: reads state, calls no other method, and is never called
+        by any existing method on this class."""
+        return PaperAccountState(
+            account_id=self._account_id,
+            cash=self._cash,
+            reserved_collateral=self._reserved_collateral,
+            positions=dict(self._positions),
+            fills=list(self._fills),
+            rejection_reasons=dict(self._rejection_reasons),
+            order_legs_cache={k: list(v) for k, v in self._order_legs_cache.items()},
+            saved_at=self._now,
+        )
+
+    def restore_state(self, state: PaperAccountState) -> None:
+        """The exact inverse of `export_state` -- rehydrates an already-
+        constructed instance's six private attributes from a previously
+        exported snapshot. Purely additive: writes only those six
+        attributes, touches no fill/collateral/settlement logic, and is
+        never called by any existing method on this class. Callers
+        constructing a `PaperBroker` to resume a prior account should
+        still pass the same `account_id` and an `IdempotencyStore` pointed
+        at the same durable file -- this method does not itself verify
+        `state.account_id` matches, since a caller migrating/renaming an
+        account is a deliberate, explicit choice this class does not gate."""
+        self._cash = state.cash
+        self._reserved_collateral = state.reserved_collateral
+        self._positions = dict(state.positions)
+        self._fills = list(state.fills)
+        self._rejection_reasons = dict(state.rejection_reasons)
+        self._order_legs_cache = {k: list(v) for k, v in state.order_legs_cache.items()}
 
     # -------------------------------------------------------------- Broker
 

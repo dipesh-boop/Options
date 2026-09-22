@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.3"
-        assert manifest.freeze_version == "1.4.3"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.4"
+        assert manifest.freeze_version == "1.4.4"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -42,6 +42,11 @@ class TestBuildFreezeManifest:
         assert manifest.dashboard_cannot_execute_trades is True
         assert manifest.orchestrator_cannot_bypass_risk_or_lifecycle is True
         assert manifest.opportunity_scan_never_outranks_risk_monitoring is True
+        assert len(manifest.review_module_hash) == 64
+        assert len(manifest.run_validation_cycle_script_hash) == 64
+        assert len(manifest.confirm_candidate_script_hash) == 64
+        assert manifest.daily_cycle_never_calls_place_order is True
+        assert manifest.review_only_path_never_imports_llm is True
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -65,9 +70,11 @@ class TestBuildFreezeManifest:
         assert manifest.config_file_hashes["brokers.yaml"] is not None
         assert manifest.config_file_hashes["validation.yaml"] is not None
         assert manifest.config_file_hashes["llm.yaml"] is not None
-        # Documented not-applicable entries, never silently omitted.
+        # Step 22.5: now real, hashed config -- was "not applicable" through V1.4.3.
+        assert manifest.config_file_hashes["universe.yaml"] is not None
+        assert manifest.config_file_hashes["operations.yaml"] is not None
+        # Documented not-applicable entry, never silently omitted.
         assert manifest.config_file_hashes["strategies.yaml"] is None
-        assert manifest.config_file_hashes["universe.yaml"] is None
 
     def test_approved_strategies_reflect_actual_brokers_yaml(self):
         manifest = build_freeze_manifest(generated_at=NOW)
@@ -264,6 +271,76 @@ class TestVerifyFreezeDetectsDrift:
             assert any(c.name == "control_loop_projection_module_hash" and not c.passed for c in result.checks)
         finally:
             projection_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_review_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        review_module = Path("src/review/candidates.py")
+        original = review_module.read_text(encoding="utf-8")
+        try:
+            review_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "review_module_hash" and not c.passed for c in result.checks)
+        finally:
+            review_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_run_validation_cycle_script_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            script.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "run_validation_cycle_script_hash" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_confirm_candidate_script_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/confirm_candidate.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            script.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "confirm_candidate_script_hash" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_daily_cycle_never_calls_place_order_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            script.write_text(original + "\nplace_order()\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "daily_cycle_never_calls_place_order" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_review_only_path_never_imports_llm_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        confirmation_module = Path("src/review/confirmation.py")
+        original = confirmation_module.read_text(encoding="utf-8")
+        try:
+            confirmation_module.write_text(original + "\nimport src.llm.client\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "review_only_path_never_imports_llm" and not c.passed for c in result.checks)
+        finally:
+            confirmation_module.write_text(original, encoding="utf-8")
 
 
 class TestAlpacaMarketDataOnlyCheck:

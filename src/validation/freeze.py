@@ -61,40 +61,50 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # amendment), Step 22.4 (Tradier market data + Portfolio Control Loop
 # amendment), Step 22.4A (outer orchestrator + dashboard projection
 # acceptance remediation), Step 22.4B (test-portability/fixture
-# remediation only), and Step 22.4C (SQLite backup acceptance-test
+# remediation only), Step 22.4C (SQLite backup acceptance-test
 # semantic-verification remediation only -- no production behavior
-# changed) each bumped the freeze name/version in place without
-# touching the prior versions' own artifacts -- see progress.md and
-# STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
+# changed), and Step 22.5 (PAPER_TRADING_V1.4.4: the Review-Only
+# operational runtime -- production module hashes for src/brokers/,
+# src/portfolio/, and the new src/review/ package DO legitimately
+# change this time, unlike 22.4B/22.4C's zero-production-drift steps --
+# see STEP_22_5_FREEZE_REPORT.md) each bumped the freeze name/version in
+# place without touching the prior versions' own artifacts -- see
+# progress.md and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
 # STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
 # STEP_22_4A_FREEZE_REPORT.md / STEP_22_4B_FREEZE_REPORT.md /
-# STEP_22_4C_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
-# reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2 manifests/reports remain recoverable from git
-# history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
-# `paper-trading-v1.2` / `paper-trading-v1.3` / `paper-trading-v1.4` /
-# `paper-trading-v1.4.1` / `paper-trading-v1.4.2` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.3"
+# STEP_22_4C_FREEZE_REPORT.md / STEP_22_5_FREEZE_REPORT.md.
+# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen state;
+# the original V1.0/V1.1/V1.2/V1.3/V1.4/V1.4.1/V1.4.2/V1.4.3 manifests/
+# reports remain recoverable from git history at the `paper-trading-v1.0`
+# / `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
+# `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
+# / `paper-trading-v1.4.3` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.4"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.3"
+MANIFEST_VERSION = "1.4.4"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
 
 # The config files that actually exist in this repository as of Step 22.
-# Part 21 also names `strategies.yaml` and `universe.yaml` -- this
-# platform never split those out into their own files (per-strategy
-# behavior lives in `src/strategies/*.py`, hashed below as code; the
-# tradable universe is not yet config-driven at all -- see
-# ARCHITECTURE.md), so those two keys are recorded as explicit
-# "not applicable" entries rather than silently omitted.
+# Part 21 also names `strategies.yaml` -- this platform never split that
+# out into its own file (per-strategy behavior lives in
+# `src/strategies/*.py`, hashed below as code), so that key is recorded
+# as an explicit "not applicable" entry rather than silently omitted.
+# `universe.yaml` WAS "not applicable" (the tradable universe was not
+# yet config-driven at all) through V1.4.3 -- Step 22.5 (PAPER_TRADING_V1.4.4)
+# adds it, alongside the new `operations.yaml`, as real, hashed config.
 _NAMED_CONFIG_FILES: dict[str, Path | None] = {
     "risk_limits.yaml": _CONFIG_DIR / "risk_limits.yaml",
     "brokers.yaml": _CONFIG_DIR / "brokers.yaml",
     "validation.yaml": _CONFIG_DIR / "validation.yaml",
     "llm.yaml": _CONFIG_DIR / "llm.yaml",
     "strategies.yaml": None,  # not applicable -- see module docstring
-    "universe.yaml": None,  # not applicable -- see module docstring
+    # Step 22.5 (PAPER_TRADING_V1.4.4): the frozen-universe ticker/strategy
+    # list and the operational-runtime configuration for the daily
+    # validation-cycle runner and confirm-candidate command.
+    "universe.yaml": _CONFIG_DIR / "universe.yaml",
+    "operations.yaml": _CONFIG_DIR / "operations.yaml",
 }
 
 # Whole-module (directory) hashes for the code that actually defines
@@ -121,6 +131,14 @@ _CODE_MODULE_DIRS: dict[str, Path] = {
     # calling the unmodified Lifecycle Engine) is caught as material
     # drift.
     "portfolio_module": REPO_ROOT / "src" / "portfolio",
+    # Step 22.5: `src.review.confirmation.confirm_candidate` is the ONLY
+    # function anywhere in this codebase that may call
+    # `PaperBroker.place_order` for a new position during this cohort's
+    # validation -- hashing this whole package means any future change
+    # (including one that tried to let the unattended daily scan fill a
+    # position, weaken the mandatory revalidation sequence, or fake an
+    # LLM review) is caught as material drift.
+    "review_module": REPO_ROOT / "src" / "review",
 }
 _CODE_MODULE_FILES: dict[str, Path] = {
     "paper_broker_module": REPO_ROOT / "src" / "brokers" / "paper.py",
@@ -146,6 +164,13 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # `src/portfolio/`, already covered by `portfolio_module_hash`'s
     # whole-directory hash below.
     "control_loop_projection_module": REPO_ROOT / "src" / "dashboard" / "control_loop_projection.py",
+    # Step 22.5: the two new operator entry points -- the unattended
+    # daily cycle runner (which must never call `PaperBroker.place_order`)
+    # and the human confirm-candidate command (the only thing that may).
+    # Hashing them means any future change to either is caught as
+    # material drift, exactly like `smoke_tradier_script` above.
+    "run_validation_cycle_script": REPO_ROOT / "scripts" / "run_validation_cycle.py",
+    "confirm_candidate_script": REPO_ROOT / "scripts" / "confirm_candidate.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -241,6 +266,13 @@ class FreezeManifest(BaseModel):
     dashboard_cannot_execute_trades: bool  # must always be True -- src/dashboard/ places no order, ever
     orchestrator_cannot_bypass_risk_or_lifecycle: bool  # must always be True -- no direct src.risk.engine/src.lifecycle.engine import, no confirm_fill call
     opportunity_scan_never_outranks_risk_monitoring: bool  # must always be True -- P4 opportunity scan priority is strictly lower than P3/P0 risk monitoring priorities
+
+    # Step 22.5 (PAPER_TRADING_V1.4.4, Review-Only operational runtime).
+    review_module_hash: str
+    run_validation_cycle_script_hash: str
+    confirm_candidate_script_hash: str
+    daily_cycle_never_calls_place_order: bool  # must always be True -- scripts/run_validation_cycle.py never calls PaperBroker.place_order
+    review_only_path_never_imports_llm: bool  # must always be True -- no real or faked LLM review anywhere on the new-position confirmation path
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -430,7 +462,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.3",
+        freeze_version="1.4.4",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -449,6 +481,11 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         dashboard_cannot_execute_trades=_verify_dashboard_has_no_live_trading_client(),
         orchestrator_cannot_bypass_risk_or_lifecycle=_verify_orchestrator_does_not_bypass_risk_or_lifecycle(),
         opportunity_scan_never_outranks_risk_monitoring=_verify_opportunity_scan_never_outranks_risk_monitoring(),
+        review_module_hash=_hash_directory(_CODE_MODULE_DIRS["review_module"]),
+        run_validation_cycle_script_hash=compute_file_hash(_CODE_MODULE_FILES["run_validation_cycle_script"]),
+        confirm_candidate_script_hash=compute_file_hash(_CODE_MODULE_FILES["confirm_candidate_script"]),
+        daily_cycle_never_calls_place_order=_verify_daily_cycle_never_calls_place_order(),
+        review_only_path_never_imports_llm=_verify_review_only_path_never_imports_llm(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -576,6 +613,9 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("portfolio_module_hash", _CODE_MODULE_DIRS["portfolio_module"], True),
         ("smoke_tradier_script_hash", _CODE_MODULE_FILES["smoke_tradier_script"], False),
         ("control_loop_projection_module_hash", _CODE_MODULE_FILES["control_loop_projection_module"], False),
+        ("review_module_hash", _CODE_MODULE_DIRS["review_module"], True),
+        ("run_validation_cycle_script_hash", _CODE_MODULE_FILES["run_validation_cycle_script"], False),
+        ("confirm_candidate_script_hash", _CODE_MODULE_FILES["confirm_candidate_script"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -718,6 +758,30 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         "holds, and manifest records True" if priority_ok
         else "the rate-limit priority ordering no longer places new-opportunity scanning strictly below "
         "pending-ticket and existing-position risk monitoring, or the manifest wrongly claims otherwise",
+    ))
+
+    daily_cycle_no_place_order_ok = (
+        _verify_daily_cycle_never_calls_place_order() and manifest.daily_cycle_never_calls_place_order
+    )
+    checks.append(FreezeCheck(
+        name="daily_cycle_never_calls_place_order", passed=daily_cycle_no_place_order_ok,
+        detail="'place_order' not found in scripts/run_validation_cycle.py, and manifest records True"
+        if daily_cycle_no_place_order_ok
+        else "'place_order' was found in scripts/run_validation_cycle.py, or the manifest wrongly claims "
+        "otherwise -- the unattended daily cycle must never open a new PaperBroker position; only "
+        "scripts/confirm_candidate.py may",
+    ))
+
+    review_only_no_llm_ok = (
+        _verify_review_only_path_never_imports_llm() and manifest.review_only_path_never_imports_llm
+    )
+    checks.append(FreezeCheck(
+        name="review_only_path_never_imports_llm", passed=review_only_no_llm_ok,
+        detail="no src.llm import (other than src.llm.schemas) found in scripts/run_validation_cycle.py, "
+        "scripts/confirm_candidate.py, or src/review/, and manifest records True" if review_only_no_llm_ok
+        else "an src.llm import (other than src.llm.schemas) was found on the Review-Only new-position "
+        "execution path, or the manifest wrongly claims otherwise -- no real or faked LLM review may "
+        "ever occur there",
     ))
 
     passed = all(c.passed for c in checks)
@@ -921,6 +985,76 @@ def _verify_opportunity_scan_never_outranks_risk_monitoring() -> bool:
         _OPPORTUNITY_SCAN_PRIORITY > _TICKET_MONITOR_PRIORITY
         and _TICKET_MONITOR_PRIORITY > RateLimitPriority.P0_POSITION_RISK
     )
+
+
+def _verify_daily_cycle_never_calls_place_order() -> bool:
+    """Step 22.5: a direct, executable proof (not just a file hash) that
+    `scripts/run_validation_cycle.py` -- the unattended daily runner --
+    never calls `PaperBroker.place_order` for a new position. The only
+    function anywhere in this codebase permitted to do that is
+    `src.review.confirmation.confirm_candidate`, invoked exclusively from
+    the separate, human-run `scripts/confirm_candidate.py`. Checks for
+    the literal call shape `place_order(` (an open paren immediately
+    after) rather than the bare substring `place_order`, which this
+    script's own module docstring and operator-facing print statement
+    both legitimately mention *by name* to explain the very invariant
+    this function verifies -- neither is followed by a `(`, so neither
+    trips this check. Independent of (and re-checked on every
+    `verify_freeze` run alongside)
+    `tests/acceptance/test_review_only_daily_cycle.py`'s own behavioral
+    proof."""
+    path = REPO_ROOT / "scripts" / "run_validation_cycle.py"
+    if not path.is_file():
+        return False
+    return "place_order(" not in path.read_text(errors="ignore")
+
+
+def _verify_review_only_path_never_imports_llm() -> bool:
+    """Step 22.5: a direct, executable proof that the Review-Only
+    new-position execution path (`scripts/run_validation_cycle.py`,
+    `scripts/confirm_candidate.py`, and every module under `src/review/`)
+    never imports from `src.llm` -- except `src.llm.schemas`, the
+    platform-wide home of plain, immutable `TradeProposal`/`StrategyType`
+    data shapes with no LLM call anywhere in them (CLAUDE.md invariant #2
+    is exactly why they're categorical/read-only in the first place),
+    already imported unconditionally by every deterministic layer in this
+    codebase (`src.risk.engine`, `src.portfolio.opportunity_scan`,
+    `src.workflows.candidate_generation`, among others). No real
+    Anthropic API call, and no faked deterministic Devil's Advocate/
+    Portfolio Manager stand-in, is ever reachable from this path.
+    Independent of (and re-checked on every `verify_freeze` run
+    alongside) `tests/acceptance/test_no_llm_in_review_only_path.py`'s
+    own AST-based proof."""
+    import ast
+
+    allowed = {"src.llm.schemas"}
+    targets = (
+        REPO_ROOT / "scripts" / "run_validation_cycle.py",
+        REPO_ROOT / "scripts" / "confirm_candidate.py",
+        *sorted((REPO_ROOT / "src" / "review").glob("*.py")),
+    )
+    for path in targets:
+        if not path.is_file():
+            return False
+        try:
+            tree = ast.parse(path.read_text(errors="ignore"), filename=str(path))
+        except SyntaxError:
+            # A file this broken is drift by definition -- fail closed
+            # rather than let an unhandled exception blow past every
+            # other check `verify_freeze` still owes the caller.
+            return False
+        for node in ast.walk(tree):
+            module_name = None
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "src.llm" or alias.name.startswith("src.llm."):
+                        module_name = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module == "src.llm" or node.module.startswith("src.llm."):
+                    module_name = node.module
+            if module_name is not None and module_name not in allowed:
+                return False
+    return True
 
 
 def _cli_build() -> int:

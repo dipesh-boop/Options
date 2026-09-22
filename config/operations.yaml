@@ -1,0 +1,75 @@
+# Step 22.5 (PAPER_TRADING_V1.4.4): operational-runtime configuration for
+# the unattended daily validation-cycle runner
+# (scripts/run_validation_cycle.py) and the human confirm-candidate command
+# (scripts/confirm_candidate.py).
+#
+# Same YAML-plus-per-value-env-override pattern every other config file in
+# this repository already establishes. Application code never hard-codes
+# any of these values.
+
+cohort:
+  # The cohort this operational layer acts against. This file NEVER
+  # causes a new cohort to be created -- src.validation.cohort
+  # .start_new_cohort is not imported anywhere in src/portfolio/
+  # operations_config.py, scripts/run_validation_cycle.py, or
+  # scripts/confirm_candidate.py. If the cohort named here has not
+  # already been started (src.validation.cohort.has_cohort_started),
+  # the daily cycle runner refuses to proceed rather than silently
+  # starting one.
+  cohort_id: "paper-trading-v1.4.3-validation-2026-09-22"
+  cohort_id_env: OPTIONS_AGENT_OPERATIONS_COHORT_ID
+  # The key every durable account-state/portfolio store below is keyed
+  # by. Defaults to the cohort id itself -- one paper account per cohort.
+  account_id: "paper-trading-v1.4.3-validation-2026-09-22"
+  account_id_env: OPTIONS_AGENT_OPERATIONS_ACCOUNT_ID
+
+market_regime:
+  # KNOWN SIMPLIFICATION: no deterministic (non-LLM) market-regime
+  # classifier exists anywhere in this codebase today -- only the LLM
+  # Market Regime agent persona produces one, and this operational layer
+  # deliberately introduces no LLM dependency (see CLAUDE.md "optional
+  # LLM multi-agent layer" and progress.md's Step 22.5 entry). A fixed,
+  # config-declared regime is used instead, until a real deterministic
+  # classifier exists. The operator should review/override this
+  # explicitly, not treat it as a computed fact.
+  default_regime: "normal"
+  default_regime_env: OPTIONS_AGENT_OPERATIONS_MARKET_REGIME
+
+storage:
+  # All four paths default to the operator's existing validation
+  # database -- every Sqlite*Store in this codebase creates its own
+  # CREATE TABLE IF NOT EXISTS-guarded tables and opens/closes its own
+  # connection per operation, so colocating them is safe (the same way
+  # SqliteValidationStore/SqliteControlLoopStore/SqliteLifecycleStore
+  # already coexist independently against one file in normal operation).
+  account_state_db_path: data/options_agent.db
+  account_state_db_path_env: OPTIONS_AGENT_ACCOUNT_STATE_DB_PATH
+  control_loop_db_path: data/options_agent.db
+  control_loop_db_path_env: OPTIONS_AGENT_CONTROL_LOOP_DB_PATH
+  lifecycle_db_path: data/options_agent.db
+  lifecycle_db_path_env: OPTIONS_AGENT_LIFECYCLE_DB_PATH
+  candidate_review_db_path: data/options_agent.db
+  candidate_review_db_path_env: OPTIONS_AGENT_CANDIDATE_REVIEW_DB_PATH
+
+review:
+  # How long a Risk-approved candidate stays AWAITING_HUMAN before the
+  # next daily cycle expires it. 900s is a placeholder matching this
+  # codebase's existing MAX_MARKET_DATA_AGE-style conventions -- a
+  # POLICY choice, not a derived number; the operator should confirm it
+  # before relying on it for the real cohort. NOTE: since the daily
+  # cycle (not a background timer) is what sweeps expired candidates, a
+  # candidate's practical review window is bounded by how often the
+  # operator actually runs scripts/run_validation_cycle.py, not solely
+  # by this number.
+  confirmation_ttl_seconds: 900
+  confirmation_ttl_seconds_env: OPTIONS_AGENT_REVIEW_TTL_SECONDS
+  # Maximum allowed drift, at confirm-time, between the candidate's
+  # originally quoted net economics (estimated_credit_debit) and the
+  # freshly repriced value, as a fraction of the original. A breach
+  # transitions the candidate to REPRICE_REQUIRED rather than filling
+  # at a materially different price than what was reviewed.
+  max_price_drift_pct: 0.05
+  max_price_drift_pct_env: OPTIONS_AGENT_REVIEW_MAX_PRICE_DRIFT_PCT
+  # Same idea, applied to QuantitativeAnalysis.capital_required.
+  max_capital_required_drift_pct: 0.05
+  max_capital_required_drift_pct_env: OPTIONS_AGENT_REVIEW_MAX_CAPITAL_DRIFT_PCT

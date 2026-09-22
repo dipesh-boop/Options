@@ -41,6 +41,7 @@ from src.dashboard.models import DashboardState
 from src.dashboard.risk_state import build_risk_panel
 from src.dashboard.service import DashboardActionError, OpportunityNotFoundError
 from src.portfolio.persistence import ControlLoopStore
+from src.review.candidates import CandidateReviewStore
 
 app = FastAPI(title="Fidelity Human-Execution Dashboard", version="1.0.0")
 
@@ -70,6 +71,26 @@ def get_state() -> DashboardState:
     if _dashboard_state is None:
         raise HTTPException(status_code=503, detail="dashboard has no loaded portfolio/opportunities yet")
     return _dashboard_state
+
+
+_candidate_review_store: CandidateReviewStore | None = None
+
+
+def get_candidate_review_store() -> CandidateReviewStore:
+    if _candidate_review_store is None:
+        raise HTTPException(status_code=503, detail="no candidate review store configured for this dashboard session")
+    return _candidate_review_store
+
+
+def set_candidate_review_store(store: CandidateReviewStore) -> None:
+    """Step 22.5: the one place `_candidate_review_store` is ever
+    assigned -- mirrors `set_state`'s own module-level-singleton pattern
+    exactly. Read live on every request (unlike `DashboardState`'s
+    control-loop fields, which are a session-init-time snapshot) since a
+    human deciding whether to confirm a candidate needs its current
+    status, not whatever it was when the dashboard process started."""
+    global _candidate_review_store
+    _candidate_review_store = store
 
 
 def set_state(state: DashboardState, *, control_loop_store: ControlLoopStore | None = None) -> None:
@@ -258,6 +279,33 @@ def control_loop_alerts(
         alerts = [a for a in alerts if not a.resolved]
     alerts.sort(key=lambda a: (severity_rank.get(a.severity.value, 99), a.created_at), reverse=False)
     return [schemas.build_control_loop_alert_view(a) for a in alerts]
+
+
+@app.get("/api/candidates", response_model=list[schemas.CandidateReviewView])
+def list_candidates(
+    include_resolved: bool = False, review_store: CandidateReviewStore = Depends(get_candidate_review_store),
+) -> list[schemas.CandidateReviewView]:
+    """Step 22.5 (PAPER_TRADING_V1.4.4): read-only visibility into Review-
+    Only new-position candidates -- `AWAITING_HUMAN` by default, or every
+    candidate (including resolved ones) when `include_resolved=true`.
+    There is no POST/PUT route here of any kind: confirming a candidate
+    only ever happens via the separate, explicit
+    `scripts/confirm_candidate.py` operator command -- never a dashboard
+    click, so the one action capable of opening a real (simulated)
+    PaperBroker position always requires a deliberate terminal command,
+    never a button."""
+    candidates = review_store.all_candidates() if include_resolved else review_store.candidates_awaiting_human()
+    return [schemas.build_candidate_review_view(c) for c in candidates]
+
+
+@app.get("/api/candidates/{candidate_id}", response_model=schemas.CandidateReviewView)
+def get_candidate(
+    candidate_id: str, review_store: CandidateReviewStore = Depends(get_candidate_review_store),
+) -> schemas.CandidateReviewView:
+    candidate = review_store.get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"no candidate found for candidate_id={candidate_id!r}")
+    return schemas.build_candidate_review_view(candidate)
 
 
 @app.get("/api/audit", response_model=list[schemas.AuditEventView])

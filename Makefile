@@ -1,4 +1,4 @@
-.PHONY: run install test backup restore verify-freeze freeze-manifest
+.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle confirm-candidate
 
 install:
 	pip install -r requirements.txt -r requirements-dev.txt
@@ -25,3 +25,15 @@ verify-freeze:
 # `make verify-freeze` (that means investigate the drift first).
 freeze-manifest:
 	python -m src.validation.freeze build
+
+# Runs one daily validation cycle (Step 22.5). Never opens a new
+# PaperBroker position -- see scripts/run_validation_cycle.py's own
+# module docstring.
+validate-cycle:
+	./scripts/run_validation_cycle.sh
+
+# Confirms exactly one Review-Only new-position candidate. The ONLY
+# command that may open a real (simulated) PaperBroker position.
+# Usage: make confirm-candidate ID=validation-scan-2026-09-22-SPY-...
+confirm-candidate:
+	./scripts/confirm_candidate.sh "$(ID)"

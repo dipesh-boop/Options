@@ -146,6 +146,13 @@ class TestNoExecutionShapedRoute:
         ("GET", "/api/control-loop/status"),
         ("GET", "/api/control-loop/exposure"),
         ("GET", "/api/control-loop/alerts"),
+        # Step 22.5 (PAPER_TRADING_V1.4.4): Review-Only candidate visibility --
+        # read-only (GET-only), deliberately no POST/PUT/DELETE/PATCH route
+        # here (see tests/unit/dashboard/test_candidate_routes.py's own
+        # TestNoWriteRouteExistsForCandidates) -- confirming a candidate is
+        # CLI-only (scripts/confirm_candidate.py), never a dashboard click.
+        ("GET", "/api/candidates"),
+        ("GET", "/api/candidates/{candidate_id}"),
     }
     _FORBIDDEN_PATH_SUBSTRINGS = [
         "auto-trade", "auto_trade", "autotrade", "execute", "send-to-fidelity", "send_to_fidelity",
