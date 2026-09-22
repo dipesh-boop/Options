@@ -4735,3 +4735,108 @@ commit SHA, manifest hash, and remote tag verification. No cohort was
 created, no Day 1 snapshot was recorded, no trades were generated,
 starting NAV was not altered, and no scheduling was enabled. Work stops
 here per this step's own explicit instruction.
+
+## Step 22.4B: Test-Portability Remediation, re-frozen as PAPER_TRADING_V1.4.2
+
+Triggered by running the frozen PAPER_TRADING_V1.4.1 suite on a real
+operator macOS checkout (`/Users/dipesh/Trading/Options`, Python
+3.12.14): **3315 passed, 4 skipped, 5 failed** there, vs. this
+sandbox's 3319/6/0 — every one of the 5 failures was a test/fixture
+portability defect that had never been exercised in this sandbox
+environment, never a production defect. This step's explicit scope was
+**test-only**: no production trading logic (`src/risk/`, `src/quant/`,
+`src/brokers/`, strategies, validation methodology, dashboard
+production behavior, live-trading configuration) was touched.
+
+1. **`test_no_alpaca_trading_import_anywhere_in_the_repository`** — a
+   bare `REPO_ROOT.rglob("*.py")` descended into a real operator's
+   `.venv` and flagged the installed `alpaca-py` package's own
+   `alpaca.trading` imports as if they were repository code. Fixed by
+   adding `repo_controlled_files()` to `tests/acceptance/conftest.py` —
+   `git ls-files -z --cached --others --exclude-standard`, git's own
+   authoritative "tracked, or untracked-but-not-ignored" definition of
+   what could actually end up committed — and scoping the scan to it.
+   The assertion itself (no `alpaca.trading` import in repository-
+   controlled code) is unchanged.
+2. **`test_backup_creates_a_timestamped_file_containing_the_real_
+   database_bytes`** — the fixture wrote a fake `b"SQLite format
+   3\x00"` header followed by arbitrary bytes. `backup.sh` correctly
+   uses the real `sqlite3` CLI's `.backup` command when it's installed
+   (the common case on macOS, absent in this sandbox), which opens and
+   validates the actual SQLite file structure, not just a magic-string
+   prefix — it correctly rejected the fake fixture as "file is not a
+   database". Fixed by writing a genuine minimal SQLite database via
+   the stdlib `sqlite3` module (`_write_minimal_sqlite_db`), and added
+   a positive check that the backed-up file is itself openable and
+   contains the expected row. Also hardened the neighboring two-backups
+   test with the same real-database fixture plus previously-absent
+   `returncode == 0` assertions. `backup.sh`'s own integrity validation
+   was not weakened.
+3. **`test_no_env_credential_or_secret_files_exist`** — flagged the
+   operator's own properly-gitignored local `.env` (required for normal
+   Tradier/Alpaca configuration) as a leaked credential file. Fixed by
+   scoping the same `repo_controlled_files()` helper to this scan too —
+   a `.env` that ever became tracked/committed still fails loudly
+   immediately, while a genuinely gitignored local one does not. Added
+   a belt-and-suspenders test (`test_a_local_env_file_if_present_is_
+   genuinely_gitignored_not_merely_untracked`) that directly runs `git
+   check-ignore -q .env` whenever a local `.env` exists, proving the
+   exclusion is never merely "not yet `git add`ed".
+4/5. **`test_strategy_integrity.py`** — two hard-coded
+   `cwd="/home/user/Options"` `subprocess.run` calls and one hard-coded
+   `open(f"/home/user/Options/{path}")` failed outright on a real
+   checkout at a different path. Replaced all three with the module's
+   own dynamically-derived `REPO_ROOT = Path(__file__).resolve()
+   .parents[2]` constant, already the established pattern used
+   elsewhere in `tests/acceptance/`.
+
+**Portability audit** (per this step's own instruction to search the
+whole suite for the same defect classes) found and fixed two further
+latent instances, neither among the 5 originally reported:
+`test_tradier_market_data_only.py`'s own repo-wide Tradier-order-
+shaped-identifier scan (same `.venv`-descent risk as failure 1), and
+`test_validation_pipeline.py`'s no-sqlite-or-db-file-exists-anywhere-
+in-the-repository scan (same risk: a third-party package's own bundled
+`.db`/`.sqlite` fixture under `.venv` would have false-positived as
+real cohort data). Both rewritten onto `repo_controlled_files()` the
+same way.
+
+Two items were found and deliberately left untouched, as out of scope:
+`VALIDATION_MANIFEST.json`'s own historical `/home/user/Options`-keyed
+hash-record dictionary keys (a frozen historical artifact from an
+earlier freeze step — its content documents what was actually
+generated then, and rewriting it would misrepresent that record, not
+fix a defect), and `src/validation/freeze.py`'s own single production-
+code `REPO_ROOT.rglob("*.py")` scan inside
+`_verify_tradier_is_market_data_only` (same theoretical defect class,
+but production code this step's constraints forbid touching absent an
+actual observed false positive — none found; no plausible third-party
+package defines a `TradierBroker`-shaped class).
+
+**Tests added/changed:** all 7 changed files are under
+`tests/acceptance/` plus 1 assertion pair in
+`tests/unit/validation/test_freeze.py` (the version-metadata bump
+below) — zero new test files, zero `src/` behavior changes. Full
+repository suite: **3319 passed, 6 skipped, 0 failed**, identical shape
+to this sandbox's pre-existing baseline (these fixtures were never
+exercised here the way a real `.venv`, a real `sqlite3` CLI, and a real
+local `.env` exposed them on the operator's machine).
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.2** —
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place from
+`PAPER_TRADING_V1.4.1`/`1.4.1` to `PAPER_TRADING_V1.4.2`/`1.4.2`; no
+new manifest fields or `make verify-freeze` checks were needed (no new
+production module was created this step). All 42 checks carried from
+V1.4.1 plus the 3 orchestrator-era checks added in V1.4.1 itself still
+pass **unchanged** — this step touched no file inside `src/quant/`,
+`src/risk/`, `src/brokers/`, `src/wheel/`, `src/lifecycle/`,
+`src/data/`, `src/portfolio/`, or `src/dashboard/`, confirmed by every
+module-hash check in `make verify-freeze` reading `unchanged`.
+
+**PAPER_TRADING_V1.4.2: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER:
+MARKET_DATA_ONLY.** See `STEP_22_4B_FREEZE_REPORT.md` for the freeze
+commit SHA, manifest hash, and remote tag verification. No cohort was
+created, no Day 1 snapshot was recorded, no trades were generated,
+starting NAV was not altered, and no scheduling was enabled. Work stops
+here per this step's own explicit instruction.
