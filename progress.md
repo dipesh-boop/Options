@@ -4915,3 +4915,177 @@ commit SHA, manifest hash, and remote tag verification. No cohort was
 created, no Day 1 snapshot was recorded, no trades were generated,
 starting NAV was not altered, and no scheduling was enabled. Work stops
 here per this step's own explicit instruction.
+
+## Step 22.5 (PAPER_TRADING_V1.4.4): Review-Only Operational Runtime for the 90-Day Validation
+
+The operator had already started the real 90-day validation cohort on
+their own machine (`paper-trading-v1.4.3-validation-2026-09-22`, day 1
+snapshot recorded, $100,000 starting NAV/cash) but no production
+runtime anywhere in the repository ever called
+`src.portfolio.orchestrator.run_outer_cycle` on a schedule, and
+`PaperBroker` had no serialize/restore path, so a restarted process
+could not resume a multi-day paper account. This step builds the
+smallest safe operational layer to run that cohort day over day,
+under an explicit, non-negotiable design constraint the operator
+specified mid-task: **the daily cycle must never automatically open a
+new PaperBroker position.** A Risk-approved new-position candidate is
+persisted as an immutable `AWAITING_HUMAN` review record; a human must
+run a separate `confirm-candidate` command, which fully revalidates the
+exact candidate (fresh quote, fresh Quant, fresh Risk Engine run
+against the *current* portfolio, price/capital drift and TTL checks)
+before it may place a simulated paper order. No real or faked LLM
+review occurs anywhere on this path.
+
+**New production capability:**
+
+- `config/universe.yaml` + `src.data.universe` — the frozen-universe
+  ticker/sector list and configured strategy names the daily scan
+  reads. `load_universe_strategies` returns plain strategy-name
+  strings, never `StrategyType` members: `src.data` must never import
+  `src.llm` (the existing Market Data Layer boundary,
+  `tests/unit/data/test_architecture_boundary.py`), so resolving names
+  to real `StrategyType` members — and narrowing that list to the 3
+  strategies `src.workflows.candidate_generation.generate_candidates`
+  actually implements (`CASH_SECURED_PUT`/`COVERED_CALL`/
+  `PUT_CREDIT_SPREAD`) — moved to
+  `src.workflows.candidate_generation.candidate_eligible_strategies`,
+  which already depends on both layers.
+- `config/operations.yaml` + `src.portfolio.operations_config` — the
+  operator's real, already-started cohort/account id (**never** used
+  to call `start_new_cohort`), a config-declared default market regime
+  (no deterministic, non-LLM regime classifier exists anywhere in this
+  codebase — an explicitly documented known simplification), db paths,
+  and confirm-time tolerances (`confirmation_ttl_seconds`,
+  `max_price_drift_pct`, `max_capital_required_drift_pct`).
+- `src.portfolio.account_state` — durable `PaperAccountState` (mirrors
+  `PaperBroker`'s six private attributes exactly) and `Portfolio`
+  stores, the same ABC + InMemory + Sqlite triad every store in this
+  codebase already uses. `src.brokers.paper.PaperBroker` gained exactly
+  two new, purely additive public methods, `export_state()`/
+  `restore_state()` — zero changes to any existing fill/collateral/
+  settlement logic.
+- `src.review` (new package) — `ReviewedCandidate` (the full immutable
+  review snapshot: proposal, Quant, Risk decision, Greeks/IV, quoted
+  economics, exposure before/after, management policy,
+  `llm_review_performed` always `False`), `CandidateStatus`,
+  `CandidateReviewStore` (ABC + InMemory + Sqlite), an append-only
+  `ConfirmationAttemptRecord` audit trail, and `funnel_counts` (human-
+  confirmation statistics tracked separately from strategy
+  performance, per the operator's spec). `src.review.confirmation
+  .confirm_candidate` is **the one function anywhere in this codebase
+  that may call `PaperBroker.place_order` for a new position** —
+  it deliberately does not call `src.orchestration.pipeline
+  .run_order_pipeline` (which hard-requires the two LLM stages);
+  instead it calls the same underlying, unmodified functions directly,
+  in the same order, skipping only those two stages.
+- `scripts/run_validation_cycle.py` — the unattended daily runner:
+  cycle-level idempotent, refuses to proceed if the configured cohort
+  hasn't already been started elsewhere (`start_new_cohort` is not
+  imported anywhere in this file), evaluates existing positions every
+  cycle through the unmodified `run_outer_cycle`, and — if the
+  opportunity scan finds a Risk-approved candidate — persists it as
+  `AWAITING_HUMAN` and **never calls `PaperBroker.place_order`**.
+- `scripts/confirm_candidate.py` — the one human-run command that may:
+  takes exactly one positional argument (a candidate id), no flag that
+  can change strategy/strikes/expiration/quantity/sizing. Revalidates
+  the exact candidate from scratch before ever touching the broker;
+  any material drift blocks the fill and transitions the candidate to
+  a clearly-named non-fill status. Idempotent — a second confirmation
+  on an already-resolved candidate is refused before ever reaching
+  `PaperBroker` again.
+- `src/dashboard/app.py`/`schemas.py` — two new, deliberately **read-
+  only** `GET` routes (`/api/candidates`, `/api/candidates/{id}`); no
+  POST/PUT/DELETE/PATCH route exists for this resource anywhere —
+  confirming a candidate is CLI-only. `src/dashboard/bootstrap.py`
+  (new) wires a durable store into the dashboard at startup;
+  `scripts/start.sh` now launches it instead of the bare app.
+
+**Acceptance tests** (`tests/acceptance/test_review_only_daily_cycle.py`,
+`test_no_llm_in_review_only_path.py`) exercise the *actual* production
+scripts end to end (loaded via `importlib`, never the library functions
+directly) against temporary sqlite files: the daily cycle surfaces
+exactly one `AWAITING_HUMAN` candidate and places zero orders; running
+it twice the same day is a no-op; `confirm_candidate.py` is the only
+path that ever reaches `PaperBroker.place_order`, and does so exactly
+once even when invoked twice for the same candidate (a second attempt
+is refused as `ALREADY_RESOLVED` without ever touching the broker
+again). One finding surfaced and fixed here, not a test bug in the
+production sense but worth recording: `confirm_candidate.py` builds its
+`PaperBroker` with the real, unmodified production default
+(`FillModel.LIQUIDITY_ADJUSTED`), and `src.risk.engine` always sets a
+fresh candidate's limit price to the exact repriced mid — under that
+fill model, `compute_fill` always subtracts a strictly positive
+slippage amount from that same mid before comparing it back against
+that same mid-priced limit, so a brand-new limit order can never clear
+on its first `attempt_fill`, by construction, regardless of market
+data. `NO_FILL` is therefore the correct, deterministic outcome for a
+fresh confirmation under real settings — exactly why every other test
+in this codebase that needs an actual `FILLED` order (including this
+step's own unit tests) explicitly overrides `fill_model=FillModel.MID`.
+The acceptance test asserts the idempotency/exactly-once-order property
+against this real outcome rather than forcing an artificial fill; the
+`CONFIRMED`/filled code path itself is covered, with a controlled fill
+model, by `tests/unit/review/test_confirmation.py`.
+
+**Architecture-boundary fix surfaced during full regression:**
+`src.data.universe` originally imported `StrategyType` from
+`src.llm.schemas` directly, tripping
+`tests/unit/data/test_architecture_boundary.py`'s pre-existing "src.data
+never imports src.llm" check. Fixed as described above (plain strings
+out of `src.data`, enum resolution moved to
+`src.workflows.candidate_generation` and to the two scripts, which
+already import `src.llm.schemas` legitimately). Three other pre-
+existing tests needed matching, additive updates for the same reason
+every prior amendment step's regression required them: `tests/unit/
+dashboard/test_app_security.py`'s explicit route allowlist (the two new
+read-only candidate routes), and `tests/acceptance/
+test_orchestrator_security.py`'s literal-substring `"src.validation
+.session"` scan (an explanatory docstring mention in `src.portfolio
+.account_state`, not an import, reworded to avoid the false positive).
+
+**Tests:** 7 new acceptance tests (both new files), plus new unit test
+files for every new module (`test_universe.py`, `test_operations_config
+.py`, `test_account_state.py`, `test_candidates.py`,
+`test_confirmation.py`, `test_candidate_routes.py`) — full repository
+suite: **3402 passed, 6 skipped, 0 failed**. Manual CLI smoke test
+against a throwaway sqlite file (never `data/options_agent.db`):
+`run_validation_cycle.py` runs clean and idempotent for the same day;
+`confirm_candidate.py` correctly refuses an unknown candidate id
+(`NOT_FOUND`, exit 3) and correctly refuses to fill a seeded candidate
+against mismatched fresh market data (`DATA_INSUFFICIENT`, exit 2,
+proving the mandatory-revalidation safety property works end to end),
+with a second confirmation attempt refused (`ALREADY_RESOLVED`) and
+never a second order.
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.4** —
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place from
+`PAPER_TRADING_V1.4.3`/`1.4.3` to `PAPER_TRADING_V1.4.4`/`1.4.4`.
+Unlike 22.4B/22.4C (test-only, zero production drift), this step
+legitimately changes production module hashes:
+`paper_broker_module_hash` (the two new additive methods),
+`portfolio_module_hash` (the new `account_state.py`/
+`operations_config.py`), and two brand-new hashed entries,
+`review_module_hash` and the two new operator-script hashes
+(`run_validation_cycle_script_hash`, `confirm_candidate_script_hash`).
+`universe.yaml`/`operations.yaml` moved from documented "not
+applicable" to real, hashed config. Two new structural
+`make verify-freeze` checks were added, matching this codebase's
+existing `_verify_*` pattern (independent of, and re-checked alongside,
+the two new acceptance tests): `daily_cycle_never_calls_place_order`
+(scans `scripts/run_validation_cycle.py` for the literal call shape
+`place_order(`) and `review_only_path_never_imports_llm` (AST-based,
+scans the daily-cycle script, the confirm-candidate script, and every
+module under `src/review/` for any `src.llm` import other than
+`src.llm.schemas`). All 55 checks pass, 13 of them carried unchanged
+from V1.4.3.
+
+**PAPER_TRADING_V1.4.4: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22, on the operator's own machine — never started or touched
+from this sandbox). **LIVE_TRADING: DISABLED. FIDELITY_EXECUTION:
+MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY. NEW_POSITION_EXECUTION:
+HUMAN_CONFIRMED_REVIEW_ONLY.** See `STEP_22_5_FREEZE_REPORT.md` for the
+freeze commit SHA, manifest hash, and remote tag verification. No new
+cohort was started, no existing cohort database was overwritten or
+reset, and no path capable of automatically transmitting a real
+securities/options order was created anywhere in this step.
