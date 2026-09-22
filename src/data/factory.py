@@ -1,7 +1,8 @@
 """Selects which `MarketDataProvider` implementation is active, from one
 explicit config value — `OPTIONS_AGENT_DATA_PROVIDER` (`mock` / `ibkr` /
-`alpaca`) — so nothing in this codebase has to guess or silently default
-to a different provider than the one actually configured.
+`alpaca` / `tradier`) — so nothing in this codebase has to guess or
+silently default to a different provider than the one actually
+configured.
 
 Nothing before this module (Step 22.1) actually selected a provider at
 runtime: `src.dashboard.service`/`src.workflows.feed_health` both take
@@ -29,8 +30,9 @@ from src.data.provider import MarketDataProvider
 SOURCE_MOCK = "mock"
 SOURCE_IBKR = "ibkr"
 SOURCE_ALPACA = "alpaca"
+SOURCE_TRADIER = "tradier"
 
-_KNOWN_PROVIDERS = frozenset({SOURCE_MOCK, SOURCE_IBKR, SOURCE_ALPACA})
+_KNOWN_PROVIDERS = frozenset({SOURCE_MOCK, SOURCE_IBKR, SOURCE_ALPACA, SOURCE_TRADIER})
 
 
 class DataProviderConfigError(RuntimeError):
@@ -75,10 +77,15 @@ class _MockMarketDataProvider(MarketDataProvider):
 def get_configured_market_data_provider(selection: DataProviderSelection | None = None):
     """Returns a provider exposing `get_underlying_quote`/
     `get_option_chain` (a genuine `MarketDataProvider` instance for
-    `mock`/`alpaca`; for `ibkr` it is `IBKRBroker`, which implements the
-    same two methods structurally but is a `Broker` subclass, not a
-    `MarketDataProvider` -- a pre-existing design choice in
-    `src.brokers.ibkr`, unchanged by this module, not repeated here)."""
+    `mock`/`alpaca`/`tradier`; for `ibkr` it is `IBKRBroker`, which
+    implements the same two methods structurally but is a `Broker`
+    subclass, not a `MarketDataProvider` -- a pre-existing design choice
+    in `src.brokers.ibkr`, unchanged by this module, not repeated here).
+    A caller wanting Tradier's own additional methods (batch quotes,
+    priority-tagged requests, rate-limit state) should import
+    `TradierMarketDataProvider` directly rather than going through this
+    generic factory, exactly like `AlpacaMarketDataProvider`'s own
+    Alpaca-specific extras already work today."""
     selection = selection or DataProviderSelection()
     provider_name = selection.data_provider.lower()
     if provider_name not in _KNOWN_PROVIDERS:
@@ -94,12 +101,21 @@ def get_configured_market_data_provider(selection: DataProviderSelection | None 
             return IBKRBroker()  # implements get_underlying_quote/get_option_chain structurally
         except Exception as exc:  # noqa: BLE001 -- e.g. ib_insync not installed, or a non-paper port configured
             raise DataProviderConfigError(f"ibkr provider unavailable: {exc}") from exc
-    # provider_name == SOURCE_ALPACA
+    if provider_name == SOURCE_ALPACA:
+        try:
+            from src.data.alpaca_provider import AlpacaMarketDataProvider
+        except ImportError as exc:  # pragma: no cover - alpaca-py always installed in this repo
+            raise DataProviderConfigError(f"alpaca provider unavailable: {exc}") from exc
+        try:
+            return AlpacaMarketDataProvider()
+        except Exception as exc:  # noqa: BLE001 -- any construction failure (bad creds/config) fails closed
+            raise DataProviderConfigError(f"failed to construct Alpaca market data provider: {exc}") from exc
+    # provider_name == SOURCE_TRADIER (Step 22.4) -- the only remaining member of _KNOWN_PROVIDERS.
     try:
-        from src.data.alpaca_provider import AlpacaMarketDataProvider
-    except ImportError as exc:  # pragma: no cover - alpaca-py always installed in this repo
-        raise DataProviderConfigError(f"alpaca provider unavailable: {exc}") from exc
+        from src.data.tradier_provider import TradierMarketDataProvider
+    except ImportError as exc:  # pragma: no cover - httpx always installed in this repo
+        raise DataProviderConfigError(f"tradier provider unavailable: {exc}") from exc
     try:
-        return AlpacaMarketDataProvider()
-    except Exception as exc:  # noqa: BLE001 -- any construction failure (bad creds/config) fails closed
-        raise DataProviderConfigError(f"failed to construct Alpaca market data provider: {exc}") from exc
+        return TradierMarketDataProvider()
+    except Exception as exc:  # noqa: BLE001 -- any construction failure (missing token/bad config) fails closed
+        raise DataProviderConfigError(f"failed to construct Tradier market data provider: {exc}") from exc

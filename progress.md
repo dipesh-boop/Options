@@ -4360,3 +4360,235 @@ created, no Day 1 snapshot was recorded, no trades were generated,
 starting NAV was not altered, and no scheduling was enabled. Work stops
 here per this step's own explicit instruction — Step 23 remains
 separately authorized, not started.
+
+## Step 22.4 — Tradier real-time market data + deterministic Portfolio
+## Control Loop (controlled pre-validation amendment to PAPER_TRADING_V1.3)
+
+A 52-part instruction extending the frozen V1.3 platform with a real
+market-data provider (Tradier, MARKET_DATA_ONLY, mirroring the existing
+Alpaca provider's structural guarantees) and a new `src/portfolio/`
+package: the deterministic orchestrator that continuously revalues the
+PAPER portfolio, monitors every open position via the unmodified V1.3
+Lifecycle Engine, evaluates portfolio-level exposure/drawdown, monitors
+pending Fidelity tickets for staleness, scans for new opportunities
+without ever bypassing the Risk Engine, raises deduplicated alerts, and
+persists an auditable decision history — all still subordinate to
+`src.risk.engine.evaluate_trade_proposal` and still `Fidelity =
+MANUAL_EXECUTION` forever.
+
+**New modules:**
+- `src/data/tradier_provider.py` — `TradierMarketDataProvider`, GET-only
+  against `/v1/markets/*` (quotes, batch quotes, expirations, option
+  chains). Constructor-injectable `http_client` for tests (no real
+  `httpx`/token needed). Multi-symbol quote batching (one request per
+  chunk, not per symbol), bounded retry/backoff with auth failures
+  never retried, per-request rate-limit-priority gating (see
+  `rate_limiter.py`), secret redaction on every exception path, and
+  pure JSON->canonical mapping functions that return `None` rather than
+  fabricate a contract from a malformed/incomplete entry.
+- `src/data/rate_limiter.py` — `RateLimitPriority` (P0 position risk
+  through P5 background research), `RateLimitState.from_headers` (built
+  from the provider's own response headers, never a hardcoded plan
+  assumption), `may_proceed`/`degraded_priorities`. P0 is throttled only
+  by the hard `available<=0` floor, never by a utilization ceiling —
+  the concrete mechanism behind Part 9's "risk monitoring is the last
+  thing ever suspended."
+- `src/data/quality_gate.py` — `validate_underlying_quote`/
+  `validate_option_contract`/`validate_option_chain`: deterministic
+  checks (crossed/zero/excessively-wide markets, NaN/infinity on fields
+  Pydantic's own `ge`/`le` constraints don't already reject, staleness,
+  symbol/expiration consistency) that isolate one bad contract from an
+  otherwise-good chain rather than raising on the first one.
+  `is_systemic_chain_failure` is the separate, explicit escalation
+  point for "this whole underlying's data is unusable this cycle."
+- `src/data/factory.py`/`option_chain.py` — extended (not replaced):
+  `tradier` added to `_KNOWN_PROVIDERS` with the same fail-closed
+  construction the Alpaca/IBKR branches already use; `OptionContract`
+  gained optional `bid_size`/`ask_size`/`bid_timestamp`/`ask_timestamp`/
+  `trade_timestamp` fields (additive, every existing provider/test
+  unaffected).
+- `src/portfolio/revaluation.py` — `revalue_position`/`revalue_portfolio`:
+  per-leg mark-to-market from the current quality-gated chain, an
+  independently-solved IV (`src.quant.volatility.implied_volatility`,
+  never a provider's own reported IV) feeding `src.quant.greeks`, never
+  Black-Scholes theoretical prices for P&L. A leg with no matching
+  fresh contract makes that position `DATA_INSUFFICIENT` — never a
+  fabricated $0 P&L — and the portfolio aggregate is computed only from
+  positions that revalued cleanly, with the excluded set always listed.
+- `src/portfolio/exposure.py` — `build_exposure_snapshot`: underlying/
+  sector/strategy/expiration concentration (reusing
+  `src.risk.portfolio_risk`'s existing helpers), directional/volatility
+  exposure labels from caller-supplied Greeks (never recomputed here),
+  short-option capital, Wheel cash commitment (active = not one of
+  `src.wheel.state.TERMINAL_STATES`, so a halted-but-not-exited Wheel
+  still counts), owned-share exposure (current price when supplied,
+  honestly-flagged cost-basis fallback otherwise), covered-call
+  encumbrance, and correlated-pair reporting reusing
+  `src.risk.correlation`'s own documented price-history gap.
+- `src/portfolio/actions.py` — `ControlLoopAction` (Part 17's 16-member
+  vocabulary) plus `action_from_lifecycle_category`, a total,
+  KeyError-on-gap relabeling of `src.lifecycle.triggers.PRECEDENCE_ORDER`
+  categories — never a second precedence decision, only a display label
+  on the one `src.lifecycle.precedence.resolve_action` already made.
+- `src/portfolio/decision_snapshot.py`/`cycle_record.py`/`persistence.py`
+  — `PortfolioControlDecisionSnapshot` (Part 30) and `ControlCycleRecord`
+  (Part 31), both immutable/append-only; `ControlLoopStore`
+  (`InMemory`/`Sqlite`, restart-survival verified) following
+  `src.lifecycle.persistence`'s exact established pattern, extended in
+  the same file to also store `ControlLoopAlert` (Part 32).
+- `src/portfolio/control_loop.py` — `run_control_cycle`: MARKET DATA
+  (already fetched by the caller, same convention as
+  `src.workflows.morning_scan`) -> quality gate -> revaluation ->
+  exposure -> per-position Lifecycle Engine evaluation (lazily
+  initializing a `LifecyclePositionRecord` on first sight, never
+  reinventing lifecycle state) -> `src.risk.kill_switch` -> recommendation
+  -> persistence. One position's missing market data, missing
+  management-policy configuration, or unknown policy name isolates to a
+  `DATA_INSUFFICIENT` decision for that position alone; a portfolio
+  halt (manual or drawdown) overrides every open position's own action
+  to `PORTFOLIO_HALT`. New-opportunity scanning and pending-ticket
+  monitoring are deliberately NOT phases of this function — their
+  already-computed counts are accepted as plain `ControlCycleInputs`
+  fields so this orchestrator never has to be rewritten once a thin
+  outer wrapper runs those separate stages and merges the counts in.
+- `src/portfolio/ticket_monitor.py` — Part 21's actual gap: pending
+  (`AWAITING_HUMAN`/`ORDER_ENTERED`) Fidelity tickets are checked every
+  cycle for stale market data, price drift beyond a configurable
+  threshold, or a now-unreachable `minimum_acceptable_price` (same
+  net-credit/net-debit sign convention `src.brokers.fidelity`'s own
+  validator already uses); a bad finding calls the EXISTING
+  `transition()` to `REPRICE_REQUIRED` — no new price is ever derived
+  here. `record_confirmed_fill` is a documented one-line call-through to
+  the EXISTING `confirm_fill()` (Part 22's fill reconciliation was
+  already complete before this step; this module doesn't rebuild it).
+- `src/portfolio/opportunity_scan.py` — `scan_and_rank_opportunities`:
+  the lighter, no-LLM sibling of `run_morning_scan`, reusing
+  `src.workflows.candidate_generation.generate_candidates`,
+  `src.orchestration.pipeline.default_quant_stage`, and the one
+  `evaluate_trade_proposal` unmodified — Devil's Advocate/Portfolio
+  Manager remain `run_morning_scan`'s own separate, deliberately
+  invoked job, never re-run on every cycle. Ranks only Risk-approved/
+  resized candidates by risk-adjusted return (EV/capital); `best=None`
+  (CASH/NO_TRADE) is the explicit outcome when nothing clears the
+  configurable hurdle — proven by a test where a Risk-APPROVED candidate
+  with negative risk-adjusted return still yields no trade.
+- `src/portfolio/alerts.py` — `ControlLoopAlert`/`ControlLoopAlertType`
+  (Part 32's list) with `AlertSeverity` (INFO/REVIEW/WARNING/CRITICAL),
+  a separate `scope`-keyed sibling to `src.lifecycle.alerts.Alert`
+  (whose `trade_id` is mandatory and can't represent a portfolio-wide or
+  provider-wide condition) reusing the identical dedup-by-
+  `(scope, alert_type)` mechanism. `generate_cycle_alerts` covers Risk
+  halt, drawdown zone, provider outage vs. per-symbol staleness,
+  rate-limit constraint, lifecycle-driven per-position alerts,
+  expiration-approaching (checked independently of whichever action
+  fired, not nested behind it — a real bug caught and fixed during this
+  step's own testing, see below), pending-ticket staleness, and
+  Risk-approved new opportunities only (never for a rejected/no-action
+  scan result).
+- `src/dashboard/` extended (schemas.py/models.py/app.py) — three new
+  read-only, GET-only routes: `/api/control-loop/status`,
+  `/api/control-loop/exposure`, `/api/control-loop/alerts`
+  (severity-sorted, `unresolved_only` filter). `DashboardState` gained
+  `latest_cycle_record`/`latest_exposure`/`control_loop_alerts`, all
+  `None`/empty until a cycle has actually run — never a fabricated
+  placeholder. No POST/PUT route of any kind for the control loop; the
+  existing route-inventory allowlist test
+  (`tests/unit/dashboard/test_app_security.py`) was updated (not
+  loosened) to include exactly these three GET routes.
+
+**Bugs caught and fixed during this step's own testing (before the
+formal suite made them permanent regressions):**
+1. `src.portfolio.control_loop._build_monitoring_input` originally
+   derived `PositionMonitoringInput.position_delta_abs` from
+   `PositionValuation.delta` — but that field is the position's total,
+   contract-multiplier-scaled, multi-leg NET delta (share-equivalent
+   units, easily in the hundreds), while `position_delta_abs` means one
+   specific monitored leg's own per-contract delta in the standard
+   [0, 1] convention. Feeding one to the other silently misfired every
+   delta-threshold lifecycle policy. Caught by a smoke test asserting a
+   0.20-delta credit spread should evaluate to `HOLD` and instead
+   getting `ADJUSTMENT_CANDIDATE` from a "delta 34.7 reached threshold
+   0.45" reason. Fixed by moving `position_delta_abs` into the explicit
+   caller-supplied-extras set (alongside `short_leg_is_itm` and
+   friends) rather than deriving it, with the unit mismatch documented
+   in code.
+2. `src.portfolio.alerts.generate_cycle_alerts`'s first draft nested the
+   expiration-approaching (DTE<=7) check inside the same `if alert_type
+   is not None:` branch as the action-to-alert-type mapping — so a
+   position sitting at `HOLD` (which has no `ControlLoopAlertType` of
+   its own) never got its DTE checked at all, meaning a `HOLD` position
+   7 days from expiration silently never raised
+   `EXPIRATION_APPROACHING`. Caught by a formal test
+   (`test_expiration_approaching_fires_independent_of_mapped_action`)
+   written specifically because the manual smoke test had used a
+   position whose action already happened to alert. Fixed by
+   unconditionally running the DTE check every iteration, independent
+   of whether the action above it mapped to an alert type.
+3. `src.data.quality_gate`'s first design assumed Pydantic's `ge=0`
+   field constraint would let NaN through unchecked (motivating a
+   generic `math.isfinite` scan of every numeric field) — smoke testing
+   found `pydantic_core` actually already rejects `float('nan')` against
+   any `ge`/`le` bound at construction time. The NaN/infinity check was
+   kept (it's still the only guard for `OptionContract.theta`, which
+   carries no numeric bound at all) but re-scoped and documented
+   accurately rather than left implying a false sense of blanket
+   protection.
+
+**Full suite:** `python -m pytest -q tests/` -> **3236 passed, 5
+skipped, 0 failed** (222 net new tests: 53 in
+`tests/unit/data/test_tradier_provider.py`, 19 in
+`tests/unit/data/test_rate_limiter.py`, 25 in
+`tests/unit/data/test_quality_gate.py`, 2 in the extended
+`tests/unit/data/test_factory.py`, 10/13/6/21/13/6/16 across
+`tests/unit/portfolio/test_revaluation.py`/`test_exposure.py`/
+`test_actions.py`/`test_persistence.py`/`test_ticket_monitor.py`/
+`test_opportunity_scan.py`/`test_control_loop.py`, 20 in
+`test_alerts.py`, and 18 (1 skipped) in
+`tests/acceptance/test_tradier_market_data_only.py`; the dashboard
+route-allowlist test was updated in place, not counted as new. The 5
+skips are the 4 pre-existing documented false positives carried from
+every prior freeze plus this step's own soft
+`tradier_market_data_only`-freeze-tooling awareness check, which
+self-skips until Step 22.4's freeze task (below) wires that check in).
+
+**Non-negotiable invariants re-verified, unchanged:**
+- Tradier is structurally MARKET_DATA_ONLY: no order-shaped method name
+  on `TradierMarketDataProvider`, no `/v1/accounts/*/orders` endpoint
+  referenced in code (docstring-only mentions, which document the
+  prohibition, are excluded from the scan), `_request`'s own signature
+  accepts no `method` parameter (GET is hardcoded), no POST/PUT/DELETE
+  verb used against the injected HTTP client anywhere in the module,
+  and no `TradierBroker`/`TradierOrderClient`/`TradierExecutionProvider`
+  identifier exists anywhere in the repository (all proven by
+  `tests/acceptance/test_tradier_market_data_only.py`, mirroring
+  `test_alpaca_market_data_only.py`'s methodology).
+- Provider Greeks remain reference-only: Tradier's own `greeks` object
+  maps straight onto `OptionContract.iv/delta/gamma/theta/vega` (the
+  same provider-reference contract Alpaca's mapping already carries);
+  every number `src.portfolio.revaluation` actually uses for a P&L or
+  Greek figure is independently re-derived via
+  `src.quant.volatility.implied_volatility`/`src.quant.greeks`, never
+  read from the provider's own fields.
+- Risk Engine remains sole final authority: `src/portfolio/
+  opportunity_scan.py` calls `src.risk.engine.evaluate_trade_proposal`
+  unmodified and only ever ranks candidates that decision already
+  approved/resized; `src/portfolio/control_loop.py` never constructs an
+  `ApprovedOrder`/`FidelityTradeTicket` itself.
+- Fidelity remains `MANUAL_EXECUTION` forever:
+  `src/portfolio/ticket_monitor.py` only ever calls the pre-existing
+  `transition()`/`confirm_fill()`; `record_confirmed_fill` is a
+  one-line pass-through, never a new fill-producing code path.
+  `config/brokers.yaml` still lists no `tradier` entry (data-only
+  providers are never a "broker" for capability purposes).
+- Secrets never leak: the Tradier bearer token is redacted from every
+  exception path (`_redact`), never appears in a `print`/`logger` call
+  anywhere in `tradier_provider.py`, and `.env.example`'s
+  `OPTIONS_AGENT_TRADIER_TOKEN` line carries no real value.
+- 90-day validation: still not started, not even prepared — this step
+  built the control loop that will eventually feed it, and touched no
+  file under `src/validation/`'s cohort-start path.
+
+**90_DAY_VALIDATION: NOT_STARTED. LIVE_TRADING: DISABLED.
+FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.**
+Freeze as `PAPER_TRADING_V1.4` (manifest update, freeze report, git tag,
+push) is the final remaining sub-step of Step 22.4, tracked separately.

@@ -475,6 +475,59 @@ effect of installing or running the software.
   `progress.md` (a running log of what's been built and what's known
   to still be missing).
 
+## 19. Using real market data with Tradier (optional)
+
+An alternative to Alpaca (§14) for real market data: this platform also
+supports Tradier (https://tradier.com/) as a second **market-data-only**
+connection — exactly the same guarantee as Alpaca, just from a
+different data source. It can only ever read prices; it can never
+place, cancel, or modify a real order, and every trade you decide to
+place for real still only ever becomes a Fidelity ticket you type in
+yourself.
+
+1. **Create a Tradier account** at https://tradier.com/ (or use an
+   existing brokerage account there) and enable API access from your
+   account's developer/API settings.
+2. **Obtain an access token**: in the Tradier developer dashboard, under
+   API Access, generate a personal access token. Treat it like a
+   password.
+3. **Put your token in `.env`**: copy `.env.example` to `.env` if you
+   haven't already, then fill in:
+   ```
+   OPTIONS_AGENT_TRADIER_TOKEN=<your access token>
+   ```
+4. **Select `tradier`** as the active data provider, also in `.env`:
+   ```
+   OPTIONS_AGENT_DATA_PROVIDER=tradier
+   ```
+5. **Start the dashboard** (§6/§7) as usual — nothing else about how you
+   run the application changes.
+6. **Verify the internal paper-trading simulator remains the execution
+   destination**: this is true structurally, not something you need to
+   configure — there is no order-placement/preview/cancellation code of
+   any kind anywhere in `src/data/tradier_provider.py`, whatever
+   `OPTIONS_AGENT_DATA_PROVIDER` is set to (see `tests/acceptance
+   /test_tradier_market_data_only.py` for the enforced proof).
+7. **Removing/revoking credentials**: to stop using Tradier, either
+   remove the `OPTIONS_AGENT_TRADIER_TOKEN` line from `.env` (or set
+   `OPTIONS_AGENT_DATA_PROVIDER=mock`) and restart the dashboard, and/or
+   revoke the token itself from your Tradier account's API settings —
+   either is enough, and neither requires any code change.
+
+### The Portfolio Control Loop (optional, advanced)
+
+With a real provider (Alpaca or Tradier) configured, the deterministic
+Portfolio Control Loop (`src/portfolio/control_loop.py`) is the engine
+that continuously revalues your open positions from current market
+data, re-runs the unmodified Strategy Lifecycle Management Engine (§16)
+against each one, monitors any pending Fidelity ticket for staleness,
+and surfaces the results as read-only dashboard panels
+(`/api/control-loop/status`, `/exposure`, `/alerts`) — never a second
+place where a trade gets approved or an order gets placed. It contains
+no scheduler of its own in this release; running it on a recurring
+cadence is a deployment choice for whoever operates this platform, not
+something this README prescribes.
+
 ---
 
 ## For developers
@@ -500,6 +553,10 @@ effect of installing or running the software.
 - `STEP_22_3_FREEZE_REPORT.md` — the PAPER_TRADING_V1.3 amendment (adds
   the Strategy Lifecycle Management Engine, §16), including whether
   validation has started.
+- `STEP_22_4_FREEZE_REPORT.md` — the PAPER_TRADING_V1.4 amendment (adds
+  Tradier as a second market-data-only provider and the deterministic
+  Portfolio Control Loop, §19), including whether validation has
+  started.
 - `VALIDATION_MANIFEST.json` — the currently-frozen version's own
   machine-checked manifest (see §17, step 4).
 - Run the test suite with `make test` (or `python -m pytest -q`).

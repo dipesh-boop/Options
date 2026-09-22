@@ -23,6 +23,9 @@ from src.lifecycle.persistence import LifecyclePositionRecord
 from src.lifecycle.precedence import ResolvedAction
 from src.lifecycle.snapshot import LifecycleDecisionSnapshot
 from src.llm.schemas import DevilsAdvocateReview
+from src.portfolio.alerts import ControlLoopAlert
+from src.portfolio.cycle_record import ControlCycleRecord
+from src.portfolio.exposure import PortfolioExposureSnapshot
 from src.risk.reason_codes import ReasonCode, RiskDecision
 from src.wheel.accounting import WheelEconomicsSummary
 from src.wheel.state import WheelState
@@ -594,4 +597,120 @@ def build_lifecycle_position_view(
         recommended_action=(resolved.reason if resolved is not None else "no lifecycle trigger fired"),
         risk_status=(latest_snapshot.risk_status if latest_snapshot is not None else "unknown"),
         data_is_fresh=(latest_snapshot.data_is_fresh if latest_snapshot is not None else False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 22.4, Parts 33-34: read-only Portfolio Control Loop visibility.
+# **PAPER TRADING. FIDELITY EXECUTION IS MANUAL.** Every view/route in
+# this section is read-only -- there is no POST/PUT route anywhere for
+# the control loop, no route that starts/stops/reconfigures a cycle, and
+# nothing here can place, preview, or modify a broker order of any kind
+# (Part 34's explicit "no Buy/Sell/Submit buttons connected to any
+# broker" requirement). A cycle is driven by whatever schedules
+# `src.portfolio.control_loop.run_control_cycle` (not this package); the
+# dashboard only ever displays its most recent recorded output.
+# ---------------------------------------------------------------------------
+
+
+class ControlCycleStatusView(BaseModel):
+    cycle_id: str
+    started_at: datetime
+    completed_at: datetime | None
+    is_complete: bool
+    market_open: bool
+    provider: str
+    provider_health_status: str
+    symbols_requested: int
+    symbols_successful: int
+    symbols_failed: int
+    positions_evaluated: int
+    lifecycle_triggers: int
+    risk_events: int
+    recommendations_created: int
+    opportunities_scanned: int
+    candidates_generated: int
+    candidates_rejected: int
+    degraded_mode: bool
+    halt_state: bool
+    had_errors: bool
+    errors: tuple[str, ...]
+
+
+def build_control_cycle_status_view(record: ControlCycleRecord) -> ControlCycleStatusView:
+    return ControlCycleStatusView(
+        cycle_id=record.cycle_id,
+        started_at=record.started_at,
+        completed_at=record.completed_at,
+        is_complete=record.is_complete,
+        market_open=record.market_open,
+        provider=record.provider,
+        provider_health_status=record.provider_health_status,
+        symbols_requested=len(record.symbols_requested),
+        symbols_successful=len(record.symbols_successful),
+        symbols_failed=len(record.symbols_failed),
+        positions_evaluated=record.positions_evaluated,
+        lifecycle_triggers=record.lifecycle_triggers,
+        risk_events=record.risk_events,
+        recommendations_created=record.recommendations_created,
+        opportunities_scanned=record.opportunities_scanned,
+        candidates_generated=record.candidates_generated,
+        candidates_rejected=record.candidates_rejected,
+        degraded_mode=record.degraded_mode,
+        halt_state=record.halt_state,
+        had_errors=record.had_errors,
+        errors=record.errors,
+    )
+
+
+class PortfolioExposureView(BaseModel):
+    as_of: datetime
+    underlying_exposure_pct: dict[str, float]
+    sector_exposure_pct: dict[str, float]
+    strategy_exposure_pct: dict[str, float]
+    directional_exposure: str
+    portfolio_delta: float | None
+    volatility_exposure: str
+    portfolio_vega: float | None
+    short_option_capital_pct: float
+    assignment_risk_position_ids: tuple[str, ...]
+    wheel_cash_commitment_pct: float
+    owned_share_exposure_pct: float
+    covered_call_encumbered_shares: dict[str, int]
+
+
+def build_exposure_view(exposure: PortfolioExposureSnapshot) -> PortfolioExposureView:
+    return PortfolioExposureView(
+        as_of=exposure.as_of,
+        underlying_exposure_pct=exposure.underlying_exposure_pct,
+        sector_exposure_pct=exposure.sector_exposure_pct,
+        strategy_exposure_pct=exposure.strategy_exposure_pct,
+        directional_exposure=exposure.directional_exposure,
+        portfolio_delta=exposure.portfolio_delta,
+        volatility_exposure=exposure.volatility_exposure,
+        portfolio_vega=exposure.portfolio_vega,
+        short_option_capital_pct=exposure.short_option_capital_pct,
+        assignment_risk_position_ids=exposure.assignment_risk_position_ids,
+        wheel_cash_commitment_pct=exposure.wheel_cash_commitment_pct,
+        owned_share_exposure_pct=exposure.owned_share_exposure_pct,
+        covered_call_encumbered_shares=exposure.covered_call_encumbered_shares,
+    )
+
+
+class ControlLoopAlertView(BaseModel):
+    alert_id: str
+    scope: str
+    alert_type: str
+    severity: str
+    reason: str
+    created_at: datetime
+    resolved: bool
+    resolved_at: datetime | None
+
+
+def build_control_loop_alert_view(alert: ControlLoopAlert) -> ControlLoopAlertView:
+    return ControlLoopAlertView(
+        alert_id=alert.alert_id, scope=alert.scope, alert_type=alert.alert_type.value,
+        severity=alert.severity.value, reason=alert.reason, created_at=alert.created_at,
+        resolved=alert.resolved, resolved_at=alert.resolved_at,
     )

@@ -202,6 +202,45 @@ def get_opportunity(
     return schemas.build_opportunity_view(record, now)
 
 
+@app.get("/api/control-loop/status", response_model=schemas.ControlCycleStatusView)
+def control_loop_status(state: DashboardState = Depends(get_state)) -> schemas.ControlCycleStatusView:
+    """Part 33's SYSTEM STATUS/MARKET DATA sections, read-only. 404s
+    honestly (never a fabricated "idle"/zeroed record) when the control
+    loop hasn't run yet against this dashboard session."""
+    if state.latest_cycle_record is None:
+        raise HTTPException(status_code=404, detail="no control-loop cycle has run yet")
+    return schemas.build_control_cycle_status_view(state.latest_cycle_record)
+
+
+@app.get("/api/control-loop/exposure", response_model=schemas.PortfolioExposureView)
+def control_loop_exposure(state: DashboardState = Depends(get_state)) -> schemas.PortfolioExposureView:
+    """Part 15's exposure snapshot, read-only -- the same object
+    `src.portfolio.exposure.build_exposure_snapshot` produced for the
+    most recent control-loop cycle, never recomputed here."""
+    if state.latest_exposure is None:
+        raise HTTPException(status_code=404, detail="no portfolio exposure snapshot available yet")
+    return schemas.build_exposure_view(state.latest_exposure)
+
+
+@app.get("/api/control-loop/alerts", response_model=list[schemas.ControlLoopAlertView])
+def control_loop_alerts(
+    state: DashboardState = Depends(get_state), unresolved_only: bool = True,
+) -> list[schemas.ControlLoopAlertView]:
+    """Part 32's alert feed, read-only. Sorted CRITICAL-first, then
+    oldest-first within a severity (the longest-outstanding condition of
+    a given severity surfaces first), matching Part 33's Action Center
+    ordering ("never put new trade above required Risk action") --
+    display ordering only, no route here can resolve or dismiss an
+    alert (that happens wherever the control loop itself re-evaluates
+    the underlying condition, not through this dashboard)."""
+    severity_rank = {"critical": 0, "warning": 1, "review": 2, "info": 3}
+    alerts = list(state.control_loop_alerts.values())
+    if unresolved_only:
+        alerts = [a for a in alerts if not a.resolved]
+    alerts.sort(key=lambda a: (severity_rank.get(a.severity.value, 99), a.created_at), reverse=False)
+    return [schemas.build_control_loop_alert_view(a) for a in alerts]
+
+
 @app.get("/api/audit", response_model=list[schemas.AuditEventView])
 def audit_log(state: DashboardState = Depends(get_state)) -> list[schemas.AuditEventView]:
     return [schemas.build_audit_event_view(e) for e in state.audit_log.all()]

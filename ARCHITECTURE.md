@@ -1228,3 +1228,168 @@ parameter, proof `fidelity_events.py` only ever sets `FILLED` from
 `record_ticket_filled`, and proof `rolling.py`/`adjustment.py` never
 import `src.risk.engine` (a roll/adjustment proposal is packaged here,
 evaluated by Risk elsewhere, by the caller).
+
+## 18. Tradier real-time market data + deterministic Portfolio Control
+## Loop (pre-validation amendment, "Step 22.4")
+
+Adds a second real market-data provider, `src/data/tradier_provider.py`
+(alongside the existing `src/data/alpaca_provider.py`, neither removed),
+and a new package, `src/portfolio/`, that continuously turns real
+market data into an auditable, deterministic picture of the PAPER
+portfolio without ever gaining the ability to execute a trade. The
+hierarchy this amendment enforces, top to bottom: MARKET DATA ->
+CANONICAL DATA MODELS -> PYTHON QUANT ENGINE -> LIFECYCLE ENGINE ->
+PORTFOLIO CONTROL LOOP -> DETERMINISTIC RISK ENGINE -> RECOMMENDATION ->
+HUMAN -> FIDELITY MANUAL EXECUTION -> HUMAN-CONFIRMED FILL -> PORTFOLIO
+RECONCILIATION. `src/portfolio/control_loop.py` is explicitly not a
+second Risk Engine or a second Lifecycle Engine — it orchestrates the
+existing ones, unmodified, and never overrides what either returns.
+
+**Tradier provider** (`src/data/tradier_provider.py`): the same
+dependency-injection pattern `AlpacaMarketDataProvider` already
+establishes (`http_client` constructor override for tests, no real
+network/token needed), the same "missing means missing, never
+fabricated" mapping discipline, and the same "provider Greeks are
+reference data, Python Quant is authoritative" doctrine `OptionContract`
+already documents. Structurally MARKET_DATA_ONLY: `_request` (the one
+HTTP choke point) accepts no `method` parameter at all — every call is a
+hardcoded GET against `/v1/markets/*`; there is no
+`TradierBroker`/`TradierOrderClient`/`TradierExecutionProvider` anywhere
+in the repository, proven by `tests/acceptance
+/test_tradier_market_data_only.py`. `get_underlying_quotes` batches
+multiple symbols into one request (never one request per symbol), and
+every request carries a `RateLimitPriority` (`src/data/rate_limiter.py`)
+gating it against the provider's own most-recently-observed rate-limit
+headers — P0 (open-position risk monitoring) is throttled only by the
+hard "zero requests remaining" floor, never by a softer utilization
+ceiling, so a busy cycle degrades opportunity scanning long before it
+ever touches risk monitoring.
+
+**Data-quality gate** (`src/data/quality_gate.py`): deterministic
+per-contract/per-chain validation (crossed/zero/excessively-wide
+markets, staleness, symbol/expiration consistency, non-finite values on
+fields Pydantic's own constraints don't already reject) that isolates
+one bad contract from an otherwise-good chain rather than discarding the
+whole fetch — the concrete mechanism behind "a malformed provider
+response must not crash the control loop."
+
+**Portfolio revaluation** (`src/portfolio/revaluation.py`): every open
+position's mark-to-market P&L and Greeks, computed once per cycle from
+the quality-gated chain. Never trusts a provider-reported Greek or a
+theoretical Black-Scholes price for P&L — the mark is the contract's
+actual `mid`, and Greeks come from an independently-solved
+`src.quant.volatility.implied_volatility` feeding `src.quant.greeks`,
+exactly the same two functions `src.risk.trade_risk`/`src.orchestration
+.pipeline.default_quant_stage` already use for a proposal under review.
+A position whose legs can't all be matched to a fresh, non-stale
+contract is `DATA_INSUFFICIENT` — its P&L/Greeks are `None`, never a
+fabricated number, and it's excluded from (never silently folded into)
+the portfolio-level aggregate, which always lists which positions it
+had to exclude.
+
+**Portfolio exposure** (`src/portfolio/exposure.py`): underlying/
+sector/strategy/expiration concentration (reusing `src.risk
+.portfolio_risk`'s existing per-ticker/per-sector helpers, no new
+concentration math), directional/volatility exposure labels from
+caller-supplied Greeks, Wheel cash commitment (an active Wheel is any
+non-terminal `src.wheel.state.WheelState`, so a halted-but-not-exited
+Wheel still counts as committed capital), owned-share exposure, and
+covered-call encumbrance. Assignment risk is read from the caller
+(supplied from `src.lifecycle.triggers.check_assignment_risk`'s own
+output), never recomputed here — this module adds no second assignment
+determination.
+
+**Control-loop action vocabulary** (`src/portfolio/actions.py`):
+`ControlLoopAction`'s 16 members are the outward recommendation label a
+human/dashboard sees; `action_from_lifecycle_category` is a total,
+one-to-one relabeling of `src.lifecycle.triggers.PRECEDENCE_ORDER`'s 11
+categories (a `KeyError` on an unmapped category, never a silent
+default) — never a second precedence decision layered on top of
+`src.lifecycle.precedence.resolve_action`'s own.
+
+**Decision snapshot, cycle record, persistence** (`src/portfolio
+/decision_snapshot.py`, `cycle_record.py`, `persistence.py`):
+`PortfolioControlDecisionSnapshot` (one per decision point, position or
+opportunity) and `ControlCycleRecord` (one per cycle) are both
+immutable/append-only, stored via the same `InMemory*`/`Sqlite*`
+dual-implementation pattern `src.lifecycle.persistence`/`src.wheel
+.persistence` already establish (restart survival verified by reopening
+a fresh store against the same file mid-test-suite). `ControlLoopAlert`
+(Part 32) is persisted in the same store, REPLACE-on-save keyed by
+`alert_id` — the one field that ever mutates is `resolved`/`resolved_at`.
+
+**Core orchestrator** (`src/portfolio/control_loop.py`):
+`run_control_cycle` performs, per cycle: quality-gate the already-
+fetched market data (this module does no I/O of its own, the same
+"caller already fetched it" convention `src.workflows.morning_scan`
+established) -> revalue the portfolio -> build the exposure snapshot ->
+evaluate every open position through the unmodified `src.lifecycle
+.engine.evaluate_position` (lazily initializing a fresh
+`LifecyclePositionRecord` the first time a position is seen, from a
+caller-supplied management-policy name — never guessing one) ->
+`src.risk.kill_switch.check_kill_switch` -> a
+`PortfolioControlDecisionSnapshot` per position. One position's bad
+market data, missing policy configuration, or unknown policy name
+isolates to a `DATA_INSUFFICIENT` decision for that position alone,
+never an aborted cycle; a portfolio halt (manual or drawdown-triggered)
+overrides every open position's action to `PORTFOLIO_HALT`, never a
+softer per-position recommendation. New-opportunity scanning and
+pending-ticket monitoring are deliberately not phases of this function —
+their already-computed counts are accepted as plain input fields, so a
+thin outer wrapper runs those separate, independently-testable stages
+and merges the counts into one `ControlCycleRecord`.
+
+**Pending-ticket monitoring and fill reconciliation**
+(`src/portfolio/ticket_monitor.py`): fill reconciliation itself was
+already complete before this amendment
+(`src.brokers.fidelity.confirm_fill`/`transition`,
+`src.workflows.reconciliation.reconcile_portfolio`) — this module's
+actual job is the one real gap, Part 21: every cycle, a ticket still
+sitting at `AWAITING_HUMAN`/`ORDER_ENTERED` is checked against the
+current market for staleness, price drift beyond a configurable
+threshold, or a now-unreachable `minimum_acceptable_price` (the same
+net-credit/net-debit sign convention `src.brokers.fidelity`'s own
+validator uses); a bad finding calls the *existing* `transition()` to
+`REPRICE_REQUIRED` — this module never derives a new price itself, a
+fresh ticket must come from a fresh, independently-Risk-approved
+`ApprovedOrder`, exactly like the original.
+
+**Portfolio-aware opportunity scanning** (`src/portfolio
+/opportunity_scan.py`): the lighter, no-LLM sibling of
+`src.workflows.morning_scan.run_morning_scan` — reuses
+`src.workflows.candidate_generation.generate_candidates`,
+`src.orchestration.pipeline.default_quant_stage`, and
+`src.risk.engine.evaluate_trade_proposal` unmodified; Devil's
+Advocate/Portfolio Manager remain `run_morning_scan`'s own separate,
+deliberately-invoked daily review, never re-run every cycle. Ranks only
+Risk-approved/resized candidates by risk-adjusted return
+(expected-value per dollar of capital); `best=None` (CASH/NO_TRADE) is
+the explicit, tested outcome when nothing clears a configurable hurdle
+— even a Risk-*approved* candidate with negative risk-adjusted EV still
+yields no trade, Part 25's "not maximize raw profit" made concrete.
+
+**Alerts** (`src/portfolio/alerts.py`, Part 32): `ControlLoopAlert`
+generalizes `src.lifecycle.alerts.Alert`'s dedup-by-condition mechanism
+from a mandatory `trade_id` to an arbitrary `scope` string (`"portfolio"`,
+a provider name, a position_id, a ticket's trade_id, an opportunity's
+proposal_id) — the dimension Part 32's own list (Risk halt, drawdown,
+provider outage, a stale pending ticket, a new opportunity) needs and
+`Alert` structurally cannot express. `AlertSeverity` is Part 32's exact
+four-level vocabulary (INFO/REVIEW/WARNING/CRITICAL), one fixed severity
+per alert type. `generate_cycle_alerts` is dedup-safe to call every
+cycle unconditionally.
+
+**Dashboard** (`GET /api/control-loop/status`, `/exposure`, `/alerts`):
+read-only, GET-only, added to the existing route allowlist test — no
+POST/PUT route of any kind for the control loop anywhere in this
+package; starting, stopping, or reconfiguring a cycle happens wherever
+the loop is actually scheduled (outside this dashboard), never through
+it.
+
+**Security proof**: `tests/acceptance/test_tradier_market_data_only.py`
+— repo-wide grep proving no Tradier order/trading-shaped class exists
+anywhere, `_request`'s signature has no `method` parameter, no POST/
+PUT/DELETE verb is issued against the injected HTTP client, `config
+/brokers.yaml` lists no `tradier` entry, the Risk Engine module never
+imports Tradier, and the bearer token never appears in a raised
+exception's text.

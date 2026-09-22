@@ -57,17 +57,19 @@ from src.validation.session import DATABASE_SCHEMA_VERSION
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Step 22.1 (Alpaca market-data amendment), Step 22.2 (stateful Wheel
-# strategy amendment), and Step 22.3 (Strategy Lifecycle Management
-# Engine amendment) each bumped the freeze name/version in place without
+# strategy amendment), Step 22.3 (Strategy Lifecycle Management Engine
+# amendment), and Step 22.4 (Tradier market data + Portfolio Control
+# Loop amendment) each bumped the freeze name/version in place without
 # touching the prior versions' own artifacts -- see progress.md and
 # STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
-# STEP_22_3_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always reflect
-# the *current* frozen state; the original V1.0/V1.1/V1.2 manifests/
-# reports remain recoverable from git history at the
-# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.3"
+# STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md.
+# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen
+# state; the original V1.0/V1.1/V1.2/V1.3 manifests/reports remain
+# recoverable from git history at the `paper-trading-v1.0` /
+# `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.3.0"
+MANIFEST_VERSION = "1.4.0"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -106,6 +108,12 @@ _CODE_MODULE_DIRS: dict[str, Path] = {
     # RISK_EXIT_REQUIRED's escape hatches, weaken a trigger, or let a
     # roll/adjustment self-approve) is caught as material drift.
     "lifecycle_module": REPO_ROOT / "src" / "lifecycle",
+    # Step 22.4: the Portfolio Control Loop -- hashing it means any
+    # future change (including one that tried to give the control loop
+    # order-placement capability, bypass the Risk Engine, or skip
+    # calling the unmodified Lifecycle Engine) is caught as material
+    # drift.
+    "portfolio_module": REPO_ROOT / "src" / "portfolio",
 }
 _CODE_MODULE_FILES: dict[str, Path] = {
     "paper_broker_module": REPO_ROOT / "src" / "brokers" / "paper.py",
@@ -114,6 +122,11 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # this file means any future change to it (including one that tried
     # to add order-submission capability) is caught as material drift.
     "alpaca_provider_module": REPO_ROOT / "src" / "data" / "alpaca_provider.py",
+    # Step 22.4: Tradier is market-data-only (never execution) -- same
+    # reasoning as Alpaca above, applied to the second real provider.
+    "tradier_provider_module": REPO_ROOT / "src" / "data" / "tradier_provider.py",
+    "rate_limiter_module": REPO_ROOT / "src" / "data" / "rate_limiter.py",
+    "quality_gate_module": REPO_ROOT / "src" / "data" / "quality_gate.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -194,6 +207,14 @@ class FreezeManifest(BaseModel):
     # Step 22.3 (Strategy Lifecycle Management Engine amendment).
     lifecycle_module_hash: str
     lifecycle_named_policy_count: int  # >= 19 at freeze time -- see src.lifecycle.policies_library
+
+    # Step 22.4 (Tradier market data + Portfolio Control Loop amendment).
+    tradier_provider_module_hash: str
+    rate_limiter_module_hash: str
+    quality_gate_module_hash: str
+    portfolio_module_hash: str
+    tradier_market_data_only: bool  # must always be True -- Tradier has no order-submission code path
+    control_loop_cannot_execute_trades: bool  # must always be True -- src/portfolio/ places no order, ever
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -383,7 +404,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.3",
+        freeze_version="1.4",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -391,6 +412,12 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         wheel_strategy_kind_trade_proposal_eligible=_wheel_is_trade_proposal_eligible(),
         lifecycle_module_hash=_hash_directory(_CODE_MODULE_DIRS["lifecycle_module"]),
         lifecycle_named_policy_count=_lifecycle_named_policy_count(),
+        tradier_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["tradier_provider_module"]),
+        rate_limiter_module_hash=compute_file_hash(_CODE_MODULE_FILES["rate_limiter_module"]),
+        quality_gate_module_hash=compute_file_hash(_CODE_MODULE_FILES["quality_gate_module"]),
+        portfolio_module_hash=_hash_directory(_CODE_MODULE_DIRS["portfolio_module"]),
+        tradier_market_data_only=_verify_tradier_is_market_data_only(),
+        control_loop_cannot_execute_trades=_verify_portfolio_has_no_live_trading_client(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -512,6 +539,10 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("alpaca_provider_module_hash", _CODE_MODULE_FILES["alpaca_provider_module"], False),
         ("wheel_module_hash", _CODE_MODULE_DIRS["wheel_module"], True),
         ("lifecycle_module_hash", _CODE_MODULE_DIRS["lifecycle_module"], True),
+        ("tradier_provider_module_hash", _CODE_MODULE_FILES["tradier_provider_module"], False),
+        ("rate_limiter_module_hash", _CODE_MODULE_FILES["rate_limiter_module"], False),
+        ("quality_gate_module_hash", _CODE_MODULE_FILES["quality_gate_module"], False),
+        ("portfolio_module_hash", _CODE_MODULE_DIRS["portfolio_module"], True),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -599,6 +630,27 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         "this freeze recorded (every StrategyKind must have at least one named research policy)",
     ))
 
+    tradier_market_data_only_ok = _verify_tradier_is_market_data_only() and manifest.tradier_market_data_only
+    checks.append(FreezeCheck(
+        name="tradier_market_data_only", passed=tradier_market_data_only_ok,
+        detail="no Tradier order/trading-shaped identifier found anywhere in src/, and manifest records True"
+        if tradier_market_data_only_ok
+        else "a Tradier order/trading-shaped identifier was found in src/, or the manifest wrongly claims "
+        "market-data-only status -- Tradier must remain read-only GET-only market data",
+    ))
+
+    control_loop_no_live_client_ok = (
+        _verify_portfolio_has_no_live_trading_client() and manifest.control_loop_cannot_execute_trades
+    )
+    checks.append(FreezeCheck(
+        name="control_loop_cannot_execute_trades", passed=control_loop_no_live_client_ok,
+        detail="no live trading-client import and no order-submission method name found anywhere in "
+        "src/portfolio/, and manifest records True" if control_loop_no_live_client_ok
+        else "a live trading-client import or order-submission method name was found in src/portfolio/, "
+        "or the manifest wrongly claims the control loop cannot execute trades -- the Portfolio Control "
+        "Loop must remain a read-only orchestrator over the existing Risk Engine/PaperBroker/Fidelity paths",
+    ))
+
     passed = all(c.passed for c in checks)
     return FreezeVerificationResult(passed=passed, checks=tuple(checks))
 
@@ -653,6 +705,77 @@ def _verify_lifecycle_has_no_live_trading_client() -> bool:
     return True
 
 
+def _verify_tradier_is_market_data_only() -> bool:
+    """Step 22.4: a direct, executable proof (not just a file hash) that
+    no file under `src/` references a Tradier order/trading-shaped
+    identifier (`TradierBroker`, `TradierOrderClient`,
+    `TradierExecutionProvider`) or an accounts-orders endpoint path --
+    re-checked on every `verify_freeze` run, independent of
+    `tests/acceptance/test_tradier_market_data_only.py`."""
+    import re
+
+    class_pattern = re.compile(r"Tradier(Broker|Order(Client|Provider)?|ExecutionProvider)\b")
+    endpoint_pattern = re.compile(r"/v1/accounts/[^\"'\s]*/orders", re.IGNORECASE)
+    docstring_pattern = re.compile(r'"""[\s\S]*?"""')
+    # This module's own docstrings document-by-name the identifiers this
+    # check forbids (explaining the prohibition) -- exempted from the
+    # literal substring match, its code is still scanned. The dedicated
+    # security acceptance test is a *second*, independent proof of the
+    # same property (its own code literally asserts these forbidden
+    # strings are absent, which would otherwise self-trigger this check)
+    # -- excluded entirely here, exactly as it excludes itself from its
+    # own repo-wide scan for the identical reason. Its own unit-test
+    # counterpart (`tests/unit/validation/test_freeze.py`) writes one of
+    # the same forbidden order-shaped class names, deliberately, into a
+    # temporary poison file -- in actual test code rather than a
+    # docstring -- to prove this very check catches drift. Excluded for
+    # the identical reason.
+    security_test = (REPO_ROOT / "tests" / "acceptance" / "test_tradier_market_data_only.py").resolve()
+    freeze_unit_test = (REPO_ROOT / "tests" / "unit" / "validation" / "test_freeze.py").resolve()
+    this_file = (REPO_ROOT / "src" / "validation" / "freeze.py").resolve()
+
+    for path in (REPO_ROOT / "src").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        code = docstring_pattern.sub("", text) if path.resolve() in (this_file, REPO_ROOT / "src" / "data" / "tradier_provider.py") else text
+        if class_pattern.search(code) or endpoint_pattern.search(code):
+            return False
+    for path in REPO_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts or ".git" in path.parts or path.resolve() in (security_test, freeze_unit_test):
+            continue
+        text = path.read_text(errors="ignore")
+        code = docstring_pattern.sub("", text) if path.resolve() == this_file else text
+        if class_pattern.search(code):
+            return False
+    return True
+
+
+def _verify_portfolio_has_no_live_trading_client() -> bool:
+    """Step 22.4: a direct, executable proof (not just a directory hash)
+    that no file under `src/portfolio/` imports a live trading client
+    (Alpaca's order-submission client, ib_insync, ibapi) or calls an
+    order-submission-shaped method name -- re-checked on every
+    `verify_freeze` run, the same methodology
+    `_verify_wheel_has_no_live_trading_client`/
+    `_verify_lifecycle_has_no_live_trading_client` already establish."""
+    import re
+
+    import_pattern = re.compile(r"^\s*(from|import)\s+(alpaca\.trading|ib_insync|ibapi)\b", re.MULTILINE)
+    order_method_pattern = re.compile(
+        r"\b(place_order|submit_order|cancel_order|modify_order|amend_order|"
+        r"preview_order|replace_order|submit_trade|execute_trade|place_trade|send_order)\s*\(",
+        re.IGNORECASE,
+    )
+    for path in (REPO_ROOT / "src" / "portfolio").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        if import_pattern.search(text) or order_method_pattern.search(text):
+            return False
+    return True
+
+
 def _cli_build() -> int:
     manifest = build_freeze_manifest()
     path = save_freeze_manifest(manifest)
@@ -667,7 +790,7 @@ def _cli_verify() -> int:
         print(f"[{mark}] {check.name}: {check.detail}")
     print()
     if result.passed:
-        print(f"{FREEZE_NAME} / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION")
+        print(f"{FREEZE_NAME} / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR FINAL PRE-VALIDATION ACCEPTANCE")
         return 0
     print(f"{FREEZE_NAME} / FREEZE VERIFICATION FAILED -- {len(result.failures)} check(s) failed -- see above")
     return 1

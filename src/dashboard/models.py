@@ -25,6 +25,9 @@ from src.lifecycle.precedence import ResolvedAction
 from src.lifecycle.snapshot import LifecycleDecisionSnapshot
 from src.llm.devils_advocate import DevilsAdvocateEvaluation
 from src.llm.schemas import TradeProposal
+from src.portfolio.alerts import ControlLoopAlert
+from src.portfolio.cycle_record import ControlCycleRecord
+from src.portfolio.exposure import PortfolioExposureSnapshot
 from src.risk.engine import RiskDecisionResult
 from src.risk.limits import RiskLimitsConfig
 from src.risk.portfolio_risk import Portfolio
@@ -158,3 +161,15 @@ class DashboardState:
     lifecycle_positions: dict[str, LifecyclePositionRecord] = field(default_factory=dict)
     lifecycle_latest_snapshot: dict[str, LifecycleDecisionSnapshot] = field(default_factory=dict)
     lifecycle_latest_resolved: dict[str, ResolvedAction] = field(default_factory=dict)
+    # Step 22.4: read-only Portfolio Control Loop visibility (Parts
+    # 33-34). Populated by whatever runs `src.portfolio.control_loop
+    # .run_control_cycle` and persists its output
+    # (`src.portfolio.persistence.ControlLoopStore`) -- never computed by
+    # the dashboard itself, and never a route this package exposes for
+    # starting/stopping/reconfiguring a cycle. `latest_cycle_record` is
+    # `None` until the control loop has actually run at least once
+    # against this dashboard session -- rendered honestly as "no cycle
+    # yet," never a fabricated placeholder cycle.
+    latest_cycle_record: ControlCycleRecord | None = None
+    latest_exposure: PortfolioExposureSnapshot | None = None
+    control_loop_alerts: dict[str, ControlLoopAlert] = field(default_factory=dict)

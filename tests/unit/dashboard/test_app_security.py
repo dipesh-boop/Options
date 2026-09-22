@@ -141,6 +141,11 @@ class TestNoExecutionShapedRoute:
         ("POST", "/api/opportunities/{trade_id}/fill"),
         ("POST", "/api/opportunities/{trade_id}/cancel"),
         ("POST", "/api/opportunities/{trade_id}/reject"),
+        # Step 22.4, Parts 33-34: Portfolio Control Loop visibility --
+        # read-only (GET-only), same as every other view route above.
+        ("GET", "/api/control-loop/status"),
+        ("GET", "/api/control-loop/exposure"),
+        ("GET", "/api/control-loop/alerts"),
     }
     _FORBIDDEN_PATH_SUBSTRINGS = [
         "auto-trade", "auto_trade", "autotrade", "execute", "send-to-fidelity", "send_to_fidelity",

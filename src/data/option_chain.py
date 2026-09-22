@@ -62,6 +62,21 @@ class OptionContract(TimestampedModel):
     theta: float | None = None
     vega: float | None = Field(default=None, ge=0)
 
+    # Step 22.4: additional per-quote provenance/liquidity fields a
+    # richer provider (Tradier) can supply and Alpaca/mock/ibkr cannot
+    # -- every one optional and additive, so an existing provider that
+    # never sets them stays valid exactly as before. `bid_timestamp`/
+    # `ask_timestamp` are the provider's own per-side quote times (may
+    # differ from `timestamp`, the overall contract's own capture time,
+    # e.g. a stale ask sitting under a fresher bid); `trade_timestamp`
+    # is when `last` itself printed. Missing means missing -- never
+    # backfilled from `timestamp`.
+    bid_size: int | None = Field(default=None, ge=0)
+    ask_size: int | None = Field(default=None, ge=0)
+    bid_timestamp: datetime | None = None
+    ask_timestamp: datetime | None = None
+    trade_timestamp: datetime | None = None
+
     underlying_price: float = Field(gt=0)
 
     @property
@@ -74,6 +89,14 @@ class OptionContract(TimestampedModel):
     def _bid_not_above_ask(self) -> "OptionContract":
         if self.bid > 0 and self.ask > 0 and self.bid > self.ask:
             raise ValueError(f"bid ({self.bid}) cannot exceed ask ({self.ask})")
+        return self
+
+    @model_validator(mode="after")
+    def _optional_timestamps_tz_aware(self) -> "OptionContract":
+        for name in ("bid_timestamp", "ask_timestamp", "trade_timestamp"):
+            v = getattr(self, name)
+            if v is not None and v.tzinfo is None:
+                raise ValueError(f"{name} must be timezone-aware")
         return self
 
 

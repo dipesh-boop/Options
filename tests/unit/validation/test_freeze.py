@@ -23,14 +23,20 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.3"
-        assert manifest.freeze_version == "1.3"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4"
+        assert manifest.freeze_version == "1.4"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
         assert manifest.wheel_strategy_kind_trade_proposal_eligible is False
         assert len(manifest.lifecycle_module_hash) == 64
         assert manifest.lifecycle_named_policy_count >= 19
+        assert len(manifest.tradier_provider_module_hash) == 64
+        assert len(manifest.rate_limiter_module_hash) == 64
+        assert len(manifest.quality_gate_module_hash) == 64
+        assert len(manifest.portfolio_module_hash) == 64
+        assert manifest.tradier_market_data_only is True
+        assert manifest.control_loop_cannot_execute_trades is True
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -198,6 +204,34 @@ class TestVerifyFreezeDetectsDrift:
         finally:
             lifecycle_module.write_text(original, encoding="utf-8")
 
+    def test_tampering_with_the_tradier_provider_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tradier_module = Path("src/data/tradier_provider.py")
+        original = tradier_module.read_text(encoding="utf-8")
+        try:
+            tradier_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "tradier_provider_module_hash" and not c.passed for c in result.checks)
+        finally:
+            tradier_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_portfolio_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        portfolio_module = Path("src/portfolio/control_loop.py")
+        original = portfolio_module.read_text(encoding="utf-8")
+        try:
+            portfolio_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "portfolio_module_hash" and not c.passed for c in result.checks)
+        finally:
+            portfolio_module.write_text(original, encoding="utf-8")
+
 
 class TestAlpacaMarketDataOnlyCheck:
     def test_alpaca_market_data_only_check_passes_on_the_real_repository(self, tmp_path):
@@ -302,3 +336,88 @@ class TestLifecycleSafetyChecks:
         result = verify_freeze(path)
         assert result.passed is False
         assert any(c.name == "lifecycle_named_policy_count" and not c.passed for c in result.checks)
+
+
+class TestTradierMarketDataOnlyCheck:
+    def test_tradier_market_data_only_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "tradier_market_data_only" and c.passed for c in result.checks)
+
+    def test_tradier_order_shaped_class_added_to_src_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/data/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("class TradierBroker:\n    pass\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "tradier_market_data_only" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_a_manifest_falsely_claiming_tradier_market_data_only_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["tradier_market_data_only"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "tradier_market_data_only" and not c.passed for c in result.checks)
+
+
+class TestPortfolioControlLoopSafetyChecks:
+    def test_control_loop_cannot_execute_trades_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "control_loop_cannot_execute_trades" and c.passed for c in result.checks)
+
+    def test_live_trading_client_import_added_to_portfolio_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/portfolio/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("from alpaca.trading.client import TradingClient\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "control_loop_cannot_execute_trades" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_order_submission_method_call_added_to_portfolio_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/portfolio/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("def f(client):\n    client.place_order(1)\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "control_loop_cannot_execute_trades" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_a_manifest_falsely_claiming_control_loop_cannot_execute_trades_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["control_loop_cannot_execute_trades"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "control_loop_cannot_execute_trades" and not c.passed for c in result.checks)

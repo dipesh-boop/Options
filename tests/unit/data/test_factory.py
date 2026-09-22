@@ -34,6 +34,18 @@ class TestGetConfiguredProvider:
         with pytest.raises(DataProviderConfigError):
             get_configured_market_data_provider(DataProviderSelection(data_provider="alpaca"))
 
+    def test_tradier_without_token_raises_never_silently_falls_back_to_mock(self, monkeypatch):
+        monkeypatch.delenv("OPTIONS_AGENT_TRADIER_TOKEN", raising=False)
+        with pytest.raises(DataProviderConfigError):
+            get_configured_market_data_provider(DataProviderSelection(data_provider="tradier"))
+
+    def test_tradier_with_token_constructs_a_real_provider(self, monkeypatch):
+        from src.data.tradier_provider import TradierMarketDataProvider
+
+        monkeypatch.setenv("OPTIONS_AGENT_TRADIER_TOKEN", "fake-token-for-construction-only")
+        provider = get_configured_market_data_provider(DataProviderSelection(data_provider="tradier"))
+        assert isinstance(provider, TradierMarketDataProvider)
+
     def test_ibkr_either_constructs_or_fails_closed_with_a_clear_error(self):
         # IBKRBroker's __init__ doesn't connect -- only require_paper_port()
         # validation runs, plus building a default ib_insync client (which
