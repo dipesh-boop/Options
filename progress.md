@@ -4840,3 +4840,78 @@ commit SHA, manifest hash, and remote tag verification. No cohort was
 created, no Day 1 snapshot was recorded, no trades were generated,
 starting NAV was not altered, and no scheduling was enabled. Work stops
 here per this step's own explicit instruction.
+
+## Step 22.4C: SQLite Backup Acceptance-Test Semantic Verification, re-frozen as PAPER_TRADING_V1.4.3
+
+Triggered by an independent macOS verification of PAPER_TRADING_V1.4.2:
+**3320 passed, 4 skipped, 1 failed** — the sole failure was
+`tests/acceptance/test_backup_restore.py::TestBackupScript::
+test_backup_creates_a_timestamped_file_containing_the_real_database_
+bytes`, at `assert backups[0].read_bytes() == db_path.read_bytes()`
+(observed mismatch at byte offset 27, `0x01` vs `0x02` — inside the
+SQLite header's file-change-counter field). This step's scope was
+again **test-only**: `scripts/backup.sh`/`scripts/restore.sh` and
+every production module were reviewed and confirmed to need no change.
+
+**Root cause:** the test required the backup produced by `backup.sh`
+to be byte-for-byte identical to the source database file.
+`backup.sh` itself is correct — on a real operator machine with the
+`sqlite3` CLI installed (the common case, e.g. macOS), it takes the
+backup via `sqlite3`'s own `.backup` dot-command, which goes through
+SQLite's genuine backup API. That API legitimately writes its own
+destination-file header fields during its own internal commit (the
+file-change-counter field is exactly the byte range the operator's
+diff flagged) and may lay out free/interior pages differently than the
+source. Neither is data loss or corruption — SQLite's backup mechanism
+never promises byte-for-byte file identity, only equivalent logical
+content, and requiring the former was the test's own defect.
+
+**Fix:** replaced the byte-equality assertion with 9 semantic/
+integrity checks in the renamed
+`test_backup_creates_a_timestamped_file_containing_the_real_database_
+content`: (1) `backup.sh` exits 0, (2) exactly one timestamped backup
+file exists, (3) the backup is a valid, openable SQLite database, (4)
+`PRAGMA integrity_check` reports `ok` on the backup, (5) the expected
+`validation_marker` table exists in the backup, (6) the exact known
+fixture row (`"real-database-content"`) is present in the backup, (7)
+the source database still contains that same fixture content after the
+backup ran (also integrity-checked), (8) the backup file is non-empty,
+and (9) source and backup are proven logically equivalent by directly
+comparing their query results. No assertion was deleted without a
+strictly stronger semantic replacement.
+
+**Backup/restore audit:** every remaining byte-for-byte comparison in
+the file (`TestRestoreScript`'s live-database-replaced, safety-backup-
+content, and cancelled-restore checks) was reviewed against
+`restore.sh`'s actual implementation — confirmed to be a plain `cp`,
+never the `sqlite3` CLI or any SQLite backup API — so byte equality
+there is exactly the correct assertion, not a defect, and none of
+those three were changed.
+
+**Tests:** targeted `pytest tests/acceptance/test_backup_restore.py` —
+7 passed, 0 failed. Full repository suite: **3319 passed, 6 skipped, 0
+failed**, identical shape to the pre-existing baseline (this fixture's
+own byte-header assumption was the only thing broken, and only on a
+real `sqlite3` CLI, which this sandbox lacks — the sandbox's own
+`cp`-fallback path in `backup.sh` never exercised the difference,
+which is exactly why this required an independent macOS run to
+surface).
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.3** —
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place from
+`PAPER_TRADING_V1.4.2`/`1.4.2` to `PAPER_TRADING_V1.4.3`/`1.4.3`; no
+new manifest fields or `make verify-freeze` checks were needed. All 48
+checks carried from V1.4.2 still pass **unchanged** — this step
+touched no file inside `src/quant/`, `src/risk/`, `src/brokers/`,
+`src/wheel/`, `src/lifecycle/`, `src/data/`, `src/portfolio/`, or
+`src/dashboard/`, and `scripts/backup.sh`/`scripts/restore.sh`
+themselves are unmodified (confirmed by empty `git diff` against the
+prior freeze commit for both files).
+
+**PAPER_TRADING_V1.4.3: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER:
+MARKET_DATA_ONLY.** See `STEP_22_4C_FREEZE_REPORT.md` for the freeze
+commit SHA, manifest hash, and remote tag verification. No cohort was
+created, no Day 1 snapshot was recorded, no trades were generated,
+starting NAV was not altered, and no scheduling was enabled. Work stops
+here per this step's own explicit instruction.
