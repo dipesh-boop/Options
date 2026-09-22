@@ -4588,7 +4588,12 @@ self-skips until Step 22.4's freeze task (below) wires that check in).
   built the control loop that will eventually feed it, and touched no
   file under `src/validation/`'s cohort-start path.
 
-**90_DAY_VALIDATION: NOT_STARTED. LIVE_TRADING: DISABLED.
-FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.**
-Freeze as `PAPER_TRADING_V1.4` (manifest update, freeze report, git tag,
-push) is the final remaining sub-step of Step 22.4, tracked separately.
+**PAPER_TRADING_V1.4: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER:
+MARKET_DATA_ONLY.** See `STEP_22_4_FREEZE_REPORT.md` for the freeze
+commit SHA, manifest hash, and remote tag verification. `make
+verify-freeze` reports all 42 checks passing. No cohort was created, no
+Day 1 snapshot was recorded, no trades were generated, starting NAV was
+not altered, and no scheduling was enabled. Work stops here per this
+step's own explicit instruction — Step 23 remains separately
+authorized, not started.
