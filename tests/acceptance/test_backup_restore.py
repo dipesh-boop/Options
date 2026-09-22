@@ -62,27 +62,73 @@ class TestBackupScript:
         assert "nothing to back up yet" in result.stdout
         assert not (sandbox / "backups").exists()
 
-    def test_backup_creates_a_timestamped_file_containing_the_real_database_bytes(self, sandbox: Path):
+    def test_backup_creates_a_timestamped_file_containing_the_real_database_content(self, sandbox: Path):
+        """Step 22.4C: verifies the backup SEMANTICALLY -- a valid,
+        integrity-checked SQLite database carrying the same schema and
+        row content as the source -- rather than requiring byte-for-
+        byte file identity. `backup.sh` uses the real `sqlite3` CLI's
+        own `.backup` command when it's installed (the common case on
+        a real operator machine, e.g. macOS): this is a genuine SQLite
+        backup taken through SQLite's own backup API, which legitimately
+        writes its own destination-file header fields (e.g. the file
+        change counter, incremented by the backup's own internal commit)
+        and may lay out free/interior pages differently than the source
+        file -- none of that is data loss or corruption, and requiring
+        raw byte equality was this test's own defect, never something
+        `backup.sh`'s real integrity behavior should be bent to satisfy."""
         (sandbox / "data").mkdir()
         db_path = sandbox / "data" / "options_agent.db"
         _write_minimal_sqlite_db(db_path, "real-database-content")
 
+        # 1. backup.sh exits successfully.
         result = _run("./scripts/backup.sh", cwd=sandbox)
         assert result.returncode == 0, result.stderr
-
-        backups = list((sandbox / "backups").glob("options_agent_*.db"))
-        assert len(backups) == 1
-        assert backups[0].read_bytes() == db_path.read_bytes()
         assert "Backup written" in result.stdout
 
-        # The backed-up database is itself a valid, openable SQLite
-        # database, and the intended content survived the backup.
-        conn = sqlite3.connect(str(backups[0]))
+        # 2. Exactly one timestamped backup is created.
+        backups = list((sandbox / "backups").glob("options_agent_*.db"))
+        assert len(backups) == 1
+        backup_path = backups[0]
+
+        # 8. Backup file is non-empty.
+        assert backup_path.stat().st_size > 0
+
+        backup_conn = sqlite3.connect(str(backup_path))
         try:
-            row = conn.execute("SELECT content FROM validation_marker").fetchone()
+            # 3/4. The backup is a valid SQLite database: openable, and
+            # PRAGMA integrity_check reports no structural corruption.
+            integrity = backup_conn.execute("PRAGMA integrity_check").fetchall()
+            assert integrity == [("ok",)], f"backup failed PRAGMA integrity_check: {integrity}"
+
+            # 5. The expected table/schema exists in the backup.
+            table = backup_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='validation_marker'"
+            ).fetchone()
+            assert table == ("validation_marker",), "validation_marker table missing from backup"
+
+            # 6. The exact known fixture row/value survived into the
+            # backup database.
+            backup_row = backup_conn.execute("SELECT content FROM validation_marker").fetchone()
+            assert backup_row == ("real-database-content",)
         finally:
-            conn.close()
-        assert row == ("real-database-content",)
+            backup_conn.close()
+
+        # 7. The source database still contains the same expected
+        # fixture content -- taking a backup never mutated it.
+        source_conn = sqlite3.connect(str(db_path))
+        try:
+            source_integrity = source_conn.execute("PRAGMA integrity_check").fetchall()
+            assert source_integrity == [("ok",)], f"source failed PRAGMA integrity_check: {source_integrity}"
+            source_row = source_conn.execute("SELECT content FROM validation_marker").fetchone()
+        finally:
+            source_conn.close()
+        assert source_row == ("real-database-content",)
+
+        # 9. Backup and source represent equivalent intended logical
+        # database content -- proven directly by comparing their actual
+        # query results, not by requiring the underlying files to be
+        # byte-identical.
+        assert backup_row == source_row
 
     def test_two_backups_a_second_apart_get_distinct_timestamped_filenames(self, sandbox: Path):
         import time
