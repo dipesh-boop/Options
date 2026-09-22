@@ -56,16 +56,18 @@ from src.validation.session import DATABASE_SCHEMA_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Step 22.1 (Alpaca market-data amendment) and Step 22.2 (stateful Wheel
-# strategy amendment) each bumped the freeze name/version in place without
+# Step 22.1 (Alpaca market-data amendment), Step 22.2 (stateful Wheel
+# strategy amendment), and Step 22.3 (Strategy Lifecycle Management
+# Engine amendment) each bumped the freeze name/version in place without
 # touching the prior versions' own artifacts -- see progress.md and
-# STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md.
-# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen state;
-# the original V1.0 and V1.1 manifests/reports remain recoverable from git
-# history at the `paper-trading-v1.0` / `paper-trading-v1.1` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.2"
+# STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
+# STEP_22_3_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always reflect
+# the *current* frozen state; the original V1.0/V1.1/V1.2 manifests/
+# reports remain recoverable from git history at the
+# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.3"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.2.0"
+MANIFEST_VERSION = "1.3.0"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -99,6 +101,11 @@ _CODE_MODULE_DIRS: dict[str, Path] = {
     # UncoveredCallError check or bypass the Risk Engine) is caught as
     # material drift.
     "wheel_module": REPO_ROOT / "src" / "wheel",
+    # Step 22.3: the Strategy Lifecycle Management Engine -- hashing it
+    # means any future change (including one that tried to widen
+    # RISK_EXIT_REQUIRED's escape hatches, weaken a trigger, or let a
+    # roll/adjustment self-approve) is caught as material drift.
+    "lifecycle_module": REPO_ROOT / "src" / "lifecycle",
 }
 _CODE_MODULE_FILES: dict[str, Path] = {
     "paper_broker_module": REPO_ROOT / "src" / "brokers" / "paper.py",
@@ -183,6 +190,10 @@ class FreezeManifest(BaseModel):
     # Step 22.2 (stateful Wheel strategy amendment).
     wheel_module_hash: str
     wheel_strategy_kind_trade_proposal_eligible: bool  # must always be False -- WHEEL never becomes its own order type
+
+    # Step 22.3 (Strategy Lifecycle Management Engine amendment).
+    lifecycle_module_hash: str
+    lifecycle_named_policy_count: int  # >= 19 at freeze time -- see src.lifecycle.policies_library
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -298,6 +309,12 @@ def _wheel_is_trade_proposal_eligible() -> bool:
     return StrategyKind.WHEEL in TRADE_PROPOSAL_ELIGIBLE
 
 
+def _lifecycle_named_policy_count() -> int:
+    from src.lifecycle.policies_library import POLICIES_LIBRARY
+
+    return len(POLICIES_LIBRARY)
+
+
 def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeManifest:
     if generated_at is None:
         generated_at = datetime.now(timezone.utc)
@@ -366,12 +383,14 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.2",
+        freeze_version="1.3",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
         wheel_module_hash=_hash_directory(_CODE_MODULE_DIRS["wheel_module"]),
         wheel_strategy_kind_trade_proposal_eligible=_wheel_is_trade_proposal_eligible(),
+        lifecycle_module_hash=_hash_directory(_CODE_MODULE_DIRS["lifecycle_module"]),
+        lifecycle_named_policy_count=_lifecycle_named_policy_count(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -492,6 +511,7 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("market_calendar_module_hash", _CODE_MODULE_FILES["market_calendar_module"], False),
         ("alpaca_provider_module_hash", _CODE_MODULE_FILES["alpaca_provider_module"], False),
         ("wheel_module_hash", _CODE_MODULE_DIRS["wheel_module"], True),
+        ("lifecycle_module_hash", _CODE_MODULE_DIRS["lifecycle_module"], True),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -562,6 +582,23 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         "every Wheel order must remain an ordinary CASH_SECURED_PUT/COVERED_CALL TradeProposal",
     ))
 
+    lifecycle_no_live_client_ok = _verify_lifecycle_has_no_live_trading_client()
+    checks.append(FreezeCheck(
+        name="lifecycle_no_live_trading_client", passed=lifecycle_no_live_client_ok,
+        detail="no live trading-client import found anywhere in src/lifecycle/" if lifecycle_no_live_client_ok
+        else "a live trading-client import was found in src/lifecycle/ -- lifecycle actions must remain "
+        "PaperBroker/Fidelity-manual-ticket only",
+    ))
+
+    lifecycle_policy_count_current = _lifecycle_named_policy_count()
+    lifecycle_policy_count_ok = lifecycle_policy_count_current >= 19 and manifest.lifecycle_named_policy_count >= 19
+    checks.append(FreezeCheck(
+        name="lifecycle_named_policy_count", passed=lifecycle_policy_count_ok,
+        detail=f"{lifecycle_policy_count_current} named policies (>= 19, covering every StrategyKind)" if lifecycle_policy_count_ok
+        else f"only {lifecycle_policy_count_current} named lifecycle policies found -- below the 19-policy floor "
+        "this freeze recorded (every StrategyKind must have at least one named research policy)",
+    ))
+
     passed = all(c.passed for c in checks)
     return FreezeVerificationResult(passed=passed, checks=tuple(checks))
 
@@ -592,6 +629,23 @@ def _verify_wheel_has_no_live_trading_client() -> bool:
 
     pattern = re.compile(r"^\s*(from|import)\s+(alpaca\.trading|ib_insync|ibapi)\b", re.MULTILINE)
     for path in (REPO_ROOT / "src" / "wheel").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        if pattern.search(path.read_text(errors="ignore")):
+            return False
+    return True
+
+
+def _verify_lifecycle_has_no_live_trading_client() -> bool:
+    """Step 22.3: a direct, executable proof (not just a directory hash)
+    that no file under `src/lifecycle/` imports a live trading client
+    (Alpaca's order-submission client, ib_insync, ibapi) -- re-checked
+    on every `verify_freeze` run, independent of
+    `tests/acceptance/test_lifecycle_security.py`."""
+    import re
+
+    pattern = re.compile(r"^\s*(from|import)\s+(alpaca\.trading|ib_insync|ibapi)\b", re.MULTILINE)
+    for path in (REPO_ROOT / "src" / "lifecycle").rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
         if pattern.search(path.read_text(errors="ignore")):

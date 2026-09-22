@@ -141,6 +141,44 @@ def get_wheel(wheel_id: str, state: DashboardState = Depends(get_state), now: da
     return schemas.build_wheel_view(wheel, current_underlying_price=state.current_price_by_ticker.get(wheel.ticker), now=now)
 
 
+@app.get("/api/lifecycle", response_model=list[schemas.LifecyclePositionView])
+def list_lifecycle_positions(state: DashboardState = Depends(get_state)) -> list[schemas.LifecyclePositionView]:
+    """Step 22.3, Part 22: read-only Active Positions/Lifecycle
+    visibility. This route only ever reads `state.lifecycle_positions`
+    (populated from `src.lifecycle.persistence`) and exposes no action
+    of any kind -- there is no POST/PUT route anywhere for a lifecycle
+    position. A close/roll/adjustment happens through the ordinary
+    Risk-Engine-gated PaperBroker/Fidelity paths
+    (`src.lifecycle.paper_events`/`fidelity_events`), never through
+    this dashboard."""
+    return [
+        schemas.build_lifecycle_position_view(
+            record,
+            latest_snapshot=state.lifecycle_latest_snapshot.get(trade_id),
+            resolved=state.lifecycle_latest_resolved.get(trade_id),
+            entry_dte=None,
+            entry_premium=None,
+            next_scheduled_review_dte=None,
+        )
+        for trade_id, record in state.lifecycle_positions.items()
+    ]
+
+
+@app.get("/api/lifecycle/{trade_id}", response_model=schemas.LifecyclePositionView)
+def get_lifecycle_position(trade_id: str, state: DashboardState = Depends(get_state)) -> schemas.LifecyclePositionView:
+    record = state.lifecycle_positions.get(trade_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no lifecycle position found for trade_id={trade_id!r}")
+    return schemas.build_lifecycle_position_view(
+        record,
+        latest_snapshot=state.lifecycle_latest_snapshot.get(trade_id),
+        resolved=state.lifecycle_latest_resolved.get(trade_id),
+        entry_dte=None,
+        entry_premium=None,
+        next_scheduled_review_dte=None,
+    )
+
+
 @app.get("/api/opportunities", response_model=list[schemas.OpportunityView])
 def list_opportunities(
     state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),

@@ -13,11 +13,15 @@ Fidelity username, password, MFA code, or session cookie. See
 from __future__ import annotations
 
 from datetime import date, datetime
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.brokers.fidelity import FidelityLegAction, TicketStatus
 from src.data.option_chain import OptionRight
+from src.lifecycle.persistence import LifecyclePositionRecord
+from src.lifecycle.precedence import ResolvedAction
+from src.lifecycle.snapshot import LifecycleDecisionSnapshot
 from src.llm.schemas import DevilsAdvocateReview
 from src.risk.reason_codes import ReasonCode, RiskDecision
 from src.wheel.accounting import WheelEconomicsSummary
@@ -454,4 +458,140 @@ def build_wheel_view(wheel, *, current_underlying_price: float | None, now: date
         cc_cycle_count=summary.cc_cycle_count,
         next_decision=_NEXT_DECISION_BY_STATE.get(wheel.state, "Under review.") + basis_flag,
         risk_status=risk_status,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 22.3, Part 22: read-only Active Positions / Lifecycle visibility.
+# ---------------------------------------------------------------------------
+
+
+class LifecycleStatusIndicator(str, Enum):
+    """Part 22's ten named indicators, plus `REGIME_REVIEW`/
+    `ASSIGNMENT_REVIEW` — Part 22's list has no single-word fit for
+    Part 9 (regime) or Part 12 (assignment) review conditions, the same
+    "at minimum" spirit Part 23 states explicitly for alert types."""
+
+    HOLD = "hold"
+    PROFIT_TARGET = "profit_target"
+    LOSS_REVIEW = "loss_review"
+    TIME_EXIT = "time_exit"
+    DELTA_REVIEW = "delta_review"
+    VOLATILITY_REVIEW = "volatility_review"
+    EVENT_RISK = "event_risk"
+    LIQUIDITY_WARNING = "liquidity_warning"
+    RISK_EXIT = "risk_exit"
+    DATA_INSUFFICIENT = "data_insufficient"
+    REGIME_REVIEW = "regime_review"
+    ASSIGNMENT_REVIEW = "assignment_review"
+
+
+_DELTA_TRIGGER_NAMES = frozenset({"delta_threshold", "delta_close_threshold"})
+
+
+def status_indicator_for(category: str, winning_trigger_names: tuple[str, ...]) -> LifecycleStatusIndicator:
+    """Maps a `src.lifecycle.precedence.ResolvedAction`'s own category
+    (already the single source of truth for "what is actually
+    happening" per Part 18) to one Part 22 display indicator. Never
+    re-derives the underlying decision — this is display labeling only."""
+    if category == "system_data_safety":
+        return LifecycleStatusIndicator.DATA_INSUFFICIENT
+    if category == "risk_halt":
+        return LifecycleStatusIndicator.RISK_EXIT
+    if category == "hard_loss_exposure":
+        return LifecycleStatusIndicator.LOSS_REVIEW
+    if category in ("assignment_expiration", "optional_adjustment"):
+        return LifecycleStatusIndicator.ASSIGNMENT_REVIEW
+    if category == "event_risk":
+        return LifecycleStatusIndicator.EVENT_RISK
+    if category == "liquidity_risk":
+        return LifecycleStatusIndicator.LIQUIDITY_WARNING
+    if category == "time_exit":
+        return LifecycleStatusIndicator.TIME_EXIT
+    if category == "profit_target":
+        return LifecycleStatusIndicator.PROFIT_TARGET
+    if category == "delta_volatility_review":
+        if any(name in _DELTA_TRIGGER_NAMES for name in winning_trigger_names):
+            return LifecycleStatusIndicator.DELTA_REVIEW
+        if "regime_change_action" in winning_trigger_names:
+            return LifecycleStatusIndicator.REGIME_REVIEW
+        return LifecycleStatusIndicator.VOLATILITY_REVIEW
+    return LifecycleStatusIndicator.HOLD
+
+
+class LifecyclePositionView(BaseModel):
+    """Part 22's exact per-position field list. No execution control of
+    any kind is exposed here or on the route that serves it — this is
+    read-only visibility, exactly like `WheelView`."""
+
+    trade_id: str
+    strategy: str
+    ticker: str
+    entry_date: date
+    entry_dte: int | None
+    current_dte: int | None
+    entry_premium: float | None
+    current_value: float | None
+    unrealized_pnl: float
+    unrealized_pnl_pct: float | None
+    mfe: float
+    mae: float
+    delta: float | None
+    iv_change: float | None
+    management_policy: str
+    current_state: str
+    status_indicator: LifecycleStatusIndicator
+    next_scheduled_review_dte: int | None
+    recommended_action: str
+    risk_status: str
+    data_is_fresh: bool
+
+
+def build_lifecycle_position_view(
+    record: LifecyclePositionRecord,
+    *,
+    latest_snapshot: LifecycleDecisionSnapshot | None,
+    resolved: ResolvedAction | None,
+    entry_dte: int | None,
+    entry_premium: float | None,
+    next_scheduled_review_dte: int | None,
+) -> LifecyclePositionView:
+    """Builds the view purely from already-computed inputs: `record`
+    (this package's own persisted state), the most recent
+    `LifecycleDecisionSnapshot` for this trade (Part 17's own record of
+    what was observed and decided last), and the `ResolvedAction` from
+    that same evaluation (for the status indicator). Nothing here
+    recomputes a price, Greek, or P&L figure."""
+    unrealized_pnl = latest_snapshot.unrealized_pnl if latest_snapshot is not None else 0.0
+    current_value = latest_snapshot.option_prices.get("mid") if latest_snapshot is not None else None
+    unrealized_pnl_pct = (
+        unrealized_pnl / abs(entry_premium) if entry_premium not in (None, 0.0) else None
+    )
+    status = (
+        status_indicator_for(resolved.category, resolved.winning_trigger_names)
+        if resolved is not None
+        else LifecycleStatusIndicator.HOLD
+    )
+    return LifecyclePositionView(
+        trade_id=record.trade_id,
+        strategy=record.strategy_kind.value,
+        ticker=record.ticker,
+        entry_date=record.created_at.date(),
+        entry_dte=entry_dte,
+        current_dte=(latest_snapshot.dte if latest_snapshot is not None else None),
+        entry_premium=entry_premium,
+        current_value=current_value,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_pnl_pct=unrealized_pnl_pct,
+        mfe=record.excursion.mfe,
+        mae=record.excursion.mae,
+        delta=(latest_snapshot.delta if latest_snapshot is not None else None),
+        iv_change=None,
+        management_policy=record.management_policy_name,
+        current_state=record.current_state.value,
+        status_indicator=status,
+        next_scheduled_review_dte=next_scheduled_review_dte,
+        recommended_action=(resolved.reason if resolved is not None else "no lifecycle trigger fired"),
+        risk_status=(latest_snapshot.risk_status if latest_snapshot is not None else "unknown"),
+        data_is_fresh=(latest_snapshot.data_is_fresh if latest_snapshot is not None else False),
     )

@@ -20,6 +20,9 @@ from enum import Enum
 
 from src.brokers.fidelity import FidelityTradeTicket
 from src.data.option_chain import OptionChain
+from src.lifecycle.persistence import LifecyclePositionRecord
+from src.lifecycle.precedence import ResolvedAction
+from src.lifecycle.snapshot import LifecycleDecisionSnapshot
 from src.llm.devils_advocate import DevilsAdvocateEvaluation
 from src.llm.schemas import TradeProposal
 from src.risk.engine import RiskDecisionResult
@@ -145,3 +148,13 @@ class DashboardState:
     # fabricated one.
     wheels: dict[str, WheelPosition] = field(default_factory=dict)
     current_price_by_ticker: dict[str, float] = field(default_factory=dict)
+    # Step 22.3: read-only lifecycle visibility (Part 22). Keyed by
+    # trade_id, populated by whatever loads/persists lifecycle state
+    # (src.lifecycle.persistence), never computed by the dashboard
+    # itself. `lifecycle_latest_snapshot`/`lifecycle_latest_resolved`
+    # hold only the most recent `LifecycleDecisionSnapshot`/
+    # `ResolvedAction` per trade -- the full append-only history lives
+    # in `src.lifecycle.persistence.LifecycleStore`, not here.
+    lifecycle_positions: dict[str, LifecyclePositionRecord] = field(default_factory=dict)
+    lifecycle_latest_snapshot: dict[str, LifecycleDecisionSnapshot] = field(default_factory=dict)
+    lifecycle_latest_resolved: dict[str, ResolvedAction] = field(default_factory=dict)

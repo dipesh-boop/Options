@@ -33,6 +33,9 @@ first time it appears.
 - Produces a **Fidelity ticket** — a plain-text summary of exactly
   what to type into Fidelity's own order-entry screen — for trades you
   decide to actually place. You still do that typing yourself.
+- Keeps managing every open position after it's opened — deciding,
+  deterministically, when to take profit, cut a loss, exit ahead of
+  expiration, or flag a strike getting close to the money (§16).
 - Tracks a 90-day paper-trading validation protocol so you can judge,
   with real statistics, whether the system's picks are actually good
   before trusting it with real capital.
@@ -365,7 +368,47 @@ With that said, here's how it behaves in this platform:
   simulator, or become a Fidelity ticket you type in yourself. Risk-
   approved still does not mean executed.
 
-## 16. Starting the 90-day validation (do this only when you're ready)
+## 16. How the Strategy Lifecycle Management Engine works (optional, advanced)
+
+Opening a trade is not the end of the decision-making — this platform
+also decides, deterministically, when to take profit, cut a loss, exit
+ahead of expiration, react to a strike getting closer to the money, and
+so on, for every open position, on every strategy in its 16-strategy
+library. None of these decisions is made by the AI model: every rule
+is a plain comparison (e.g. "unrealized profit has reached 50% of what
+this trade could make — flag it") written in Python and checked the
+same way every time.
+
+- Every open position is tracked through named stages — active,
+  profit-target-reached, loss-threshold-reached, time-exit-triggered,
+  and so on — shown on the dashboard's **Active Positions / Lifecycle**
+  panel (clearly labeled RESEARCH / PAPER, exactly like every other
+  panel; there is still no button anywhere that closes, rolls, or
+  adjusts a position automatically).
+- Each strategy can be managed under different named policies — e.g. a
+  put credit spread under "take profit at 50%, review at 28 days to
+  expiration" versus the same exact trade under "hold to expiration
+  unless the loss gets large." Neither is assumed better; this platform
+  tracks the performance of each named policy separately, precisely so
+  that question can eventually be answered with real statistics instead
+  of a guess.
+- If a portfolio-level Risk halt fires, it overrides every other
+  lifecycle rule for every open position, no exceptions — even a
+  position already flagged "profit target reached" gets pulled into the
+  halt.
+  If the data needed to make a decision (a live quote, a current Greek)
+  is missing or too old, the position is flagged **DATA INSUFFICIENT**
+  rather than the system guessing and pretending nothing changed.
+- A "roll" (closing one option and opening a related one, e.g. to a
+  later expiration) is never treated as one seamless transaction — it is
+  recorded as a real close (realizing whatever profit or loss that
+  produces) followed by a completely new, separately-approved trade.
+  Losses are never hidden inside a roll.
+- Closing a position early works exactly like opening one: it goes
+  through the same paper-trading simulator, or becomes a Fidelity ticket
+  you type in yourself. Nothing here submits an order on your behalf.
+
+## 17. Starting the 90-day validation (do this only when you're ready)
 
 **This has not been started yet, and nothing in this README starts it
 for you.** The steps below get you to the point of being *ready* to
@@ -404,7 +447,7 @@ effect of installing or running the software.
    stops short of that so you get to make that call with a working,
    verified system in front of you, not a black box.
 
-## 17. How to troubleshoot common problems
+## 18. How to troubleshoot common problems
 
 - **"ANTHROPIC_API_KEY not set" / AI features fail**: make sure `.env`
   exists (copied from `.env.example`) and has a real key, and that you
@@ -454,6 +497,9 @@ effect of installing or running the software.
 - `STEP_22_2_FREEZE_REPORT.md` — the PAPER_TRADING_V1.2 amendment (adds
   the stateful Wheel strategy, §15), including whether validation has
   started.
+- `STEP_22_3_FREEZE_REPORT.md` — the PAPER_TRADING_V1.3 amendment (adds
+  the Strategy Lifecycle Management Engine, §16), including whether
+  validation has started.
 - `VALIDATION_MANIFEST.json` — the currently-frozen version's own
-  machine-checked manifest (see §16, step 4).
+  machine-checked manifest (see §17, step 4).
 - Run the test suite with `make test` (or `python -m pytest -q`).

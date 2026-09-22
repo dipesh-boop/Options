@@ -1068,3 +1068,163 @@ order (not just at runtime), proof `WHEEL` never appears in
 `config/brokers.yaml`/`config/risk_limits.yaml`/`src/risk/engine.py`, and
 proof every Wheel Pydantic model rejects an unrecognized field
 (`extra="forbid"`).
+
+## 17. Deterministic Strategy Lifecycle Management Engine (Step 22.3)
+
+Adds `src/lifecycle/`, a new package managing every strategy this
+platform supports (all 16 `StrategyKind` members, including the Wheel by
+delegation) through ENTRY -> ACTIVE -> MONITORING -> MANAGEMENT DECISION
+-> EXIT/EXPIRATION/ASSIGNMENT/ADJUSTMENT -> POST-TRADE ANALYSIS. Like
+every other package in this codebase, it remains strictly subordinate to
+`src.risk.engine`: nothing in `src/lifecycle/` places, cancels, or
+modifies a live brokerage order, and a roll or adjustment's new OPEN leg
+is a genuinely new `TradeProposal` that must independently clear the
+full existing approval pipeline — this package grants no shortcut
+through it.
+
+**Core principle: STRATEGY is separate from MANAGEMENT POLICY**
+(`src/lifecycle/policy.py`, `policies_library.py`). `StrategyKind
+.PUT_CREDIT_SPREAD` is the structure; `ManagementPolicy` instances named
+`PUT_CREDIT_SPREAD_STANDARD`, `PCS_25PCT_14DTE`, `PCS_DELTA_DEFENSE`, and
+`PCS_HOLD_TO_EXPIRY` are four independently-researchable ways to manage
+that identical structure — `policies_library.py` names at least one
+research-default policy per `StrategyKind` (19 total), every one
+labeled "RESEARCH DEFAULT" and validated by `validate_policy_for_strategy`
+at import time so a hand-authored policy that presupposes a structural
+property (e.g. `delta_threshold` on a strategy with no short leg) fails
+immediately, not silently at runtime. CASH/NO_TRADE — never a
+`StrategyKind` member at all — gets no policy, documented rather than
+guarded against with a broken enum check.
+
+**Position state machine** (`src/lifecycle/state.py`): 28 named
+`PositionLifecycleState` values (11 pre-fill, mirroring but never
+importing `src.brokers.fidelity.TicketStatus`'s own vocabulary, plus 17
+post-fill monitoring/exit states), one `VALID_TRANSITIONS` table, one
+`transition()` choke point. `RISK_EXIT_REQUIRED` is reachable from
+*every* monitoring state (not only `ACTIVE`) and has no path back to
+`ACTIVE` at all — not even indirectly through `HALTED` (a deliberately
+closed two-hop loophole) — the state-machine-level encoding of Part
+18's "nothing outranks Risk."
+
+**Deterministic triggers** (`src/lifecycle/triggers.py`, Parts 4-12):
+pure comparison functions — profit target, loss, DTE, delta, volatility,
+regime change, earnings/event, liquidity deterioration, and assignment
+risk — each returning zero or more `TriggerFinding`s tagged with one of
+Part 18's 11 precedence categories. Every function computes nothing
+itself; a caller-supplied number missing where a configured policy field
+needs it produces a `DATA_INSUFFICIENT` finding (`category=
+"system_data_safety"`, the top precedence tier) rather than a silently
+skipped check — Part 19's fail-safe posture applied uniformly, including
+"missing earnings data is never interpreted as no earnings."
+
+**Action precedence** (`src/lifecycle/precedence.py`): `resolve_action`
+picks whichever of Part 18's 11 categories is highest-ranked among the
+findings that actually fired — full stop, regardless of the lower
+category's own mandatory flag — and within the winning category prefers
+a `mandatory=True` finding over an advisory one.
+
+**MFE/MAE excursion tracking** (`src/lifecycle/excursion.py`): an
+immutable, monotonically-updated `ExcursionState` (mfe/mae are the
+actual signed P&L values at the extreme, never forced non-negative) plus
+`exit_efficiency`, which returns `None` — never a fabricated 0.0/1.0 —
+for a position that was never profitable.
+
+**Immutable decision record** (`src/lifecycle/snapshot
+.LifecycleDecisionSnapshot`, Part 17): every field a lifecycle
+evaluation observed plus every candidate action and the one resolved —
+persisted append-only (never overwritten) so a position's full history
+is reconstructable after the fact.
+
+**Orchestrator** (`src/lifecycle/engine.py`): `evaluate_position` is a
+pure function (`PositionMonitoringInput` in, `EvaluationResult` out) —
+same inputs always produce the same outputs, satisfying the backtest
+determinism requirement every other engine in this codebase already
+meets. It performs no I/O and carries no LLM-shaped parameter anywhere
+in its signature.
+
+**Rolling** (`src/lifecycle/rolling.py`, Part 13): a roll is modeled as
+exactly two transactions, `record_roll_close` (realizes P&L immediately,
+tracks cumulative chain loss honestly) then `complete_roll` (records the
+new leg's id and net credit/debit once the new position has independently
+cleared the full pipeline) — never one operation, and a large realized
+loss is never netted away by a favorable-looking roll credit.
+
+**Adjustment** (`src/lifecycle/adjustment.py`, Part 14): a closed set of
+seven named `AdjustmentType`s (including Part 14's own worked example,
+`CLOSE_UNCHALLENGED_SIDE`), each producing an `AdjustmentProposal` with
+explicit before/after max loss, capital requirement, breakevens, and
+Greeks — packaging numbers `src.quant`/`src.risk` already computed, never
+re-deriving option math, and never itself constituting approval.
+
+**PaperBroker integration** (`src/lifecycle/paper_events.py`, Part 20):
+`close_position` builds the correctly-reversed closing leg(s) (BUY to
+close a short, SELL to close a long) and submits them through the
+unmodified `PaperBroker.place_order`; `settle_lifecycle_expiration` is a
+thin pass-through to `PaperBroker.settle_expiration`, already fully
+generic across assignment/exercise/call-away. No function in this module
+opens a new position — verified structurally in
+`tests/acceptance/test_lifecycle_security.py`.
+
+**Fidelity integration** (`src/lifecycle/fidelity_events.py`, Part 21):
+`LifecycleClosingTicket` is a deliberately separate, simpler shape from
+`ApprovedOrder`/`FidelityTradeTicket` — it carries no `max_profit`/
+`max_loss`/`breakeven` (fields with no real meaning for a closing order)
+— rendered as plain human-readable text, never submitted anywhere.
+`FILLED` only ever follows an explicit `record_ticket_filled` call
+carrying a human-reported fill.
+
+**Persistence** (`src/lifecycle/persistence.py`): `LifecyclePositionRecord`
+(mutable, REPLACE-on-save, keyed by `trade_id`) and
+`LifecycleDecisionSnapshot` (append-only) live in separate sqlite tables
+for exactly the reason `src.wheel.persistence` documents for its own
+shape — a position's *current* state changes on every evaluation, its
+*history* never should. Restart recovery is proven by re-opening a fresh
+`SqliteLifecycleStore` against the same file mid-test-suite.
+
+**Alerts** (`src/lifecycle/alerts.py`, Part 23): eleven named
+`AlertType`s (Part 23's ten plus `VOLATILITY_CHANGE`, since Part 8's
+volatility management has no home in the literal ten — the same "at
+minimum" spirit Part 23 states explicitly). `raise_alert_if_new` checks
+the caller-supplied set of a trade's existing alerts and returns `None`
+for a still-unresolved duplicate condition — safe to call every
+evaluation.
+
+**Post-trade analysis and counterfactuals** (`src/validation
+.post_trade_analysis.py`, Part 24): `ClosedPositionAnalysis` records the
+actual outcome (realized P&L, return on risk/capital, MFE/MAE, exit
+efficiency, commissions) plus a separate `counterfactuals` tuple ("what
+if held to expiration/exited at a different point") built by reusing
+`src.backtest.execution.execute_exit`/`src.backtest.assignment
+.settle_position` exactly as `src.workflows.rejected_trade_review`
+already does for a rejected proposal — the counterfactual list never
+alters `.realized_pnl` or any historical field.
+
+**Policy-level attribution** (`src/validation.policy_attribution.py`,
+Part 25): every metric computed at both `strategy_level_performance`
+(e.g. all `PUT_CREDIT_SPREAD` trades) and `strategy_policy_level
+_performance` (e.g. `PUT_CREDIT_SPREAD` + `PCS_50PCT_21DTE` specifically)
+— Sharpe/Sortino/max-drawdown/CVaR computed against a synthetic,
+trade-level equity curve for the group via the existing
+`src.backtest.metrics` implementations (never re-derived), and every
+group carries `sample_size_warning` from the existing
+`src.research.overfitting_guards.check_small_sample` threshold rather
+than a second one.
+
+**Dashboard** (`GET /api/lifecycle`, `GET /api/lifecycle/{trade_id}`):
+read-only, added to the existing route allowlist test. Twelve
+`LifecycleStatusIndicator` values (Part 22's ten plus `REGIME_REVIEW`/
+`ASSIGNMENT_REVIEW`, the display-layer counterpart of the alert list's
+same "at minimum" extension) derived purely from a `ResolvedAction`'s
+own category — no execution control anywhere on this view or route.
+
+**Security proof**: `tests/acceptance/test_lifecycle_security.py` —
+repo-wide greps for a live trading client/network/browser-automation
+import or a live-shaped order-submission method name anywhere in
+`src/lifecycle/`, proof no credential-shaped identifier exists in the
+package, proof `paper_events.py` exposes no function that opens a
+position, proof no deterministic lifecycle module imports
+`src.llm.client`/`src.llm.router` or accepts an LLM-verdict-shaped
+parameter, proof `fidelity_events.py` only ever sets `FILLED` from
+`record_ticket_filled`, and proof `rolling.py`/`adjustment.py` never
+import `src.risk.engine` (a roll/adjustment proposal is packaged here,
+evaluated by Risk elsewhere, by the caller).

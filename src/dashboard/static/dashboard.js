@@ -46,11 +46,12 @@ async function api(path, options = {}) {
 async function loadAll() {
   document.getElementById("clock").textContent = new Date().toLocaleString();
   try {
-    const [providerHealth, header, risk, wheels, opps, audit] = await Promise.all([
+    const [providerHealth, header, risk, wheels, lifecycle, opps, audit] = await Promise.all([
       api("/api/data-provider-health"),
       api("/api/portfolio-header"),
       api("/api/risk-panel"),
       api("/api/wheels"),
+      api("/api/lifecycle"),
       api("/api/opportunities"),
       api("/api/audit"),
     ]);
@@ -58,6 +59,7 @@ async function loadAll() {
     renderPortfolioHeader(header);
     renderRiskPanel(risk);
     renderWheels(wheels);
+    renderLifecycle(lifecycle);
     renderOpportunities(opps);
     renderAudit(audit);
   } catch (err) {
@@ -162,6 +164,69 @@ function renderWheelCard(w) {
       </div>
       <div class="wheel-active-legs">Active CSP: ${esc(activeCsp)} &nbsp;|&nbsp; Active CC: ${esc(activeCc)}</div>
       <div class="wheel-next-decision">${esc(w.next_decision)}</div>
+    </div>`;
+}
+
+// ---------------------------------------------------- lifecycle positions
+// RESEARCH / PAPER only -- read-only. No button here closes, rolls, or
+// adjusts anything; a lifecycle action is generated only through the same
+// Risk-Engine-gated PaperBroker/Fidelity paths every other strategy uses
+// (src.lifecycle.paper_events/fidelity_events), never from this dashboard.
+
+const LIFECYCLE_STATUS_LABELS = {
+  hold: "HOLD",
+  profit_target: "PROFIT TARGET",
+  loss_review: "LOSS REVIEW",
+  time_exit: "TIME EXIT",
+  delta_review: "DELTA REVIEW",
+  volatility_review: "VOLATILITY REVIEW",
+  event_risk: "EVENT RISK",
+  liquidity_warning: "LIQUIDITY WARNING",
+  risk_exit: "RISK EXIT",
+  data_insufficient: "DATA INSUFFICIENT",
+  regime_review: "REGIME REVIEW",
+  assignment_review: "ASSIGNMENT REVIEW",
+};
+const LIFECYCLE_STATUS_NEGATIVE = new Set([
+  "loss_review", "risk_exit", "data_insufficient", "liquidity_warning", "event_risk",
+]);
+
+function renderLifecycle(positions) {
+  const section = document.getElementById("lifecycle-section");
+  const container = document.getElementById("lifecycle-list");
+  if (!positions.length) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+  container.innerHTML = positions.map(renderLifecycleCard).join("");
+}
+
+function renderLifecycleCard(p) {
+  const pnlCls = p.unrealized_pnl >= 0 ? "pos" : "neg";
+  const statusLabel = LIFECYCLE_STATUS_LABELS[p.status_indicator] || p.status_indicator;
+  const statusCls = LIFECYCLE_STATUS_NEGATIVE.has(p.status_indicator) ? "neg" : "";
+  return `
+    <div class="wheel-card">
+      <div class="wheel-card-header">
+        <span class="badge wheel-state ${statusCls}">${esc(statusLabel)}</span>
+        <strong>${esc(p.ticker)}</strong>
+        <span class="wheel-id">RESEARCH / PAPER &middot; ${esc(p.strategy.replace(/_/g, " "))} &middot; ${esc(p.management_policy)} &middot; trade_id: ${esc(p.trade_id)}</span>
+      </div>
+      <div class="stat-grid">
+        ${statTile("Lifecycle State", p.current_state.replace(/_/g, " "))}
+        ${statTile("Entry Date", p.entry_date)}
+        ${statTile("Current DTE", p.current_dte === null ? "n/a" : p.current_dte)}
+        ${statTile("Unrealized P&L", fmtMoney(p.unrealized_pnl), pnlCls)}
+        ${statTile("Unrealized P&L %", p.unrealized_pnl_pct === null ? "n/a" : fmtPct(p.unrealized_pnl_pct))}
+        ${statTile("MFE", fmtMoney(p.mfe))}
+        ${statTile("MAE", fmtMoney(p.mae))}
+        ${statTile("Delta", p.delta === null ? "n/a" : fmtNum(p.delta))}
+        ${statTile("Next Review DTE", p.next_scheduled_review_dte === null ? "n/a" : p.next_scheduled_review_dte)}
+        ${statTile("Risk Status", p.risk_status, p.risk_status === "ok" ? "" : "neg")}
+        ${statTile("Data Freshness", p.data_is_fresh ? "fresh" : "STALE", p.data_is_fresh ? "" : "neg")}
+      </div>
+      <div class="wheel-next-decision">${esc(p.recommended_action)}</div>
     </div>`;
 }
 

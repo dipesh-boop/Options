@@ -4159,3 +4159,204 @@ was created, no Day 1 snapshot was recorded, no trades were generated,
 starting NAV was not altered, and no scheduling was enabled. Work stops
 here per this amendment's own explicit instruction — Step 23 remains
 separately authorized, not started.
+
+## Step 22.3: Deterministic Strategy Lifecycle Management Engine
+
+**What was built.** A new package, `src/lifecycle/`, managing every
+strategy this platform supports (all 16 `StrategyKind` members,
+including the Wheel by delegation, never duplication) through ENTRY ->
+ACTIVE -> MONITORING -> MANAGEMENT DECISION -> EXIT/EXPIRATION/
+ASSIGNMENT/ADJUSTMENT -> POST-TRADE ANALYSIS. Like every other package
+in this codebase, it remains strictly subordinate to
+`src.risk.engine.evaluate_trade_proposal` — nothing in `src/lifecycle/`
+places, cancels, or modifies a live brokerage order, and a roll or
+adjustment's new OPEN leg is a genuinely new `TradeProposal` that must
+independently clear the full existing approval pipeline.
+
+Modules added:
+- `src/lifecycle/state.py` — `PositionLifecycleState` (28 members) +
+  `VALID_TRANSITIONS` + `transition()`, mirroring but never importing
+  `src.brokers.fidelity.TicketStatus`'s pre-fill vocabulary.
+  `RISK_EXIT_REQUIRED` is reachable from every monitoring state (not
+  only `ACTIVE`) and has no path back to `ACTIVE` — including no
+  indirect two-hop path through `HALTED`, a loophole caught and closed
+  during this step's own smoke testing before any test was written
+  against it. `from_ticket_status()` bridges the two vocabularies
+  explicitly (`TicketStatus.EXPIRED` maps to `CANCELLED`, never to
+  `PositionLifecycleState.EXPIRED`, which means a different real-world
+  event).
+- `src/lifecycle/policy.py` — `ManagementPolicy` (every Part 3 field,
+  frozen dataclass) + `validate_policy_for_strategy`, driven by three
+  structural capability lookup tables (`_HAS_SHORT_LEG`,
+  `_RECEIVES_CREDIT_AT_ENTRY`, `_CAN_BE_ASSIGNED`) covering all 16
+  `StrategyKind` members, so a field presupposing a structural property
+  a strategy doesn't have (e.g. `delta_threshold` on a no-short-leg
+  spread) fails validation rather than being silently accepted.
+- `src/lifecycle/excursion.py` — immutable `ExcursionState` (MFE/MAE as
+  signed values, never forced non-negative) + `exit_efficiency` (`None`,
+  never a fabricated 0.0/1.0, for a position never profitable).
+- `src/lifecycle/triggers.py` — nine pure comparison functions (Parts
+  4-12: profit target, loss, DTE, delta, volatility, regime change,
+  earnings/event, liquidity, assignment risk), each returning
+  `TriggerFinding`s tagged with one of Part 18's 11 precedence
+  categories; a missing input a configured policy field needs always
+  produces `DATA_INSUFFICIENT`, never a silently skipped check.
+- `src/lifecycle/precedence.py` — `resolve_action`, the single function
+  that turns a list of `TriggerFinding`s (plus an externally-supplied
+  Risk-halt boolean) into one deterministic `ResolvedAction`, honoring
+  Part 18's exact 11-level hierarchy.
+- `src/lifecycle/snapshot.py` — immutable, append-only
+  `LifecycleDecisionSnapshot` (Part 17): every observed input, every
+  candidate action, and the one resolved, per evaluation.
+- `src/lifecycle/engine.py` — `evaluate_position`, the pure orchestrator
+  (`PositionMonitoringInput` in, `EvaluationResult` out) tying
+  triggers + precedence + excursion + state + snapshot together; no I/O,
+  no LLM-shaped parameter anywhere in its signature.
+- `src/lifecycle/rolling.py` — Part 13: a roll modeled as exactly two
+  transactions (`record_roll_close` realizes P&L and tracks cumulative
+  chain loss immediately; `complete_roll` records the new leg only once
+  it has independently cleared the full pipeline) — a large realized
+  loss is never netted away by a favorable-looking roll credit.
+- `src/lifecycle/adjustment.py` — Part 14: seven named `AdjustmentType`s
+  (including the worked `CLOSE_UNCHALLENGED_SIDE` example), each an
+  `AdjustmentProposal` with explicit before/after max loss, capital
+  requirement, breakevens, and Greeks — packaging numbers Quant/Risk
+  already computed, never re-deriving option math.
+- `src/lifecycle/policies_library.py` — 19 named RESEARCH DEFAULT
+  `ManagementPolicy` instances, covering all 16 `StrategyKind` members
+  (4 independently-named policies for `PUT_CREDIT_SPREAD` alone,
+  proving Part 1's "never assume one management policy is universally
+  superior"), validated at import time; `WHEEL_STANDARD` documents that
+  it governs only CSP/CC leg-level triggers, never the wheel_id-level
+  state machine `src.wheel` already owns.
+- `src/lifecycle/paper_events.py` — Part 20: `close_position` builds
+  correctly-reversed closing legs and submits through the unmodified
+  `PaperBroker.place_order`; `settle_lifecycle_expiration` is a thin
+  pass-through to `PaperBroker.settle_expiration`. Exposes no function
+  that opens a new position.
+- `src/lifecycle/fidelity_events.py` — Part 21: `LifecycleClosingTicket`,
+  a deliberately separate, simpler shape from `ApprovedOrder`/
+  `FidelityTradeTicket` (no `max_profit`/`max_loss`/`breakeven` — fields
+  with no real meaning for a closing order), rendered as plain text;
+  `FILLED` only ever follows an explicit human-reported
+  `record_ticket_filled` call.
+- `src/lifecycle/persistence.py` — sqlite-backed `LifecyclePositionRecord`
+  (REPLACE-on-save) and append-only `LifecycleDecisionSnapshot` storage,
+  plus `Alert` storage; restart recovery proven via a fresh
+  `SqliteLifecycleStore` connection against the same file.
+- `src/lifecycle/alerts.py` — Part 23: 11 named `AlertType`s (the ten
+  plus `VOLATILITY_CHANGE`) with `raise_alert_if_new` suppressing a
+  duplicate alert for the same still-unresolved condition.
+- `src/validation/post_trade_analysis.py` — Part 24: `ClosedPositionAnalysis`
+  (actual outcome: realized P&L, return on risk/capital, MFE/MAE, exit
+  efficiency, commissions) plus a separate `counterfactuals` tuple,
+  reusing `src.backtest.execution.execute_exit`/
+  `src.backtest.assignment.settle_position` exactly as
+  `src.workflows.rejected_trade_review` does for a rejected proposal —
+  counterfactuals never alter the recorded actual.
+- `src/validation/policy_attribution.py` — Part 25: dual-level
+  performance (`strategy_level_performance` and
+  `strategy_policy_level_performance`), Sharpe/Sortino/max-drawdown/CVaR
+  via the existing `src.backtest.metrics` implementations against a
+  synthetic trade-level equity curve, `sample_size_warning` reusing
+  `src.research.overfitting_guards.check_small_sample`.
+- `src/dashboard/schemas.py`/`models.py`/`app.py` — `GET /api/lifecycle`,
+  `GET /api/lifecycle/{trade_id}` (read-only, added to the existing
+  route allowlist test), `LifecyclePositionView`, 12
+  `LifecycleStatusIndicator` values (Part 22's ten plus
+  `REGIME_REVIEW`/`ASSIGNMENT_REVIEW`) derived purely from a
+  `ResolvedAction`'s own category.
+- `src/dashboard/static/index.html`/`dashboard.js` — an Active
+  Positions/Lifecycle panel, read-only, no execution controls.
+
+**Bugs caught and fixed during this step's own smoke testing (before
+any formal test was written against them):**
+1. `src/lifecycle/policy.py`'s first draft of
+   `validate_policy_for_strategy` contained dead code left over from
+   exploring the CASH/NO_TRADE edge case — an `if ...: pass` no-op
+   branch, a `False`-gated dead branch, and a broken
+   `hasattr(StrategyKind, "CASH_NO_TRADE")` check against an enum
+   member that has never existed (CASH/NO_TRADE is `selected=None`, not
+   a `StrategyKind` value, per Step 19A/22.2's own established design).
+   Removed and replaced with a one-line documentation comment, per
+   CLAUDE.md's standing instruction against unreachable defensive
+   branches.
+2. `src/lifecycle/state.py`'s first draft only added the `HALTED`/
+   `DATA_INSUFFICIENT` escape hatches to `ACTIVE`, not to the other
+   seven `*_TRIGGERED`/`ADJUSTMENT_CANDIDATE` states — meaning a
+   position already sitting in, say, `PROFIT_TARGET_REACHED` could not
+   be force-exited by a portfolio Risk halt, silently violating Part
+   18's "nothing outranks Risk." Caught by the engine-level smoke test
+   (`evaluate_position` from a trigger state with `risk_halt_active=True`
+   raised `InvalidLifecycleTransitionError` instead of transitioning to
+   `RISK_EXIT_REQUIRED`). Fixed by adding `RISK_EXIT_REQUIRED` to the
+   same escape-hatch set applied to every post-fill monitoring state.
+3. That same fix, applied naively, would have added a
+   `RISK_EXIT_REQUIRED -> HALTED` edge — which combined with
+   `HALTED`'s own existing `-> ACTIVE` edge would have created a
+   two-hop bypass (`RISK_EXIT_REQUIRED -> HALTED -> ACTIVE`) of the
+   explicit "no discretion to fall back to ACTIVE" rule on
+   `RISK_EXIT_REQUIRED`'s own base transition. Caught immediately by
+   re-reasoning about the fix before writing the formal test suite;
+   fixed with an explicit override,
+   `VALID_TRANSITIONS[RISK_EXIT_REQUIRED] = {EXIT_PENDING,
+   DATA_INSUFFICIENT}` (dropping `HALTED`), applied after the generic
+   comprehension. Both the original gap and this loophole are now
+   directly tested in `tests/unit/lifecycle/test_state.py`.
+4. `src/lifecycle/adjustment.py`'s first draft declared an
+   `InvalidAdjustmentError` exception class that nothing ever raised
+   (field-level validation already goes through Pydantic's own
+   `ValidationError`, matching `src.wheel.models`'s established
+   convention). Removed as dead code.
+
+**A pre-existing test updated, not weakened, for the new intentional
+route additions:** `tests/unit/dashboard/test_app_security.py`'s
+explicit `_ALLOWED_ROUTES` allowlist (a route-inventory test that fails
+loudly on any unlisted or execution-shaped route) gained
+`("GET", "/api/lifecycle")` and `("GET", "/api/lifecycle/{trade_id}")`
+— both read-only, both already covered by the same test's forbidden-
+path-substring checks. No test was deleted or had an assertion loosened.
+
+**Full suite:** `python -m pytest -q tests/` -> **3006 passed, 4
+skipped, 0 failed** (307 net new tests: 261 in `tests/unit/lifecycle/`,
+9 in `tests/unit/validation/test_post_trade_analysis.py`, 9 in
+`tests/unit/validation/test_policy_attribution.py`, 7 in
+`tests/unit/dashboard/test_lifecycle_routes.py`, 21 in
+`tests/acceptance/test_lifecycle_security.py`; the 4 skips are the same
+pre-existing documented false positives carried from every prior
+freeze).
+
+**Non-negotiable invariants re-verified, unchanged:**
+- Live trading: still structurally impossible — no module under
+  `src/lifecycle/` imports a live trading client, a network client, or
+  a browser-automation library (proven by repo-wide regex grep in
+  `tests/acceptance/test_lifecycle_security.py`, mirroring
+  `test_wheel_security.py`'s own proof for `src/wheel/`).
+- Fidelity: still `MANUAL_EXECUTION` only; `LifecycleClosingTicket`
+  never self-transitions to `FILLED` — only an explicit human-reported
+  `record_ticket_filled` call does, verified structurally (exactly one
+  occurrence of `LifecycleTicketStatus.FILLED` in the whole module,
+  inside that one function).
+- Alpaca: still market-data-only (untouched by this amendment).
+- Risk Engine: still sole authority; `rolling.py`/`adjustment.py`
+  contain no import of `src.risk.engine` at all — a roll/adjustment
+  proposal is packaged here and evaluated by Risk elsewhere, by the
+  caller, exactly like every other proposal.
+- LLM cannot override a deterministic action: no deterministic
+  lifecycle module imports `src.llm.client`/`src.llm.router`, and
+  `evaluate_position`/`resolve_action`/`transition`'s own signatures
+  carry no LLM-verdict-shaped parameter at all (proven by signature
+  inspection, not just by absence of a call).
+- No live trading exists anywhere: every `src.lifecycle.paper_events`
+  function either closes an existing position or reads an existing
+  settlement — none opens one (proven structurally, not just by
+  convention).
+
+**PAPER_TRADING_V1.3: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. ALPACA:
+MARKET_DATA_ONLY.** See `STEP_22_3_FREEZE_REPORT.md` for the freeze
+commit SHA, manifest hash, and remote tag verification. No cohort was
+created, no Day 1 snapshot was recorded, no trades were generated,
+starting NAV was not altered, and no scheduling was enabled. Work stops
+here per this step's own explicit instruction — Step 23 remains
+separately authorized, not started.
