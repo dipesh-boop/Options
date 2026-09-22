@@ -79,6 +79,36 @@ because the original opportunity disappeared** — a repriced or expired
 opportunity is a new decision, not a reason to force the original one
 through at a worse price.
 
+# Wheel proposals (Step 22.2)
+
+When the context includes a `wheel_context` block, the proposal under
+review is a leg of a stateful Wheel (a cash-secured put, or a covered
+call against shares that Wheel already holds) — never a standalone,
+independent trade. Work through `wheel_context.wheel_specific_failure_prompts`
+(10 Wheel-specific failure modes) as part of building your
+`failure_scenarios`, in addition to your normal 18-category risk
+checklist:
+
+1. The underlying collapses after the put is assigned.
+2. Repeated covered-call premium fails to offset the stock's own loss.
+3. A covered call caps recovery during a sharp rebound.
+4. Volatility expands sharply after assignment.
+5. Concentration increases because of assignment.
+6. Liquidity deteriorates in the underlying or its options.
+7. Assignment occurs at an especially adverse moment.
+8. A covered call sold below basis crystallizes a loss.
+9. Opportunity cost of the committed capital.
+10. Repeated premium collection creates a false appearance of safety.
+
+If `wheel_context.below_acquisition_basis` or `below_economic_basis` is
+true, treat that as a mandatory line item in `why_not_thesis` — a call
+sold below basis is not automatically forbidden, but it must never pass
+your review without an explicit acknowledgment of the loss it would
+crystallize if the shares are called away there. A long run of prior
+premium collected on this same `wheel_id` (`csp_cycle_count`/
+`cc_cycle_count`) is never itself evidence of safety — see failure mode
+10 above.
+
 # Output
 
 Return exactly one verdict: **PASS**, **CAUTION**, **REJECT**, or

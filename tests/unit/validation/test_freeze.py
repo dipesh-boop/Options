@@ -23,10 +23,12 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.1"
-        assert manifest.freeze_version == "1.1"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.2"
+        assert manifest.freeze_version == "1.2"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
+        assert len(manifest.wheel_module_hash) == 64
+        assert manifest.wheel_strategy_kind_trade_proposal_eligible is False
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -166,6 +168,20 @@ class TestVerifyFreezeDetectsDrift:
         finally:
             alpaca_module.write_text(original, encoding="utf-8")
 
+    def test_tampering_with_the_wheel_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        wheel_module = Path("src/wheel/lifecycle.py")
+        original = wheel_module.read_text(encoding="utf-8")
+        try:
+            wheel_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "wheel_module_hash" and not c.passed for c in result.checks)
+        finally:
+            wheel_module.write_text(original, encoding="utf-8")
+
 
 class TestAlpacaMarketDataOnlyCheck:
     def test_alpaca_market_data_only_check_passes_on_the_real_repository(self, tmp_path):
@@ -186,3 +202,45 @@ class TestAlpacaMarketDataOnlyCheck:
             assert any(c.name == "alpaca_market_data_only" and not c.passed for c in result.checks)
         finally:
             poison_file.unlink(missing_ok=True)
+
+
+class TestWheelSafetyChecks:
+    def test_wheel_no_live_trading_client_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "wheel_no_live_trading_client" and c.passed for c in result.checks)
+
+    def test_live_trading_client_import_added_to_wheel_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/wheel/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("from alpaca.trading.client import TradingClient\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "wheel_no_live_trading_client" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_wheel_never_becomes_its_own_order_type_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "wheel_never_becomes_its_own_order_type" and c.passed for c in result.checks)
+
+    def test_a_manifest_falsely_claiming_wheel_is_trade_proposal_eligible_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["wheel_strategy_kind_trade_proposal_eligible"] = True
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "wheel_never_becomes_its_own_order_type" and not c.passed for c in result.checks)

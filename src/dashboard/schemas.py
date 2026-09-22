@@ -20,6 +20,8 @@ from src.brokers.fidelity import FidelityLegAction, TicketStatus
 from src.data.option_chain import OptionRight
 from src.llm.schemas import DevilsAdvocateReview
 from src.risk.reason_codes import ReasonCode, RiskDecision
+from src.wheel.accounting import WheelEconomicsSummary
+from src.wheel.state import WheelState
 
 
 class LegView(BaseModel):
@@ -347,4 +349,109 @@ def build_data_provider_health_view(report) -> DataProviderHealthView:
         market_open=report.market_open, market_status_detail=report.market_status_detail,
         checked_at=report.checked_at, last_successful_fetch_at=report.last_successful_fetch_at,
         equity_quote_age_seconds=report.equity_quote_age_seconds, errors=list(report.errors),
+    )
+
+
+# ------------------------------------------------------------------ wheels
+
+
+class WheelCycleView(BaseModel):
+    cycle_id: str
+    strike: float
+    expiration: date
+    contracts: int
+    premium_received_per_share: float
+    is_open: bool
+    close_reason: str | None = None
+    realized_pnl: float | None = None
+    below_acquisition_basis: bool = False
+    below_economic_basis: bool = False
+
+
+class WheelView(BaseModel):
+    """Step 22.2, Part 19: read-only Wheel visibility. Clearly labeled
+    `RESEARCH / PAPER` by the caller supplying it (the dashboard has
+    exactly one data source for Wheel state -- src.wheel.persistence --
+    and no code path anywhere in this package that could confuse it with
+    a manual Fidelity execution ticket). No automated-execution action is
+    exposed anywhere on this view or the route that serves it."""
+
+    wheel_id: str
+    ticker: str
+    state: str
+    started_at: datetime
+    completed_at: datetime | None
+    days_active: int
+    active_csp: WheelCycleView | None
+    active_cc: WheelCycleView | None
+    shares_owned: int
+    acquisition_basis_per_share: float | None
+    economic_basis_per_share: float | None
+    current_underlying_price: float | None
+    current_market_value: float | None
+    unrealized_stock_pnl: float
+    total_premium_collected: float
+    total_net_pnl: float
+    capital_committed: float
+    max_capital_committed: float
+    return_on_committed_capital: float | None
+    csp_cycle_count: int
+    cc_cycle_count: int
+    next_decision: str
+    risk_status: str
+
+
+def _wheel_cycle_view(cycle) -> WheelCycleView:
+    return WheelCycleView(
+        cycle_id=cycle.cycle_id, strike=cycle.strike, expiration=cycle.expiration, contracts=cycle.contracts,
+        premium_received_per_share=cycle.premium_received_per_share, is_open=cycle.is_open,
+        close_reason=cycle.close_reason.value if cycle.close_reason else None, realized_pnl=cycle.realized_pnl,
+        below_acquisition_basis=getattr(cycle, "below_acquisition_basis", False),
+        below_economic_basis=getattr(cycle, "below_economic_basis", False),
+    )
+
+
+_NEXT_DECISION_BY_STATE = {
+    WheelState.WHEEL_CANDIDATE: "Awaiting eligibility/Risk Engine review before opening a CSP.",
+    WheelState.CSP_OPEN: "Monitoring the open CSP for expiration, early close, or assignment.",
+    WheelState.ASSIGNED_SHARES: "Assigned -- ready to evaluate a covered call.",
+    WheelState.CC_ELIGIBLE: "Holding shares; evaluate a covered call or continue holding (NO_CC_TRADE is valid).",
+    WheelState.CC_OPEN: "Monitoring the open covered call for expiration, early close, or call-away.",
+    WheelState.CC_EXPIRED: "Covered call expired worthless; re-evaluating for a new covered call.",
+    WheelState.CC_CLOSED: "Covered call bought back; reassessing.",
+    WheelState.SHARES_CALLED_AWAY: "Shares called away; finalizing the Wheel.",
+    WheelState.WHEEL_COMPLETE: "Wheel complete. A new Wheel must compete again from scratch.",
+    WheelState.CSP_EXPIRED: "CSP expired worthless, unassigned. Wheel finished without ever holding shares.",
+    WheelState.CSP_CLOSED: "CSP bought to close, unassigned. Wheel finished without ever holding shares.",
+    WheelState.WHEEL_EXITED: "Manually exited.",
+    WheelState.WHEEL_HALTED: "Halted -- awaiting manual review before any further action.",
+    WheelState.WHEEL_REJECTED: "Rejected before any order was placed.",
+}
+
+
+def build_wheel_view(wheel, *, current_underlying_price: float | None, now: datetime) -> WheelView:
+    from src.wheel.accounting import summarize_wheel_economics
+
+    summary: WheelEconomicsSummary = summarize_wheel_economics(wheel, current_underlying_price=current_underlying_price, now=now)
+    basis_flag = ""
+    if wheel.open_cc_cycle is not None and wheel.open_cc_cycle.below_acquisition_basis:
+        basis_flag = " [BELOW_ACQUISITION_BASIS]" + (" [BELOW_ECONOMIC_BASIS]" if wheel.open_cc_cycle.below_economic_basis else "")
+    risk_status = "normal" if wheel.state != WheelState.WHEEL_HALTED else "halted"
+    if basis_flag:
+        risk_status = "flagged" if risk_status == "normal" else risk_status
+
+    return WheelView(
+        wheel_id=wheel.wheel_id, ticker=wheel.ticker, state=wheel.state.value,
+        started_at=wheel.started_at, completed_at=wheel.completed_at, days_active=summary.days_in_wheel,
+        active_csp=_wheel_cycle_view(wheel.open_csp_cycle) if wheel.open_csp_cycle is not None else None,
+        active_cc=_wheel_cycle_view(wheel.open_cc_cycle) if wheel.open_cc_cycle is not None else None,
+        shares_owned=summary.shares_owned, acquisition_basis_per_share=summary.acquisition_basis_per_share,
+        economic_basis_per_share=summary.economic_basis_per_share, current_underlying_price=summary.current_underlying_price,
+        current_market_value=summary.current_market_value, unrealized_stock_pnl=summary.unrealized_stock_pnl,
+        total_premium_collected=summary.total_premium, total_net_pnl=summary.total_net_pnl,
+        capital_committed=summary.capital_committed, max_capital_committed=summary.max_capital_committed,
+        return_on_committed_capital=summary.return_on_committed_capital, csp_cycle_count=summary.csp_cycle_count,
+        cc_cycle_count=summary.cc_cycle_count,
+        next_decision=_NEXT_DECISION_BY_STATE.get(wheel.state, "Under review.") + basis_flag,
+        risk_status=risk_status,
     )

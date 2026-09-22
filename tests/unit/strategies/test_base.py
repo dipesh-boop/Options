@@ -24,25 +24,36 @@ from src.data.option_chain import OptionRight as DataOptionRight
 
 
 class TestStrategyKindCompleteness:
-    def test_15_position_producing_strategy_kinds_defined(self):
-        """15, not 16: item #16 in Step 19A's list is "CASH / NO_TRADE",
-        deliberately NOT a StrategyKind member -- it has no legs to
-        price and is represented instead as `selected=None` in
-        `src.strategies.selector.SelectionOutcome`, a first-class
-        competitor rather than a strategy structure."""
-        assert len(list(StrategyKind)) == 15
+    def test_16_position_producing_strategy_kinds_defined(self):
+        """16, not 17: item #17 in the platform's own library list is
+        "CASH / NO_TRADE", deliberately NOT a StrategyKind member -- it
+        has no legs to price and is represented instead as
+        `selected=None` in `src.strategies.selector.SelectionOutcome`, a
+        first-class competitor rather than a strategy structure. The
+        16th real StrategyKind member is Step 22.2's WHEEL -- like the
+        pre-Step-20A LONG_CALL_BUTTERFLY/SHORT_IRON_CONDOR/
+        SHORT_IRON_BUTTERFLY trio, it is a permanent, structural member of
+        this enum without ever itself becoming a `TradeProposal.strategy`
+        value (see `test_15_of_16_kinds_are_trade_proposal_eligible`)."""
+        assert len(list(StrategyKind)) == 16
 
     def test_every_kind_has_a_family_classification(self):
         for kind in StrategyKind:
             assert kind in STRATEGY_FAMILIES
             assert len(STRATEGY_FAMILIES[kind]) >= 1
 
-    def test_all_16_kinds_are_trade_proposal_eligible(self):
-        """Step 20A reverses the Step 19A Tier1/Tier2 split:
-        `TradeProposal.legs` now caps at 4, and `StrategyType` gained
-        the 3 multi-leg members, so every `StrategyKind` value is now
-        representable as a real `TradeProposal`."""
+    def test_15_of_16_kinds_are_trade_proposal_eligible(self):
+        """Step 20A reversed the Step 19A Tier1/Tier2 split for the
+        original 15 members: `TradeProposal.legs` now caps at 4, and
+        `StrategyType` gained the 3 multi-leg members, so every
+        StrategyKind from before Step 22.2 is representable as a real
+        `TradeProposal`. Step 22.2's WHEEL is a deliberate, permanent
+        exception -- it is never itself submitted as an order (every
+        order it places is an ordinary CASH_SECURED_PUT/COVERED_CALL
+        TradeProposal instead, see src/wheel/__init__.py), so it is
+        correctly absent from TRADE_PROPOSAL_ELIGIBLE."""
         eligible = {k.value for k in TRADE_PROPOSAL_ELIGIBLE}
+        assert "wheel" not in eligible
         for name in (
             "cash_secured_put", "covered_call", "put_credit_spread", "call_credit_spread", "bull_call_spread",
             "bear_put_spread", "protective_put", "protective_collar", "long_straddle", "long_strangle",

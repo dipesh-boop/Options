@@ -28,6 +28,7 @@ from src.llm.context import (
     MarketSnapshotContext,
     PortfolioStateContext,
     QuantitativeAnalysisContext,
+    WheelReviewContext,
     build_agent_context,
 )
 from src.llm.router import TaskType
@@ -79,6 +80,10 @@ class DevilsAdvocateInputs:
     analysis_snapshot: MarketSnapshotContext
     current_snapshot: MarketSnapshotContext
     earnings_in_window: bool = False
+    # Step 22.2, Part 17: present only when the proposal under review is
+    # a leg of a Wheel (src.wheel.review_context.build_wheel_review_context) --
+    # absent for every other proposal, never fabricated.
+    wheel_context: WheelReviewContext | None = None
 
 
 _REQUIRED_FIELDS = ("proposal", "quant_analysis", "portfolio_state", "market_regime", "analysis_snapshot", "current_snapshot")
@@ -173,6 +178,7 @@ def build_devils_advocate_context(inputs: DevilsAdvocateInputs) -> str:
         "current_snapshot": vars(inputs.current_snapshot),
         "computed_staleness": vars(staleness),
         "earnings_in_window": inputs.earnings_in_window,
+        "wheel_context": vars(inputs.wheel_context) if inputs.wheel_context is not None else None,
     }
     return build_agent_context(portfolio=inputs.portfolio_state, extra=extra)
 

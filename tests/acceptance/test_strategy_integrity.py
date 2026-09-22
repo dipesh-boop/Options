@@ -24,11 +24,17 @@ from .conftest import all_strategy_fixtures, base_proposal, full_stages, make_ch
 
 class TestFullLibraryInventory:
     def test_16_named_library_items_accounted_for(self):
-        """15 real StrategyKind members + CASH/NO_TRADE (the 16th item,
-        deliberately not a StrategyKind member -- it has no legs to
-        price; represented instead as `selected=None` in
-        `src.strategies.selector.SelectionOutcome`)."""
-        assert len(list(StrategyKind)) == 15
+        """15 real order-eligible StrategyKind members + WHEEL (Step
+        22.2's 16th StrategyKind member, evaluation-only like
+        LONG_CALL_BUTTERFLY/SHORT_IRON_CONDOR/SHORT_IRON_BUTTERFLY were
+        before Step 20A -- WHEEL never becomes its own order, every
+        order it places is an ordinary CASH_SECURED_PUT/COVERED_CALL
+        TradeProposal, see src/wheel/__init__.py) = 16 StrategyKind
+        members total. CASH/NO_TRADE remains a 17th conceptual library
+        item, still deliberately NOT a StrategyKind member -- it has no
+        legs to price; represented instead as `selected=None` in
+        `src.strategies.selector.SelectionOutcome`."""
+        assert len(list(StrategyKind)) == 16
         from src.strategies.selector import SelectionOutcome
 
         assert "selected" in SelectionOutcome.__dataclass_fields__

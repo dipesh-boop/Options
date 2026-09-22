@@ -24,6 +24,7 @@ from src.llm.context import (
     PortfolioStateContext,
     QuantitativeAnalysisContext,
     RiskEngineContext,
+    WheelReviewContext,
     build_agent_context,
 )
 from src.llm.router import TaskType
@@ -77,6 +78,9 @@ class PortfolioManagerInputs:
     portfolio_state: PortfolioStateContext
     risk_engine_result: RiskEngineContext | None = None
     opportunity_highlight: CandidateHighlight | None = None
+    # Step 22.2, Part 18: present only when the proposal under review is
+    # a leg of a Wheel (src.wheel.review_context.build_wheel_review_context).
+    wheel_context: WheelReviewContext | None = None
 
 
 _REQUIRED_FIELDS = (
@@ -131,6 +135,7 @@ def build_portfolio_manager_context(inputs: PortfolioManagerInputs) -> str:
         },
         "risk_engine_result": vars(inputs.risk_engine_result) if inputs.risk_engine_result is not None else None,
         "opportunity_highlight": vars(inputs.opportunity_highlight) if inputs.opportunity_highlight else None,
+        "wheel_context": vars(inputs.wheel_context) if inputs.wheel_context is not None else None,
     }
     return build_agent_context(portfolio=inputs.portfolio_state, extra=extra)
 

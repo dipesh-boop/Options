@@ -318,7 +318,54 @@ to Alpaca changes where the *prices* come from, nothing else.
     account's "API Keys" page — either is enough, and neither requires
     any code change.
 
-## 15. Starting the 90-day validation (do this only when you're ready)
+## 15. How the Wheel strategy works (optional, advanced)
+
+**The Wheel is not a guaranteed-income strategy.** It sells a
+cash-secured put, and if assigned, sells covered calls against the
+resulting shares until they're called away or you decide to exit. Every
+option premium it collects is compensation for real risk, not free
+money:
+
+- **Selling the put exchanges premium for the obligation to buy 100
+  shares per contract at the strike if assigned.** That is genuine
+  equity downside exposure — "the stock fell below the strike" is not
+  merely a strike distance away, it is money you now actually have tied
+  up in a declining position.
+- **A string of collected premiums can create a false sense of safety**
+  right up until an assignment during a sharp decline, after which
+  selling covered calls caps how much of that decline you can recover
+  from while still holding the shares.
+- **The Wheel may underperform simply buying and holding the same
+  stock, or simply holding cash**, over any given stretch. Premium
+  received does not eliminate stock downside risk — it only partially
+  offsets it.
+
+With that said, here's how it behaves in this platform:
+
+- A Wheel is tracked as one persistent position (a `wheel_id`) that
+  moves through named stages — candidate, put sold, assigned or expired,
+  eligible for a covered call, call sold, called away or expired — shown
+  on the dashboard's new **Wheels** panel (clearly labeled RESEARCH /
+  PAPER, exactly like every other panel; there is still no button
+  anywhere that places a real order).
+- Every put and every call the Wheel sells is an ordinary cash-secured
+  put or covered call under the hood — it goes through the exact same
+  deterministic Quant → deterministic Risk Engine → PaperBroker/Fidelity
+  path as every other trade this platform proposes. The Wheel adds
+  bookkeeping across cycles (so it can show you your real cost basis, a
+  premium-adjusted "economic" basis, and total P&L across the whole
+  position's life); it never gets a lighter risk check.
+- If a covered call's strike is priced below what you paid for the
+  shares, the dashboard flags it (`BELOW_ACQUISITION_BASIS`) — selling
+  there is not forbidden (sometimes it's the right loss-management move)
+  but it is never done silently, and it will lock in a loss on the
+  shares if they're called away at that strike.
+- Nothing about the Wheel changes how orders reach the real world: a
+  Wheel's orders still only ever fill against the internal paper
+  simulator, or become a Fidelity ticket you type in yourself. Risk-
+  approved still does not mean executed.
+
+## 16. Starting the 90-day validation (do this only when you're ready)
 
 **This has not been started yet, and nothing in this README starts it
 for you.** The steps below get you to the point of being *ready* to
@@ -357,7 +404,7 @@ effect of installing or running the software.
    stops short of that so you get to make that call with a working,
    verified system in front of you, not a black box.
 
-## 16. How to troubleshoot common problems
+## 17. How to troubleshoot common problems
 
 - **"ANTHROPIC_API_KEY not set" / AI features fail**: make sure `.env`
   exists (copied from `.env.example`) and has a real key, and that you
@@ -403,8 +450,10 @@ effect of installing or running the software.
 - `STEP_22_FREEZE_REPORT.md` — the original PAPER_TRADING_V1.0
   pre-validation hardening/freeze report.
 - `STEP_22_1_FREEZE_REPORT.md` — the PAPER_TRADING_V1.1 amendment
-  (adds Alpaca as a market-data-only provider), including whether
-  validation has started.
+  (adds Alpaca as a market-data-only provider).
+- `STEP_22_2_FREEZE_REPORT.md` — the PAPER_TRADING_V1.2 amendment (adds
+  the stateful Wheel strategy, §15), including whether validation has
+  started.
 - `VALIDATION_MANIFEST.json` — the currently-frozen version's own
-  machine-checked manifest (see §15, step 4).
+  machine-checked manifest (see §16, step 4).
 - Run the test suite with `make test` (or `python -m pytest -q`).

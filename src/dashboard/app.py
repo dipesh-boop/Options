@@ -117,6 +117,30 @@ async def data_provider_health() -> schemas.DataProviderHealthView:
     return schemas.build_data_provider_health_view(report)
 
 
+@app.get("/api/wheels", response_model=list[schemas.WheelView])
+def list_wheels(state: DashboardState = Depends(get_state), now: datetime = Depends(get_now)) -> list[schemas.WheelView]:
+    """Step 22.2, Part 19: read-only Wheel visibility, clearly labeled
+    RESEARCH / PAPER by construction -- this route only ever reads
+    `state.wheels` (populated from `src.wheel.persistence`, never from
+    anything Fidelity-shaped) and exposes no action of any kind. There is
+    no POST/PUT route anywhere for a Wheel -- opening/closing a Wheel's
+    CSP/CC legs happens through the ordinary Risk-Engine-gated
+    PaperBroker/Fidelity paths (`src.wheel.paper_events`/`fidelity_events`),
+    never through this dashboard."""
+    return [
+        schemas.build_wheel_view(w, current_underlying_price=state.current_price_by_ticker.get(w.ticker), now=now)
+        for w in state.wheels.values()
+    ]
+
+
+@app.get("/api/wheels/{wheel_id}", response_model=schemas.WheelView)
+def get_wheel(wheel_id: str, state: DashboardState = Depends(get_state), now: datetime = Depends(get_now)) -> schemas.WheelView:
+    wheel = state.wheels.get(wheel_id)
+    if wheel is None:
+        raise HTTPException(status_code=404, detail=f"no Wheel found for wheel_id={wheel_id!r}")
+    return schemas.build_wheel_view(wheel, current_underlying_price=state.current_price_by_ticker.get(wheel.ticker), now=now)
+
+
 @app.get("/api/opportunities", response_model=list[schemas.OpportunityView])
 def list_opportunities(
     state: DashboardState = Depends(get_state), now: datetime = Depends(get_now),

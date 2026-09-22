@@ -218,3 +218,41 @@ class TestRefreshRoute:
             json={"underlying_price": 628.5, "underlying_bid": 628.4, "underlying_ask": 628.6, "quote_timestamp": NOW.isoformat(), "leg_quotes": []},
         )
         assert r.status_code == 422
+
+
+class TestWheelRoutes:
+    """Step 22.2, Part 19: read-only Wheel visibility, clearly labeled
+    RESEARCH / PAPER, with no action route of any kind."""
+
+    def test_empty_wheels_list(self, client_and_trade_id):
+        client, _ = client_and_trade_id
+        r = client.get("/api/wheels")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_populated_wheel_appears_with_correct_fields(self, client_and_trade_id):
+        from datetime import date
+
+        from src.wheel import lifecycle
+
+        client, _ = client_and_trade_id
+        w = lifecycle.open_wheel_candidate(wheel_id="w1", ticker="SPY", now=NOW)
+        w = lifecycle.open_csp(w, strike=600.0, expiration=date(2026, 10, 16), contracts=1, premium_per_share=5.0, commission=0.65, proposal_id="p1", position_id=None, now=NOW)
+        dashboard_app._dashboard_state.wheels = {"w1": w}
+
+        r = client.get("/api/wheels")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body) == 1
+        assert body[0]["wheel_id"] == "w1"
+        assert body[0]["state"] == "csp_open"
+        assert body[0]["active_csp"]["strike"] == 600.0
+
+        r2 = client.get("/api/wheels/w1")
+        assert r2.status_code == 200
+        assert r2.json()["wheel_id"] == "w1"
+
+    def test_unknown_wheel_id_is_404(self, client_and_trade_id):
+        client, _ = client_and_trade_id
+        r = client.get("/api/wheels/does-not-exist")
+        assert r.status_code == 404

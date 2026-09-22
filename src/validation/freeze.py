@@ -56,14 +56,16 @@ from src.validation.session import DATABASE_SCHEMA_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Step 22.1 (Alpaca market-data amendment) bumped the freeze name/version
-# without touching the original V1.0 artifacts -- see progress.md and
-# STEP_22_1_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always reflect
-# the *current* frozen state; the original V1.0 manifest/report remain
-# recoverable from git history at the `paper-trading-v1.0` tag.
-FREEZE_NAME = "PAPER_TRADING_V1.1"
+# Step 22.1 (Alpaca market-data amendment) and Step 22.2 (stateful Wheel
+# strategy amendment) each bumped the freeze name/version in place without
+# touching the prior versions' own artifacts -- see progress.md and
+# STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md.
+# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen state;
+# the original V1.0 and V1.1 manifests/reports remain recoverable from git
+# history at the `paper-trading-v1.0` / `paper-trading-v1.1` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.2"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.1.0"
+MANIFEST_VERSION = "1.2.0"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -92,6 +94,11 @@ _CODE_MODULE_DIRS: dict[str, Path] = {
     "quant_module": REPO_ROOT / "src" / "quant",
     "risk_module": REPO_ROOT / "src" / "risk",
     "strategies_module": REPO_ROOT / "src" / "strategies",
+    # Step 22.2: the stateful Wheel package -- hashing it means any
+    # future change (including one that tried to weaken the
+    # UncoveredCallError check or bypass the Risk Engine) is caught as
+    # material drift.
+    "wheel_module": REPO_ROOT / "src" / "wheel",
 }
 _CODE_MODULE_FILES: dict[str, Path] = {
     "paper_broker_module": REPO_ROOT / "src" / "brokers" / "paper.py",
@@ -172,6 +179,10 @@ class FreezeManifest(BaseModel):
     alpaca_provider_module_hash: str
     data_provider_at_freeze_time: str  # OPTIONS_AGENT_DATA_PROVIDER as configured when frozen (operator-changeable afterward)
     required_options_feed_for_validation: str  # policy: OPRA required for the formal 90-day run
+
+    # Step 22.2 (stateful Wheel strategy amendment).
+    wheel_module_hash: str
+    wheel_strategy_kind_trade_proposal_eligible: bool  # must always be False -- WHEEL never becomes its own order type
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -281,6 +292,12 @@ def _current_data_provider_selection() -> str:
     return DataProviderSelection().data_provider
 
 
+def _wheel_is_trade_proposal_eligible() -> bool:
+    from src.strategies.base import TRADE_PROPOSAL_ELIGIBLE, StrategyKind
+
+    return StrategyKind.WHEEL in TRADE_PROPOSAL_ELIGIBLE
+
+
 def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeManifest:
     if generated_at is None:
         generated_at = datetime.now(timezone.utc)
@@ -349,10 +366,12 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.1",
+        freeze_version="1.2",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
+        wheel_module_hash=_hash_directory(_CODE_MODULE_DIRS["wheel_module"]),
+        wheel_strategy_kind_trade_proposal_eligible=_wheel_is_trade_proposal_eligible(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -472,6 +491,7 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("paper_broker_module_hash", _CODE_MODULE_FILES["paper_broker_module"], False),
         ("market_calendar_module_hash", _CODE_MODULE_FILES["market_calendar_module"], False),
         ("alpaca_provider_module_hash", _CODE_MODULE_FILES["alpaca_provider_module"], False),
+        ("wheel_module_hash", _CODE_MODULE_DIRS["wheel_module"], True),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -526,6 +546,22 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "an alpaca.trading import was found in src/ -- Alpaca must remain market-data-only",
     ))
 
+    wheel_no_live_client_ok = _verify_wheel_has_no_live_trading_client()
+    checks.append(FreezeCheck(
+        name="wheel_no_live_trading_client", passed=wheel_no_live_client_ok,
+        detail="no live trading-client import found anywhere in src/wheel/" if wheel_no_live_client_ok
+        else "a live trading-client import was found in src/wheel/ -- the Wheel must remain "
+        "PaperBroker/Fidelity-manual-ticket only",
+    ))
+
+    wheel_not_eligible_ok = _wheel_is_trade_proposal_eligible() is False and manifest.wheel_strategy_kind_trade_proposal_eligible is False
+    checks.append(FreezeCheck(
+        name="wheel_never_becomes_its_own_order_type", passed=wheel_not_eligible_ok,
+        detail="StrategyKind.WHEEL absent from TRADE_PROPOSAL_ELIGIBLE, as required" if wheel_not_eligible_ok
+        else "StrategyKind.WHEEL has become TRADE_PROPOSAL_ELIGIBLE or the manifest wrongly claims it -- "
+        "every Wheel order must remain an ordinary CASH_SECURED_PUT/COVERED_CALL TradeProposal",
+    ))
+
     passed = all(c.passed for c in checks)
     return FreezeVerificationResult(passed=passed, checks=tuple(checks))
 
@@ -539,6 +575,23 @@ def _verify_alpaca_is_market_data_only() -> bool:
 
     pattern = re.compile(r"^\s*(from|import)\s+alpaca\.trading\b", re.MULTILINE)
     for path in (REPO_ROOT / "src").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        if pattern.search(path.read_text(errors="ignore")):
+            return False
+    return True
+
+
+def _verify_wheel_has_no_live_trading_client() -> bool:
+    """Step 22.2: a direct, executable proof (not just a directory hash)
+    that no file under `src/wheel/` imports a live trading client
+    (Alpaca's order-submission client, ib_insync, ibapi) -- re-checked
+    on every `verify_freeze` run, independent of
+    `tests/acceptance/test_wheel_security.py`."""
+    import re
+
+    pattern = re.compile(r"^\s*(from|import)\s+(alpaca\.trading|ib_insync|ibapi)\b", re.MULTILINE)
+    for path in (REPO_ROOT / "src" / "wheel").rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
         if pattern.search(path.read_text(errors="ignore")):

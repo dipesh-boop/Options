@@ -107,6 +107,35 @@ others:
 `AWAITING_HUMAN`, `ORDER_ENTERED`, `PARTIALLY_FILLED`, `FILLED`,
 `CANCELLED`, `REJECTED`, `EXPIRED`, `REPRICE_REQUIRED`.
 
+# Wheel proposals (Step 22.2)
+
+When the context includes a `wheel_context` block, the proposal under
+review is a leg of a stateful Wheel. Work through
+`wheel_context.portfolio_manager_questions` explicitly in your
+`thesis_summary`/`bear_case` — the exact question set depends on
+`wheel_context.is_new_wheel_candidate`:
+
+For a fresh Wheel's entry cash-secured put (`is_new_wheel_candidate` is
+true): Why do we want to own this underlying? Why now? Why a
+cash-secured put rather than simply buying shares? Why this strike? Why
+this expiration? What happens if assigned tomorrow? Would we still want
+the stock after a 20% decline? What is the opportunity cost of the
+reserved cash? What invalidates the thesis? How correlated is this
+exposure with the rest of the portfolio? Is the premium adequate
+compensation for the downside? Is CASH superior?
+
+For a covered call against shares this Wheel already holds
+(`is_new_wheel_candidate` is false): Why sell upside now? What happens
+if the stock rallies sharply? Are we comfortable losing the shares at
+this strike? Is the strike below basis
+(`wheel_context.below_acquisition_basis`/`below_economic_basis`)? Is the
+premium adequate for the upside surrendered? Would holding the stock
+without a covered call be preferable right now?
+
+You have no more override authority over a Wheel's Risk Engine decision
+than over any other proposal's — `decision="propose_advance"` on a Wheel
+leg is exactly as advisory as it is anywhere else.
+
 # Output
 
 **Per-proposal review** — call the provided tool with a

@@ -46,16 +46,18 @@ async function api(path, options = {}) {
 async function loadAll() {
   document.getElementById("clock").textContent = new Date().toLocaleString();
   try {
-    const [providerHealth, header, risk, opps, audit] = await Promise.all([
+    const [providerHealth, header, risk, wheels, opps, audit] = await Promise.all([
       api("/api/data-provider-health"),
       api("/api/portfolio-header"),
       api("/api/risk-panel"),
+      api("/api/wheels"),
       api("/api/opportunities"),
       api("/api/audit"),
     ]);
     renderDataProviderHealth(providerHealth);
     renderPortfolioHeader(header);
     renderRiskPanel(risk);
+    renderWheels(wheels);
     renderOpportunities(opps);
     renderAudit(audit);
   } catch (err) {
@@ -110,6 +112,57 @@ function renderPortfolioHeader(h) {
     statTile("Portfolio Theta", h.portfolio_theta === null ? "not tracked" : fmtNum(h.portfolio_theta), h.portfolio_theta === null ? "na" : ""),
     statTile("Portfolio Vega", h.portfolio_vega === null ? "not tracked" : fmtNum(h.portfolio_vega), h.portfolio_vega === null ? "na" : ""),
   ].join("");
+}
+
+// ------------------------------------------------------------------ wheels
+// RESEARCH / PAPER only -- read-only. No button here submits, closes, or
+// rolls anything; a Wheel's CSP/CC legs are opened/closed exclusively
+// through the same Risk-Engine-gated PaperBroker/Fidelity paths every
+// other strategy uses, never from this dashboard.
+
+function renderWheels(wheels) {
+  const section = document.getElementById("wheels-section");
+  const container = document.getElementById("wheels-list");
+  if (!wheels.length) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+  container.innerHTML = wheels.map(renderWheelCard).join("");
+}
+
+function renderWheelCard(w) {
+  const pnlCls = w.total_net_pnl >= 0 ? "pos" : "neg";
+  const activeCsp = w.active_csp
+    ? `CSP $${fmtNum(w.active_csp.strike)} exp ${w.active_csp.expiration} x${w.active_csp.contracts} @ $${fmtNum(w.active_csp.premium_received_per_share)}`
+    : "none";
+  const activeCc = w.active_cc
+    ? `CC $${fmtNum(w.active_cc.strike)} exp ${w.active_cc.expiration} x${w.active_cc.contracts} @ $${fmtNum(w.active_cc.premium_received_per_share)}`
+    : "none";
+  return `
+    <div class="wheel-card">
+      <div class="wheel-card-header">
+        <span class="badge wheel-state">${esc(w.state.replace(/_/g, " "))}</span>
+        <strong>${esc(w.ticker)}</strong>
+        <span class="wheel-id">RESEARCH / PAPER &middot; wheel_id: ${esc(w.wheel_id)}</span>
+      </div>
+      <div class="stat-grid">
+        ${statTile("Shares Owned", w.shares_owned)}
+        ${statTile("Acquisition Basis", w.acquisition_basis_per_share === null ? "n/a" : fmtMoney(w.acquisition_basis_per_share))}
+        ${statTile("Economic Basis", w.economic_basis_per_share === null ? "n/a" : fmtMoney(w.economic_basis_per_share))}
+        ${statTile("Current Price", w.current_underlying_price === null ? "n/a" : fmtMoney(w.current_underlying_price))}
+        ${statTile("Unrealized Stock P&L", fmtMoney(w.unrealized_stock_pnl), w.unrealized_stock_pnl >= 0 ? "pos" : "neg")}
+        ${statTile("Premium Collected", fmtMoney(w.total_premium_collected))}
+        ${statTile("Total Net P&L", fmtMoney(w.total_net_pnl), pnlCls)}
+        ${statTile("Capital Committed", fmtMoney(w.capital_committed))}
+        ${statTile("Return on Capital", w.return_on_committed_capital === null ? "n/a" : fmtPct(w.return_on_committed_capital))}
+        ${statTile("Days Active", w.days_active)}
+        ${statTile("CSP / CC Cycles", `${w.csp_cycle_count} / ${w.cc_cycle_count}`)}
+        ${statTile("Risk Status", w.risk_status, w.risk_status === "normal" ? "" : "neg")}
+      </div>
+      <div class="wheel-active-legs">Active CSP: ${esc(activeCsp)} &nbsp;|&nbsp; Active CC: ${esc(activeCc)}</div>
+      <div class="wheel-next-decision">${esc(w.next_decision)}</div>
+    </div>`;
 }
 
 // -------------------------------------------------------------- risk panel

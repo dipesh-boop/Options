@@ -26,6 +26,7 @@ from src.risk.engine import RiskDecisionResult
 from src.risk.limits import RiskLimitsConfig
 from src.risk.portfolio_risk import Portfolio
 from src.risk.trade_risk import QuantitativeAnalysis
+from src.wheel.models import WheelPosition
 
 
 class AuditEventType(str, Enum):
@@ -134,3 +135,13 @@ class DashboardState:
     portfolio_net_vega: float | None = None
     daily_pnl: float | None = None
     ytd_return_pct: float | None = None
+    # Step 22.2: read-only Wheel visibility (Part 19). Keyed by wheel_id,
+    # exactly like `opportunities` is keyed by trade_id -- populated by
+    # whatever loads/persists Wheel state (src.wheel.persistence), never
+    # computed by the dashboard itself. current_price_by_ticker supplies
+    # the live mark used to compute each Wheel's unrealized P&L for
+    # display (src.wheel.accounting.summarize_wheel_economics) -- a
+    # ticker missing from it simply renders without a live mark, never a
+    # fabricated one.
+    wheels: dict[str, WheelPosition] = field(default_factory=dict)
+    current_price_by_ticker: dict[str, float] = field(default_factory=dict)

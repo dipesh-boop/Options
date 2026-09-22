@@ -76,6 +76,19 @@ class StrategyKind(str, Enum):
     LONG_CALL_BUTTERFLY = "long_call_butterfly"
     SHORT_IRON_CONDOR = "short_iron_condor"
     SHORT_IRON_BUTTERFLY = "short_iron_butterfly"
+    # Step 22.2: the stateful Wheel. Like the three members above, WHEEL
+    # has no `StrategyType` counterpart and so is never
+    # `TRADE_PROPOSAL_ELIGIBLE` -- not because it's unfinished (it is a
+    # fully wired, persistent multi-stage lifecycle; see `src.wheel`),
+    # but because a Wheel is never itself submitted as one order. Every
+    # order a Wheel places is a completely ordinary CASH_SECURED_PUT or
+    # COVERED_CALL `TradeProposal` (see `src/wheel/__init__.py`'s module
+    # docstring) -- `StrategyKind.WHEEL` exists purely so the Wheel can
+    # be evaluated and compared (this module, `src.strategies.selector`/
+    # `comparison`, `src.strategies.wheel.evaluate_wheel_candidate`)
+    # against every other strategy and CASH before a fresh wheel_id ever
+    # opens its first CSP.
+    WHEEL = "wheel"
 
 
 _STRATEGY_TYPE_VALUES = {m.value for m in StrategyType}
@@ -150,6 +163,14 @@ STRATEGY_FAMILIES: dict[StrategyKind, tuple[StrategyFamily, ...]] = {
     StrategyKind.SHORT_IRON_BUTTERFLY: (
         StrategyFamily.INCOME, StrategyFamily.NEUTRAL_RANGE, StrategyFamily.VOLATILITY_CONTRACTION,
     ),
+    # A Wheel is income-seeking on an underlying the system would be
+    # comfortable owning outright -- both INCOME (the whole point of
+    # collecting premium on both legs) and DIRECTIONAL_BULLISH (its
+    # entry leg is a cash-secured put, same classification CASH_SECURED_PUT
+    # itself carries), plus CAPITAL_PRESERVATION is deliberately absent:
+    # a Wheel carries full equity downside once assigned, which is the
+    # opposite of a capital-preservation structure.
+    StrategyKind.WHEEL: (StrategyFamily.INCOME, StrategyFamily.DIRECTIONAL_BULLISH),
 }
 
 class ManagementConditionType(str, Enum):
@@ -203,6 +224,7 @@ MANAGEMENT_CONDITION_TYPES: dict[StrategyKind, tuple[ManagementConditionType, ..
     StrategyKind.SHORT_IRON_BUTTERFLY: _BASELINE_MCT + (
         _MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD, _MCT.VOLATILITY_CHANGE,
     ),
+    StrategyKind.WHEEL: _BASELINE_MCT + (_MCT.ASSIGNMENT_MANAGEMENT, _MCT.ROLL_EVALUATION, _MCT.DELTA_THRESHOLD),
 }
 
 

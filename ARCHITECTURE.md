@@ -928,3 +928,143 @@ is powering the system.
 anything under `src/` — `scripts/start.sh` runs `src.dashboard.app:app`
 exclusively. Left as-is; removing unrelated dead code was out of scope
 for this amendment.
+
+## 16. Stateful Wheel strategy (pre-validation amendment, "Step 22.2")
+
+Adds `src/wheel/`, a new package implementing the Wheel as a persistent,
+multi-stage position lifecycle rather than a label glued onto a
+standalone cash-secured put and covered call. **The Wheel never becomes
+its own order type**: every order it places is an ordinary
+`TradeProposal` with `strategy=StrategyType.CASH_SECURED_PUT` or
+`COVERED_CALL` — the ~15-year-old two strategies this platform has
+supported since Step 9, completely unmodified — submitted to the exact
+same unmodified `src.risk.engine.evaluate_trade_proposal`. `src.wheel`
+tracks which `wheel_id` a CSP/CC belongs to and what lifecycle state that
+Wheel is in; it adds no new Risk Engine code path, no new PaperBroker
+order type, and (per `src/strategies/base.py`'s
+`TRADE_PROPOSAL_ELIGIBLE` set) `StrategyKind.WHEEL` is deliberately never
+order-eligible — joining `LONG_CALL_BUTTERFLY`/`SHORT_IRON_CONDOR`/
+`SHORT_IRON_BUTTERFLY`'s pre-Step-20A precedent of a `StrategyKind`
+member that exists for comparison/evaluation only, except permanently
+rather than as a staged rollout.
+
+**State machine** (`src/wheel/state.py`): 14 named `WheelState` values
+(`WHEEL_CANDIDATE`, `CSP_OPEN`, `CSP_EXPIRED`, `CSP_CLOSED`,
+`ASSIGNED_SHARES`, `CC_ELIGIBLE`, `CC_OPEN`, `CC_EXPIRED`, `CC_CLOSED`,
+`SHARES_CALLED_AWAY`, `WHEEL_COMPLETE`, `WHEEL_EXITED`, `WHEEL_HALTED`,
+`WHEEL_REJECTED`) with a single source-of-truth `VALID_TRANSITIONS`
+table and one `transition()` choke point every state change in
+`src.wheel.lifecycle` goes through — the same "illegal transition raises,
+never silently happens" discipline `src.brokers.fidelity`'s
+`TicketStatus` state machine already established. `WHEEL_HALTED`/
+`WHEEL_EXITED` are reachable from any non-terminal state (the escape
+hatches a kill-switch/drawdown halt or a manual exit need); `WHEEL_REJECTED`
+only from `WHEEL_CANDIDATE` (once a real order exists, unwinding it is an
+exit, never a "rejection").
+
+**Two bases, always kept apart** (`src/wheel/accounting.py`):
+`acquisition_basis_per_share` (tax/accounting-style — the strike paid at
+assignment, unadjusted) and `economic_basis_per_share` (acquisition basis
+reduced by every dollar of net Wheel premium collected per share held).
+Every report (dashboard, `src.validation.wheel_attribution`) shows both,
+and `called_away`'s realized-P&L calculation always uses the tax-style
+acquisition basis, never the economic one, for what was actually
+gained/lost on the shares themselves.
+
+**Below-basis covered calls are flagged, never forbidden**
+(`src.wheel.accounting.below_basis_flags`): `BELOW_ACQUISITION_BASIS`/
+`BELOW_ECONOMIC_BASIS` are attached to the `CcCycle` and surfaced to the
+dashboard, the Devil's Advocate, and the Portfolio Manager — Part 8's
+"must require explicit deterministic justification and cannot occur
+merely to generate premium" is enforced by *visibility*, not a hard
+block, since legitimate loss-management calls exist.
+
+**PaperBroker integration** (`src/wheel/paper_events.py`): opens are
+submitted only from an already Risk-Engine-approved `RiskDecisionResult`
+(`WheelOrderNotApprovedError` if not APPROVE/RESIZE), converted to a
+`PlaceOrderRequest` via the existing `src.brokers.order_validator
+.validate_and_build_order_request` — no new order-construction logic.
+Expiration settlement reads `PaperBroker.settle_expiration`'s own
+`ExpirationSettlement.assigned_or_exercised` to decide `csp_assigned`
+vs. `csp_expires_worthless` (and the covered-call equivalent) — never a
+second, independently-computed assignment decision. A discretionary
+early close (`buy_to_close_csp`/`_cc`) submits a `PlaceOrderRequest`
+directly, since this platform's Risk Engine has no CLOSE/ROLL pipeline
+capability at all yet (`src.risk.engine`'s own TS-004 comment) — a
+pre-existing, documented gap this amendment does not newly introduce or
+attempt to close.
+
+**Fidelity integration** (`src/wheel/fidelity_events.py`): opens reuse
+the unmodified `FidelityManualProvider`/`ApprovedOrder`/
+`FidelityTradeTicket` machinery exactly as-is (a `WheelFidelityTicket`
+dataclass pairs an unmodified `FidelityTradeTicket` with its `wheel_id`
+externally, rather than adding a field to the trusted-kernel schema
+itself). Assignment is recorded as a plain reconciliation event
+(`record_wheel_csp_assignment`/`record_wheel_cc_assignment`, forwarding
+straight to `src.wheel.lifecycle`) — never a fabricated order, per Part
+20's explicit requirement.
+
+**Risk analytics** (`src/wheel/risk.py`): `stress_test_wheel` reprices
+whatever the Wheel currently holds (the short put while `CSP_OPEN`;
+shares plus any open short call while holding stock) across
+`WHEEL_STRESS_SPOT_SHOCKS = (-0.05, -0.10, -0.20, -0.30, -0.50)`, the
+exact down-only grid Part 12 names (deeper than
+`src.risk.stress.STRESS_SPOT_SHOCKS`'s general +-5/10/20% grid, since a
+Wheel's live risk is entirely on the downside once assigned).
+`compute_wheel_aggregate_exposure` feeds its `total_capital_at_risk`
+(reserved CSP cash, or shares' current market value once held) into the
+exact same `underlying_exposure_pct`/`sector_exposure_pct` functions
+every other strategy's capital-at-risk goes through — no separate,
+looser Wheel-only concentration rule exists anywhere.
+
+**Persistence** (`src/wheel/persistence.py`): `WheelPosition` (which
+already carries its complete nested history — every cycle, every state
+transition, every audit event — in one Pydantic object) round-trips
+through `model_dump_json`/`model_validate_json` as a single row per
+`wheel_id`, the same pattern `src.brokers.base.SqliteIdempotencyStore`
+already uses for `Order`. `WHEEL_DATABASE_SCHEMA_VERSION` is tracked
+independently of `src.validation.session.DATABASE_SCHEMA_VERSION`.
+
+**Stateful backtest** (`src/wheel/backtest_engine.py`): unlike
+`src.backtest.engine.run_backtest` (every position an independent round
+trip — correct for the platform's other 16 strategies), this engine
+drives `src.wheel.lifecycle` through a real day-by-day loop so a CSP
+assignment feeds directly into the covered-call phase within the same
+run, reusing `src.backtest.execution`/`src.backtest.assignment` for all
+actual pricing (no second pricing model). Every quote lookup is piped
+through `assert_no_lookahead_options` exactly like the general engine;
+a missing settlement quote raises `WheelBacktestDataInsufficientError`
+rather than fabricating one.
+
+**LLM review context** (`src/llm/context.WheelReviewContext`,
+`src/wheel/review_context.py`): optional, Python-computed context wired
+into `DevilsAdvocateInputs`/`PortfolioManagerInputs` only when the
+proposal under review is a Wheel leg — the Part 17 (10 named failure
+modes) and Part 18 (CSP-phase/CC-phase question sets) checklists as
+reference data the model must work through, never a schema requirement
+change (`DevilsAdvocateReview.failure_scenarios` already required
+`min_length=3` for every review before this amendment existed).
+
+**Validation reporting** (`src/validation/wheel_attribution.py`):
+cohort-level Wheel metrics (assignment rate, below-basis call rate,
+expectancy, a pseudo-equity-curve max-drawdown figure, tail-loss
+average, capital efficiency) explicitly excludes `win_rate` as a field
+at all, per Part 22's "do not judge Wheel quality solely on win rate."
+
+**Dashboard** (`GET /api/wheels`, `GET /api/wheels/{wheel_id}`): the only
+two new routes, both read-only, both added to the existing route
+allowlist test (`tests/unit/dashboard/test_app_security.py`) that fails
+loudly on any unlisted or execution-shaped route. No POST route exists
+for a Wheel anywhere — opening/closing a Wheel's legs happens exclusively
+through the ordinary Risk-Engine-gated PaperBroker/Fidelity paths above,
+never through the dashboard.
+
+**Security proof**: `tests/acceptance/test_wheel_security.py` — repo-wide
+greps for a live trading client import or a live-shaped order-submission
+method name anywhere in `src/wheel/`, proof no deterministic Wheel module
+imports `src.llm.client`/`src.llm.router`, proof `open_cc`'s
+`UncoveredCallError` check precedes any `CcCycle` construction in source
+order (not just at runtime), proof `WHEEL` never appears in
+`config/brokers.yaml`/`config/risk_limits.yaml`/`src/risk/engine.py`, and
+proof every Wheel Pydantic model rejects an unrecognized field
+(`extra="forbid"`).

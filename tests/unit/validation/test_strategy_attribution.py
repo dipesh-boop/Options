@@ -299,17 +299,17 @@ class TestFunnelCountsByStrategy:
 
 
 class TestMultiStrategyAttributionReport:
-    """The dedicated multi-strategy attribution report: one row per all
-    15 StrategyKind values (Tier1 and Tier2 alike), funnel counts and
-    completed-trade performance combined."""
+    """The dedicated multi-strategy attribution report: one row per
+    every StrategyKind value (Tier1 and Tier2 alike, plus Step 22.2's
+    WHEEL), funnel counts and completed-trade performance combined."""
 
-    def test_covers_all_15_strategies_even_absent_ones(self):
+    def test_covers_all_strategies_even_absent_ones(self):
         from src.strategies.base import StrategyKind
         from src.validation.strategy_attribution import build_multi_strategy_attribution_report
 
         report = build_multi_strategy_attribution_report([], [])
         assert set(report.rows) == {k.value for k in StrategyKind}
-        assert len(report.rows) == 15
+        assert len(report.rows) == len(list(StrategyKind)) == 16
 
     def test_absent_strategy_row_is_zeroed_and_insufficient_sample(self):
         from src.validation.protocol import SampleSizeStatus

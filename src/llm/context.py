@@ -192,6 +192,38 @@ class FidelityPracticalityContext:
     hard_rejected: bool
 
 
+@dataclass(frozen=True)
+class WheelReviewContext:
+    """Step 22.2, Part 17/18: read-only, Python-computed Wheel state
+    handed to `src.llm.devils_advocate`/`src.llm.portfolio_manager` when
+    (and only when) the proposal under review is a leg of a Wheel — for
+    a standalone (non-Wheel) CSP/CC proposal, the caller simply omits
+    this and neither agent sees it. Every field here already exists on
+    `src.wheel.models.WheelPosition`/`src.wheel.accounting
+    .WheelEconomicsSummary`; nothing is computed fresh here. The
+    `wheel_specific_failure_prompts`/`portfolio_manager_questions` lists
+    are the Part 17/18 checklists verbatim, included as reference
+    content the model must actually work through — never a substitute
+    for the model's own independent reasoning, and never itself a
+    numeric or authoritative figure."""
+
+    wheel_id: str
+    ticker: str
+    state: str
+    csp_cycle_count: int
+    cc_cycle_count: int
+    shares_owned: int
+    acquisition_basis_per_share: float | None
+    economic_basis_per_share: float | None
+    capital_committed: float
+    total_net_pnl: float
+    below_acquisition_basis: bool
+    below_economic_basis: bool
+    is_new_wheel_candidate: bool  # True only for the very first CSP of a fresh wheel_id
+    wheel_specific_failure_prompts: tuple[str, ...]
+    portfolio_manager_questions: tuple[str, ...]
+
+
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, (date, datetime)):
         return obj.isoformat()
