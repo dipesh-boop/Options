@@ -1,13 +1,13 @@
 {
-  "manifest_version": "1.1.0",
-  "freeze_name": "PAPER_TRADING_V1.1",
-  "freeze_timestamp": "2026-09-21T20:11:22.988612Z",
-  "git_commit": "a33c7ba7358e31d66463252097ae9a5ea26d0a8f",
+  "manifest_version": "1.2.0",
+  "freeze_name": "PAPER_TRADING_V1.2",
+  "freeze_timestamp": "2026-09-22T15:30:08.313799Z",
+  "git_commit": "dac6055efc9fea74c8ae6e617076266bc446dea6",
   "git_branch": "claude/options-trading-agent-2b4yi8",
-  "repository_state": "clean",
+  "repository_state": "dirty (1 uncommitted change(s))",
   "python_version": "3.11.15 (CPython)",
   "dependency_requirements_hash": "0082639eb60b5a3d1349e6d7e71cc4d1bb32c76cd143ca1e770ad892b5daec11",
-  "strategy_library_version": "72068d1290ad3c4357af05bb18e63a32cd2eb235cb6758df086af11c7fdcd31b",
+  "strategy_library_version": "481376ddbac87cbfad83b0b351b3f12d34a98072b67214835ac4c3bac287bc78",
   "approved_strategies_by_broker": {
     "fidelity": [
       "CASH_SECURED_PUT",
@@ -71,11 +71,11 @@
   },
   "claude_md_hash": "96ef52aa02f7a2a990c48c2bfa704c9d3f3db13f8284d6162419e4a0280451bf",
   "prompt_file_hashes": {
-    "devil_advocate.md": "f9376c2ef23fd96a265c2ee5c1207e963cb073d35509ad0e2f94030ae2f281ab",
+    "devil_advocate.md": "2850a03921ec4f3ca8bf72396119b291853d9004981ce7d93a7a0fc0cbebd2f5",
     "market_regime.md": "907e475b1a27ebc8afc3ac5928d05d9b0e596160b2477b3e6ce1d7c2d383c3c1",
     "opportunity_scanner.md": "357ebb615922687ab25c9a6ca860e564a546bca203f8e64b2190a0e55b192303",
     "performance_auditor.md": "15e77635269675d0d36e52588de8c744615b88bec2abdf1a7deb921df1b2ca87",
-    "portfolio_manager.md": "a6200caff43eb5900e6cb7407e50976f46e2f801243bab9f751e75abeb0b0116",
+    "portfolio_manager.md": "b4a5370d2d14310f4b27fc2f6d8eb0099554d47a8c389be003daa16d6b855651",
     "risk_reviewer.md": "5886195689bfdf9787aa09d398db8dfa43f346a51dccc4218b9f2d1584373bcc",
     "strategy_analyst.md": "88951b684c1bbcab50b0b52db5e6f3565b901b24ce13abb8b07032fbdca7a921",
     "strategy_research.md": "96c7553a719edf3d537ff0565a176fd42854ede15555d6ca787d413927af77c4",
@@ -87,10 +87,12 @@
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
   "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
-  "freeze_version": "1.1",
+  "freeze_version": "1.2",
   "alpaca_provider_module_hash": "2cf7fbd0555847b0a2568b61cdeca1f24b1ea166774eea8c78255c8df0b92eaf",
   "data_provider_at_freeze_time": "mock",
   "required_options_feed_for_validation": "opra",
+  "wheel_module_hash": "a696799a27a06e82483fa62cd201dfa2588f26ae6a2d8fb4ea42d782299cf9eb",
+  "wheel_strategy_kind_trade_proposal_eligible": false,
   "fill_model_assumptions": {
     "fill_model": "liquidity_adjusted",
     "thin_volume_threshold": 50,
@@ -135,5 +137,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "62bef508f4aa99996bd84a5b3b044bab4dca3b49e3f8e65cd7937cd91050f0d9"
+  "manifest_hash": "11a3a5972eef325a60889cf466a66d8bfd1d794fefb99dd21b2600e01b4930ea"
 }

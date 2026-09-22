@@ -3969,3 +3969,193 @@ recorded, no trades were generated, starting NAV was not altered, and
 no scheduling was enabled. Work stops here per this amendment's own
 explicit instruction — Step 23 remains separately authorized, not
 started.
+
+## Step 22.2: Pre-Validation Controlled Amendment — Stateful Wheel Strategy
+
+**What was built.** A new package, `src/wheel/`, implementing the Wheel
+as a persistent, multi-stage position lifecycle — never as a label
+glued onto a standalone cash-secured put and covered call. Every order
+a Wheel places is an ordinary `TradeProposal` with
+`strategy=StrategyType.CASH_SECURED_PUT`/`COVERED_CALL`, submitted to
+the exact same unmodified `src.risk.engine.evaluate_trade_proposal`
+every other strategy in this platform uses. `src.wheel` adds the
+state-machine and cross-cycle accounting layer on top of that unchanged
+pipeline — never a shortcut around it, never a second Risk Engine, never
+a special exemption from portfolio limits.
+
+Modules added:
+- `src/wheel/state.py` — `WheelState` (14 members) + `VALID_TRANSITIONS`
+  + `transition()`, the single choke point every state change goes
+  through.
+- `src/wheel/models.py` — `WheelPosition`, `CspCycle`, `CcCycle`,
+  `WheelAccounting`, `WheelEvent`, `WheelStateTransitionRecord` (all
+  `extra="forbid"`, `frozen=True` Pydantic models, updated only via
+  `.model_copy(update=...)`, matching `src.brokers.base.Order`'s own
+  convention).
+- `src/wheel/accounting.py` — pure functions for cash reservation,
+  premium accounting, acquisition-basis (tax-style) vs. economic-basis
+  (premium-adjusted) computation, called-away realized P&L, and
+  `summarize_wheel_economics`/`WheelEconomicsSummary` (every Part 6/9
+  metric assembled once for the dashboard, Fidelity context, and
+  validation reporting to all read the same numbers).
+- `src/wheel/eligibility.py` — deterministic candidate screening:
+  approved universe, underlying/option liquidity, bid/ask spread, DTE/
+  delta range (delta computed via Black-Scholes when the provider
+  doesn't supply one, never fabricated), earnings proximity (explicit
+  `DATA_UNAVAILABLE` status, never silently treated as "no earnings"),
+  cash sufficiency, and reuse (not reimplementation) of
+  `src.risk.concentration`/`src.risk.correlation`.
+- `src/strategies/base.py`/`src/strategies/wheel.py` — added
+  `StrategyKind.WHEEL` (16th member, family INCOME+DIRECTIONAL_BULLISH,
+  permanently absent from `TRADE_PROPOSAL_ELIGIBLE` since a Wheel is
+  never itself submitted as an order) and
+  `evaluate_wheel_candidate` (reuses the CSP entry's own priced
+  economics for strategy-competition comparison — never a fabricated
+  multi-cycle projection).
+- `src/wheel/lifecycle.py` — one function per state-machine edge:
+  `open_wheel_candidate`, `reject_candidate`, `open_csp`,
+  `csp_expires_worthless`, `csp_bought_to_close`, `csp_assigned`,
+  `mark_cc_eligible`, `no_cc_trade` (Part 7: holding shares without a
+  call is valid, recorded as an audit event, not a state change),
+  `open_cc` (raises `UncoveredCallError` if `shares_owned < 100 *
+  contracts`, defense in depth alongside PaperBroker's own independent
+  check), `cc_expires_worthless`, `cc_bought_to_close`,
+  `shares_called_away`, `complete_wheel`, `halt_wheel`, `exit_wheel`.
+- `src/wheel/paper_events.py` — wires the lifecycle to real
+  `PaperBroker` fills/settlements: opens require an already
+  Risk-Engine-approved `RiskDecisionResult`
+  (`WheelOrderNotApprovedError` otherwise), converted to a
+  `PlaceOrderRequest` via the existing
+  `src.brokers.order_validator.validate_and_build_order_request`;
+  settlement reads `PaperBroker.settle_expiration`'s own
+  `assigned_or_exercised` flag to decide assignment vs. worthless
+  expiration — never a second, independently-guessed outcome.
+- `src/wheel/fidelity_events.py` — opens reuse the unmodified
+  `FidelityManualProvider`/`ApprovedOrder`/`FidelityTradeTicket`
+  machinery as-is; assignment is recorded as a plain reconciliation
+  event (`record_wheel_csp_assignment`/`record_wheel_cc_assignment`),
+  never a fabricated order, per the amendment's explicit Part 20
+  requirement. Discretionary buy-to-close tickets are documented as a
+  pre-existing platform gap (the Risk Engine has no CLOSE/ROLL pipeline
+  capability at all, `src.risk.engine`'s own TS-004 comment) rather
+  than force-fitting fabricated "max profit" economics onto
+  `ApprovedOrder`'s opening-trade-shaped schema.
+- `src/wheel/risk.py` — `stress_test_wheel` at
+  `WHEEL_STRESS_SPOT_SHOCKS = (-0.05, -0.10, -0.20, -0.30, -0.50)` (the
+  exact Part 12 grid, deeper than the platform's general +-5/10/20%
+  grid); `compute_wheel_aggregate_exposure` feeds the same
+  `underlying_exposure_pct`/`sector_exposure_pct` functions every other
+  strategy's capital-at-risk already goes through.
+- `src/wheel/persistence.py` — `WheelStore`/`InMemoryWheelStore`/
+  `SqliteWheelStore`, one JSON row per `wheel_id` (the whole nested
+  history round-trips through `model_dump_json`/`model_validate_json`,
+  same pattern `SqliteIdempotencyStore` already uses for `Order`);
+  `WHEEL_DATABASE_SCHEMA_VERSION` tracked independently.
+- `src/wheel/backtest_engine.py` — a genuinely stateful multi-cycle
+  backtest (unlike `src.backtest.engine.run_backtest`'s independent-
+  round-trip model): drives `src.wheel.lifecycle` through a real
+  day-by-day loop so a CSP assignment feeds directly into the covered-
+  call phase within the same run, reusing `src.backtest.execution`/
+  `src.backtest.assignment` for all pricing. Every quote lookup piped
+  through `assert_no_lookahead_options`; a missing settlement quote
+  raises `WheelBacktestDataInsufficientError` rather than being
+  fabricated.
+- `src/llm/context.py` (`WheelReviewContext`) + `src/wheel
+  /review_context.py` — Part 17's 10 named failure-mode prompts and
+  Part 18's CSP-phase/CC-phase Portfolio Manager question sets, wired as
+  an optional field on `DevilsAdvocateInputs`/`PortfolioManagerInputs`
+  (present only for a Wheel leg, absent for every other proposal).
+  `DevilsAdvocateReview.failure_scenarios` already required
+  `min_length=3` for every review before this amendment — Part 17's
+  "at least three failure modes" was already a structural guarantee, not
+  a new schema requirement.
+- `.claude/agents/devil_advocate.md` / `.claude/agents/portfolio_manager.md`
+  — updated with the Wheel-specific checklists verbatim.
+- `src/validation/wheel_attribution.py` — cohort-level Wheel metrics
+  (assignment rate, below-basis call rate, expectancy, a pseudo-equity-
+  curve max-drawdown figure, tail-loss average, capital efficiency, and
+  pass-through comparison figures against buy-and-hold/standalone-CSP/
+  cash). `win_rate` is deliberately not a field on
+  `WheelCohortAttribution` at all, per Part 22's "do not judge Wheel
+  quality solely on win rate."
+- `src/dashboard/models.py`/`schemas.py`/`app.py` — `DashboardState`
+  gained `wheels`/`current_price_by_ticker`; two new read-only routes,
+  `GET /api/wheels` and `GET /api/wheels/{wheel_id}`, both added to the
+  existing route allowlist test. No POST route exists for a Wheel
+  anywhere. Static frontend (`index.html`/`dashboard.js`/`dashboard.css`)
+  gained a "Wheels" panel, clearly labeled RESEARCH / PAPER.
+
+**Testing.** 199 new tests across `tests/unit/wheel/` (9 files: state,
+accounting, lifecycle, eligibility, risk, persistence — including an
+explicit restart-recovery proof, paper_events (async, real PaperBroker
+fills), backtest_engine, fidelity_events, review_context),
+`tests/unit/validation/test_wheel_attribution.py`,
+`tests/unit/dashboard/test_app_routes.py` (new `TestWheelRoutes` class),
+and `tests/acceptance/test_wheel_security.py` (20 tests: no live
+trading-client import or live-shaped order-submission method anywhere in
+`src/wheel/`, no Fidelity auto-execution, no Alpaca import, no
+deterministic Wheel module imports `src.llm.client`/`src.llm.router`,
+`open_cc`'s `UncoveredCallError` check proven to precede `CcCycle`
+construction in source order, `WHEEL` absent from
+`config/brokers.yaml`/`config/risk_limits.yaml`/`src/risk/engine.py`,
+and every Wheel Pydantic model rejects an unrecognized field).
+
+Adding `StrategyKind.WHEEL` (15 -> 16 members) required updating 3
+pre-existing tests that hardcoded "15" as the total `StrategyKind`
+count (`tests/acceptance/test_strategy_integrity.py`,
+`tests/unit/strategies/test_base.py`,
+`tests/unit/validation/test_strategy_attribution.py`) — each updated to
+assert 16 total members / explicitly confirm `"wheel"` stays absent from
+`TRADE_PROPOSAL_ELIGIBLE`, per CLAUDE.md's "a test asserting a
+now-reversed architectural decision should be updated to assert the new,
+intentional behavior — not deleted and not left failing." No test was
+deleted or weakened.
+
+**Full suite:** `python -m pytest -q tests/` → **2699 passed, 4 skipped,
+0 failed** (207 net new tests, including the freeze-tooling tests added
+below; the 4 skips are the same pre-existing documented false positives
+carried from every prior freeze).
+
+**Non-negotiable invariants re-verified, unchanged:**
+- Live trading: still structurally impossible (`BrokerEnvironment` still
+  exactly `[PAPER]`; no Wheel module imports a live trading client).
+- Fidelity: still `MANUAL_EXECUTION` only; assignment is a
+  reconciliation event, never a fabricated order.
+- Alpaca: still market-data-only (untouched by this amendment).
+- Risk Engine: still sole authority; no Wheel-specific branch exists
+  anywhere in `src/risk/engine.py`.
+- Naked calls: structurally impossible — `open_cc` checks
+  `shares_owned >= 100 * contracts` before constructing any `CcCycle`,
+  and `PaperBroker`'s own independent collateral check refuses an
+  uncovered call regardless.
+- Config-declared capability: `config/brokers.yaml` gained no `WHEEL`
+  entry — a Wheel's orders are ordinary CASH_SECURED_PUT/COVERED_CALL
+  orders, already-declared capabilities.
+
+**Git commit (code amendment):** `dac6055efc9fea74c8ae6e617076266bc446dea6`
+— "Step 22.2: add a stateful Wheel strategy (pre-validation amendment)".
+`VALIDATION_MANIFEST.json`'s own `git_commit` field records exactly
+this SHA (manifest generated immediately after this commit).
+**Manifest hash:** `11a3a5972eef325a60889cf466a66d8bfd1d794fefb99dd21b2600e01b4930ea`.
+`make verify-freeze` reports all 33 checks passing, including the two
+new standing structural checks this amendment adds,
+`wheel_no_live_trading_client` and
+`wheel_never_becomes_its_own_order_type`, alongside the new
+`wheel_module_hash` drift check.
+
+**Git commit (this entry, `STEP_22_2_FREEZE_REPORT.md`, and
+`VALIDATION_MANIFEST.json` together)** and **git tag `paper-trading-v1.2`**
+(applied to that same commit) are recorded by the commit that
+immediately follows this one in `git log` — one commit after the code
+commit above, for the same reason as V1.0/V1.1. Run `git log --oneline
+-1 paper-trading-v1.2` or `git show
+paper-trading-v1.2:STEP_22_2_FREEZE_REPORT.md` to see it directly.
+
+**PAPER_TRADING_V1.2: FROZEN. 90_DAY_VALIDATION: NOT_STARTED.
+LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. ALPACA:
+MARKET_DATA_ONLY. WHEEL: never trade-proposal-eligible, always an
+ordinary CASH_SECURED_PUT/COVERED_CALL order underneath.** No cohort
+was created, no Day 1 snapshot was recorded, no trades were generated,
+starting NAV was not altered, and no scheduling was enabled. Work stops
+here per this amendment's own explicit instruction — Step 23 remains
+separately authorized, not started.

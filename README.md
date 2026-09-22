@@ -386,7 +386,7 @@ effect of installing or running the software.
    Fidelity is still manual-only, and that live trading is still
    disabled. It should print:
    ```
-   PAPER_TRADING_V1.1 / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION
+   PAPER_TRADING_V1.2 / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR VALIDATION INITIALIZATION
    ```
    If it instead reports a failed check, do not proceed — that means
    something in the frozen configuration or code has changed since the
