@@ -18,6 +18,8 @@ import pytest
 from src.validation.cohort import decide_cohort_transition, has_cohort_started, start_new_cohort
 from src.validation.session import InMemoryValidationStore, SqliteValidationStore
 
+from .conftest import repo_controlled_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -30,11 +32,23 @@ class TestNoRealValidationCohortHasEverStarted:
         in this repository, which is the concrete, current-state
         version of "the cohort has not started" (not just a claim
         about a freshly-constructed, necessarily-empty object)."""
+        # Step 22.4B: "the repository" means repository-controlled
+        # files -- a raw `REPO_ROOT.rglob(...)` on a real operator
+        # checkout also descends into `.venv`/`venv` (an installed
+        # third-party package can legitimately ship its own bundled
+        # `.db`/`.sqlite`/`.sqlite3` file, e.g. a test fixture), which
+        # would misreport as validation-cohort data. `repo_controlled_files`
+        # is git's own "tracked, or untracked-but-not-ignored"
+        # definition -- `*.db` is already explicitly gitignored
+        # repo-wide (see `.gitignore`), and `.venv`/`venv` themselves
+        # are gitignored directories, so this still fails loudly the
+        # moment a real `.db`/`.sqlite`/`.sqlite3` file becomes
+        # repository-controlled.
+        controlled = repo_controlled_files(REPO_ROOT)
         matches = [
             str(p.relative_to(REPO_ROOT))
-            for pattern in ("*.db", "*.sqlite", "*.sqlite3")
-            for p in REPO_ROOT.rglob(pattern)
-            if ".git" not in p.parts
+            for p in controlled
+            if p.suffix in (".db", ".sqlite", ".sqlite3")
         ]
         assert matches == [], f"unexpected persisted database file(s) found (would imply cohort data exists): {matches}"
 

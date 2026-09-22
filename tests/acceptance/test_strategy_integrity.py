@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,8 @@ from src.orchestration.pipeline import PipelineStatus, run_order_pipeline
 from src.strategies.base import StrategyKind, TRADE_PROPOSAL_ELIGIBLE
 
 from .conftest import all_strategy_fixtures, base_proposal, full_stages, make_chain, pipeline_request
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestFullLibraryInventory:
@@ -61,11 +64,11 @@ class TestNoStaleEvaluationOnlyLanguage:
         file gives no indication the situation has since changed."""
         result = subprocess.run(
             ["grep", "-rln", "-i", "evaluation.only", "--include=*.py", "src/"],
-            capture_output=True, text=True, cwd="/home/user/Options",
+            capture_output=True, text=True, cwd=REPO_ROOT,
         )
         offending = []
         for path in result.stdout.splitlines():
-            content = open(f"/home/user/Options/{path}").read()
+            content = (REPO_ROOT / path).read_text()
             names_present = any(
                 name in content for name in
                 ("LONG_CALL_BUTTERFLY", "SHORT_IRON_CONDOR", "SHORT_IRON_BUTTERFLY", "long_call_butterfly", "short_iron_condor", "short_iron_butterfly")
@@ -78,7 +81,7 @@ class TestNoStaleEvaluationOnlyLanguage:
     def test_no_source_file_still_claims_tradeproposal_caps_at_2_legs(self):
         result = subprocess.run(
             ["grep", "-rn", "max_length=2", "--include=*.py", "src/llm/schemas.py"],
-            capture_output=True, text=True, cwd="/home/user/Options",
+            capture_output=True, text=True, cwd=REPO_ROOT,
         )
         assert "legs" not in result.stdout, "TradeProposal.legs must not still be capped at 2 -- Step 20A widened it to 4"
 

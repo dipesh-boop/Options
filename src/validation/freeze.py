@@ -59,19 +59,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Step 22.1 (Alpaca market-data amendment), Step 22.2 (stateful Wheel
 # strategy amendment), Step 22.3 (Strategy Lifecycle Management Engine
 # amendment), Step 22.4 (Tradier market data + Portfolio Control Loop
-# amendment), and Step 22.4A (outer orchestrator + dashboard projection
-# acceptance remediation) each bumped the freeze name/version in place
-# without touching the prior versions' own artifacts -- see progress.md
-# and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
-# STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
-# STEP_22_4A_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
+# amendment), Step 22.4A (outer orchestrator + dashboard projection
+# acceptance remediation), and Step 22.4B (test-portability/fixture
+# remediation only -- no production behavior changed) each bumped the
+# freeze name/version in place without touching the prior versions' own
+# artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
+# STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
+# STEP_22_4_FREEZE_REPORT.md / STEP_22_4A_FREEZE_REPORT.md /
+# STEP_22_4B_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4 manifests/reports remain recoverable from git history at the
-# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
-# `paper-trading-v1.3` / `paper-trading-v1.4` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.1"
+# V1.4/V1.4.1 manifests/reports remain recoverable from git history at
+# the `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2`
+# / `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1`
+# tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.2"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.1"
+MANIFEST_VERSION = "1.4.2"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -425,7 +428,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.1",
+        freeze_version="1.4.2",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,

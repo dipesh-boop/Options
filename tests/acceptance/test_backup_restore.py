@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _run(*args: str, cwd: Path, input_text: str | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(args, cwd=cwd, input=input_text, capture_output=True, text=True, env=env)
+
+
+def _write_minimal_sqlite_db(path: Path, content: str) -> None:
+    """Creates a genuinely valid, minimal SQLite database at `path` via
+    the stdlib `sqlite3` module -- Step 22.4B: `backup.sh` correctly
+    uses the real `sqlite3` CLI's own `.backup` command when it's
+    installed (the common case on a real operator machine, e.g. macOS),
+    which opens and validates the *actual* SQLite file structure, not
+    just a "SQLite format 3" magic-string prefix. A fixture that writes
+    that magic string followed by arbitrary bytes is correctly rejected
+    by `.backup` as "file is not a database" -- that was always a test
+    fixture defect, never something `backup.sh`'s own integrity
+    validation should be weakened to accept."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE validation_marker (id INTEGER PRIMARY KEY, content TEXT NOT NULL)")
+        conn.execute("INSERT INTO validation_marker (content) VALUES (?)", (content,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -44,7 +65,7 @@ class TestBackupScript:
     def test_backup_creates_a_timestamped_file_containing_the_real_database_bytes(self, sandbox: Path):
         (sandbox / "data").mkdir()
         db_path = sandbox / "data" / "options_agent.db"
-        db_path.write_bytes(b"SQLite format 3\x00" + b"fake-but-nonempty-db-content")
+        _write_minimal_sqlite_db(db_path, "real-database-content")
 
         result = _run("./scripts/backup.sh", cwd=sandbox)
         assert result.returncode == 0, result.stderr
@@ -54,15 +75,28 @@ class TestBackupScript:
         assert backups[0].read_bytes() == db_path.read_bytes()
         assert "Backup written" in result.stdout
 
+        # The backed-up database is itself a valid, openable SQLite
+        # database, and the intended content survived the backup.
+        conn = sqlite3.connect(str(backups[0]))
+        try:
+            row = conn.execute("SELECT content FROM validation_marker").fetchone()
+        finally:
+            conn.close()
+        assert row == ("real-database-content",)
+
     def test_two_backups_a_second_apart_get_distinct_timestamped_filenames(self, sandbox: Path):
         import time
 
         (sandbox / "data").mkdir()
-        (sandbox / "data" / "options_agent.db").write_bytes(b"v1")
-        _run("./scripts/backup.sh", cwd=sandbox)
+        db_path = sandbox / "data" / "options_agent.db"
+        _write_minimal_sqlite_db(db_path, "v1")
+        result1 = _run("./scripts/backup.sh", cwd=sandbox)
+        assert result1.returncode == 0, result1.stderr
         time.sleep(1.1)
-        (sandbox / "data" / "options_agent.db").write_bytes(b"v2")
-        _run("./scripts/backup.sh", cwd=sandbox)
+        db_path.unlink()
+        _write_minimal_sqlite_db(db_path, "v2")
+        result2 = _run("./scripts/backup.sh", cwd=sandbox)
+        assert result2.returncode == 0, result2.stderr
 
         backups = sorted((sandbox / "backups").glob("options_agent_*.db"))
         assert len(backups) == 2

@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from .conftest import repo_controlled_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
@@ -105,7 +107,14 @@ class TestNoTradierOrderCapabilityAnywhere:
         # and `freeze.py` for.
         freeze_test_module = (REPO_ROOT / "tests" / "unit" / "validation" / "test_freeze.py").resolve()
         offending = []
-        for path in REPO_ROOT.rglob("*.py"):
+        # Step 22.4B: "the repository" means repository-controlled code
+        # (see `repo_controlled_files`'s own docstring) -- never a local
+        # `.venv`/`venv` or other gitignored/generated directory that a
+        # raw filesystem walk would otherwise descend into on a real
+        # operator checkout.
+        for path in repo_controlled_files(REPO_ROOT):
+            if path.suffix != ".py":
+                continue
             if "__pycache__" in path.parts or ".git" in path.parts or path.resolve() in (
                 this_file, freeze_module, freeze_test_module,
             ):

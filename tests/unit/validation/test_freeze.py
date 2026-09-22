@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.1"
-        assert manifest.freeze_version == "1.4.1"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.2"
+        assert manifest.freeze_version == "1.4.2"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64

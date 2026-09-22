@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from .conftest import repo_controlled_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
@@ -50,10 +52,21 @@ class TestNoAlpacaTradingClientImportAnywhere:
         assert offending == [], f"alpaca.trading imported in: {offending}"
 
     def test_no_alpaca_trading_import_anywhere_in_the_repository(self):
+        # Step 22.4B: "the repository" means repository-controlled
+        # source/test/script/config code -- never the local virtualenv
+        # (`.venv`/`venv`) or other gitignored, generated, or
+        # dependency directories. A raw filesystem walk over a real
+        # operator checkout also descends into `.venv/lib/.../alpaca/`,
+        # the installed `alpaca-py` PACKAGE's own internal source --
+        # which of course imports `alpaca.trading` itself -- and would
+        # misreport that as a repository violation. `repo_controlled_files`
+        # is git's own authoritative "tracked, or untracked-but-not-
+        # ignored" definition, so this still fails loudly the moment a
+        # real repository-controlled file imports `alpaca.trading`.
         pattern = re.compile(r"^\s*(from|import)\s+alpaca\.trading\b", re.MULTILINE)
         offending = []
-        for path in REPO_ROOT.rglob("*.py"):
-            if "__pycache__" in path.parts or ".git" in path.parts:
+        for path in repo_controlled_files(REPO_ROOT):
+            if path.suffix != ".py":
                 continue
             text = path.read_text(errors="ignore")
             if pattern.search(text):

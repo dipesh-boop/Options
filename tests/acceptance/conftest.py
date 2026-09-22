@@ -14,8 +14,10 @@ datasets, no live markets" requirement.
 """
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.data.option_chain import OptionChain, OptionContract
@@ -406,3 +408,28 @@ def all_strategy_fixtures() -> dict[StrategyType, StrategyFixture]:
         plain,
     )
     return fixtures
+
+
+# Step 22.4B: the shared "what counts as repository-controlled" helper
+# every repo-wide security/portability scan in tests/acceptance/ should
+# use instead of a bare `REPO_ROOT.rglob(...)`. A raw rglob walks the
+# actual filesystem, so on a real operator checkout it also descends
+# into `.venv/`/`venv/` (installed third-party packages -- e.g. the
+# `alpaca-py` dependency itself imports `alpaca.trading` internally,
+# which a naive scan would misreport as a repository-source violation)
+# and matches the operator's own gitignored `.env`. `git ls-files
+# --cached --others --exclude-standard` is git's own authoritative
+# definition of "tracked, or untracked-but-not-ignored" -- exactly
+# "could end up committed" -- so a file only ever gets excluded here
+# because git itself, via `.gitignore`, says it's not repository-
+# controlled, never because this helper guessed a directory name. A
+# credential file that ever became tracked (staged/committed) would
+# immediately reappear in this list and correctly fail the check that
+# uses it -- this is a stronger guarantee than a hand-maintained
+# exclusion list of directory names, not a weaker one.
+def repo_controlled_files(root: Path) -> list[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        capture_output=True, check=True,
+    )
+    return [root / rel for rel in result.stdout.decode("utf-8", errors="ignore").split("\0") if rel]

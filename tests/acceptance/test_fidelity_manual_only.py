@@ -17,9 +17,12 @@ anywhere may turn `MANUAL_EXECUTION` into something automatic.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from .conftest import repo_controlled_files
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -76,13 +79,40 @@ class TestFS001NoFidelityCredentialsCookiesOrBrowserAutomationRepoWide:
         assert any(w in text[max(0, text.index(line) - 200):text.index(line) + 50].lower() for w in ("never", "no code", "no ", "not "))
 
     def test_no_env_credential_or_secret_files_exist(self):
+        # Step 22.4B: "the repository" means repository-controlled
+        # files -- a raw `REPO_ROOT.rglob(...)` also finds the
+        # operator's own local `.env` (required for normal Tradier/
+        # Alpaca configuration, and correctly `.gitignore`d -- see
+        # `.gitignore`'s own `.env` line), which is a false positive,
+        # not a real credential leak. `repo_controlled_files` is git's
+        # own "tracked, or untracked-but-not-ignored" definition, so a
+        # properly gitignored local `.env` is legitimately excluded
+        # here while a `.env` that ever became TRACKED (staged/
+        # committed -- the actual invariant this test protects) would
+        # immediately reappear and correctly fail this assertion.
         matches = []
+        controlled = repo_controlled_files(REPO_ROOT)
         for pattern in ("*.env*", "*credential*", "*secret*"):
-            matches.extend(p for p in REPO_ROOT.rglob(pattern) if ".git" not in p.parts)
+            matches.extend(p for p in controlled if p.match(pattern))
         # .env.example (a documented template with no real values) is
         # the one expected, legitimate match.
         unexpected = [str(p.relative_to(REPO_ROOT)) for p in matches if p.name != ".env.example"]
-        assert unexpected == [], f"unexpected credential/secret-shaped file(s): {unexpected}"
+        assert unexpected == [], f"unexpected repository-controlled credential/secret-shaped file(s): {unexpected}"
+
+    def test_a_local_env_file_if_present_is_genuinely_gitignored_not_merely_untracked(self):
+        """Belt-and-suspenders on the exclusion above: a local `.env`
+        being *absent from* `repo_controlled_files` could in principle
+        mean either "properly gitignored" (fine) or "untracked but not
+        yet `git add`ed" (one `git add .` away from becoming a real
+        leak). This directly proves it's the former whenever a local
+        `.env` actually exists on disk."""
+        env_path = REPO_ROOT / ".env"
+        if not env_path.is_file():
+            pytest.skip("no local .env present in this checkout")
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", ".env"], capture_output=True,
+        )
+        assert result.returncode == 0, ".env exists on disk but git does not consider it ignored -- it must never become trackable"
 
 
 class TestFS002FidelityProviderNeverSubmitsAnOrder:
