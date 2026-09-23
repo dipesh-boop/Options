@@ -8,12 +8,12 @@ establishes for Alpaca.
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from src.data.option_chain import OptionRight
-from src.data.provider import ProviderError
+from src.data.provider import FreshnessStatus, ProviderError, StaleDataError
 from src.data.rate_limiter import RateLimitPriority
 from src.data.tradier_provider import (
     SOURCE_TRADIER,
@@ -28,6 +28,7 @@ from src.data.tradier_provider import (
     _parse_option_json,
     _parse_quote_json,
     _redact,
+    _select_quote_timestamp,
     classify_tradier_error,
 )
 
@@ -161,6 +162,82 @@ class TestEpochMsToDatetime:
         assert dt is not None and dt.tzinfo is not None
 
 
+# Step 22.7 (PAPER_TRADING_V1.4.6): the exact live raw values that
+# surfaced this defect during local acceptance -- trade_date is a
+# stale midnight print, bid_date/ask_date are the actual, current
+# quote from ~11:10 that morning.
+_LIVE_TRADE_DATE = 1_790_121_600_002  # 2026-09-23T00:00:00.002Z -- stale last trade
+_LIVE_BID_DATE = 1_790_161_815_000  # 2026-09-23T11:10:15Z -- current bid
+_LIVE_ASK_DATE = 1_790_161_813_000  # 2026-09-23T11:10:13Z -- current ask, 2s behind bid
+
+
+class TestSelectQuoteTimestamp:
+    """Step 22.7: `_select_quote_timestamp` is the fix itself -- a
+    stale `trade_date` must never override a newer, actionable bid/ask
+    timestamp."""
+
+    def test_A_trade_date_older_than_bid_ask_is_overridden(self):
+        # This is exactly the live defect: naive trade_date-first
+        # selection would have returned the stale midnight timestamp
+        # instead of the current ~11:10 quote.
+        result = _select_quote_timestamp(
+            bid_date=_LIVE_BID_DATE, ask_date=_LIVE_ASK_DATE, trade_date=_LIVE_TRADE_DATE,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+        assert result != _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+        assert result > _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+
+    def test_B_both_bid_and_ask_present_picks_the_fresher_of_the_two(self):
+        # bid_date is 2s newer than ask_date in the live example above.
+        result = _select_quote_timestamp(
+            bid_date=_LIVE_BID_DATE, ask_date=_LIVE_ASK_DATE, trade_date=None,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+
+        # Deterministic the other way too -- ask newer than bid.
+        result2 = _select_quote_timestamp(
+            bid_date=_LIVE_ASK_DATE, ask_date=_LIVE_BID_DATE, trade_date=None,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result2 == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+
+    def test_C_only_bid_date_present(self):
+        result = _select_quote_timestamp(
+            bid_date=_LIVE_BID_DATE, ask_date=None, trade_date=_LIVE_TRADE_DATE,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+
+    def test_D_only_ask_date_present(self):
+        result = _select_quote_timestamp(
+            bid_date=None, ask_date=_LIVE_ASK_DATE, trade_date=_LIVE_TRADE_DATE,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result == _epoch_ms_to_datetime(_LIVE_ASK_DATE)
+
+    def test_E_no_bid_or_ask_falls_back_to_trade_date(self):
+        result = _select_quote_timestamp(
+            bid_date=None, ask_date=None, trade_date=_LIVE_TRADE_DATE,
+            now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc),
+        )
+        assert result == _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+
+    def test_F_no_provider_timestamps_at_all_falls_back_to_now(self):
+        now = datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc)
+        result = _select_quote_timestamp(bid_date=None, ask_date=None, trade_date=None, now=now)
+        assert result == now
+
+    def test_zero_and_unparseable_values_are_treated_as_missing(self):
+        # 0/negative/garbage epoch-ms all map to None via _epoch_ms_to_datetime
+        # -- confirms the selection helper falls through correctly rather
+        # than treating a sentinel "0" as a real timestamp.
+        now = datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc)
+        result = _select_quote_timestamp(bid_date=0, ask_date="garbage", trade_date=-5, now=now)
+        assert result == now
+
+
 class TestParseQuoteJson:
     def test_maps_valid_quote(self):
         now = date(2026, 9, 22)
@@ -178,6 +255,76 @@ class TestParseQuoteJson:
     def test_all_zero_prices_returns_none_never_fabricated(self):
         from datetime import datetime, timezone
         assert _parse_quote_json({"symbol": "SPY", "bid": 0, "ask": 0, "last": 0}, now=datetime.now(timezone.utc)) is None
+
+    def test_stale_trade_date_does_not_override_fresh_bid_ask(self):
+        """Step 22.7 regression -- the exact live defect: a quote whose
+        trade_date is a stale midnight print but whose bid/ask are the
+        current ~11:10 NBBO must carry the CURRENT bid/ask timestamp as
+        its canonical `.timestamp`, never the stale trade_date."""
+        raw = {
+            "symbol": "SPY", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000,
+            "trade_date": _LIVE_TRADE_DATE, "bid_date": _LIVE_BID_DATE, "ask_date": _LIVE_ASK_DATE,
+        }
+        q = _parse_quote_json(raw, now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc))
+        assert q is not None
+        assert q.timestamp == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+        assert q.timestamp != _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+
+    def test_H_stale_bid_ask_still_fails_freshness(self):
+        """The fix must never make genuinely stale data pass -- a quote
+        whose bid/ask timestamps are themselves outside max_age is
+        still correctly STALE, fix or no fix."""
+        as_of = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+        stale_bid_ms = int((as_of - timedelta(minutes=30)).timestamp() * 1000)
+        raw = {
+            "symbol": "SPY", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000,
+            "trade_date": stale_bid_ms, "bid_date": stale_bid_ms, "ask_date": stale_bid_ms,
+        }
+        q = _parse_quote_json(raw, now=as_of)
+        assert q is not None
+        assert q.freshness_status(as_of) == FreshnessStatus.STALE
+        with pytest.raises(StaleDataError):
+            q.require_fresh(as_of)
+
+    def test_I_fresh_bid_ask_passes_freshness_even_with_a_very_old_last_trade(self):
+        """The actual regression this whole step exists to fix: a
+        current, actionable quote must not be rejected as stale purely
+        because the underlying hasn't printed a trade recently."""
+        as_of = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+        fresh_bid_ms = int((as_of - timedelta(minutes=1)).timestamp() * 1000)
+        fresh_ask_ms = int((as_of - timedelta(minutes=1)).timestamp() * 1000)
+        ancient_trade_ms = int((as_of - timedelta(days=3)).timestamp() * 1000)
+        raw = {
+            "symbol": "SPY", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000,
+            "trade_date": ancient_trade_ms, "bid_date": fresh_bid_ms, "ask_date": fresh_ask_ms,
+        }
+        q = _parse_quote_json(raw, now=as_of)
+        assert q is not None
+        assert q.freshness_status(as_of) == FreshnessStatus.FRESH
+        assert q.require_fresh(as_of) is q
+
+    def test_J_a_wildly_future_bid_date_is_not_treated_as_fresh(self):
+        as_of = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+        future_ms = int((as_of + timedelta(hours=2)).timestamp() * 1000)
+        raw = {
+            "symbol": "SPY", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000,
+            "bid_date": future_ms, "ask_date": future_ms,
+        }
+        q = _parse_quote_json(raw, now=as_of)
+        assert q is not None
+        assert q.freshness_status(as_of) == FreshnessStatus.STALE
+
+    def test_K_existing_field_mapping_unaffected_by_the_timestamp_fix(self):
+        raw = {
+            "symbol": "spy", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000,
+            "trade_date": _LIVE_TRADE_DATE, "bid_date": _LIVE_BID_DATE, "ask_date": _LIVE_ASK_DATE,
+        }
+        q = _parse_quote_json(raw, now=datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc))
+        assert q is not None
+        assert q.symbol == "SPY"
+        assert q.bid == 454.5 and q.ask == 455.5 and q.last == 455.0
+        assert q.volume == 1000
+        assert q.source == SOURCE_TRADIER
 
 
 class TestParseOptionJson:
@@ -237,6 +384,53 @@ class TestParseOptionJson:
         c = _parse_option_json(raw, underlying_price=455.0, now=self._now())
         assert c.bid_size == 10 and c.ask_size == 20
         assert c.bid_timestamp is not None and c.ask_timestamp is not None
+
+    def test_G_canonical_timestamp_prefers_fresh_bid_ask_over_stale_trade_date(self):
+        """Step 22.7 regression, option-contract side. The canonical
+        `.timestamp` must reflect the current bid/ask, never the stale
+        trade_date -- while `bid_timestamp`/`ask_timestamp`/
+        `trade_timestamp` keep carrying each raw provider value
+        unchanged (Requirement 2: 'Keep these fields intact')."""
+        raw = {**self.BASE, "trade_date": _LIVE_TRADE_DATE, "bid_date": _LIVE_BID_DATE, "ask_date": _LIVE_ASK_DATE}
+        now = datetime(2026, 9, 23, 11, 10, 16, tzinfo=timezone.utc)
+        c = _parse_option_json(raw, underlying_price=455.0, now=now)
+        assert c is not None
+        # Canonical timestamp: the fresher of bid/ask, never trade_date.
+        assert c.timestamp == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+        assert c.timestamp != _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+        # Per-side fields preserved exactly as reported -- untouched by this fix.
+        assert c.bid_timestamp == _epoch_ms_to_datetime(_LIVE_BID_DATE)
+        assert c.ask_timestamp == _epoch_ms_to_datetime(_LIVE_ASK_DATE)
+        assert c.trade_timestamp == _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+
+    def test_H_stale_bid_ask_option_contract_still_fails_freshness(self):
+        as_of = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+        stale_ms = int((as_of - timedelta(minutes=30)).timestamp() * 1000)
+        raw = {**self.BASE, "trade_date": stale_ms, "bid_date": stale_ms, "ask_date": stale_ms}
+        c = _parse_option_json(raw, underlying_price=455.0, now=as_of)
+        assert c is not None
+        assert c.freshness_status(as_of) == FreshnessStatus.STALE
+
+    def test_I_fresh_bid_ask_option_contract_passes_despite_ancient_last_trade(self):
+        as_of = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
+        fresh_ms = int((as_of - timedelta(minutes=1)).timestamp() * 1000)
+        ancient_ms = int((as_of - timedelta(days=10)).timestamp() * 1000)
+        raw = {**self.BASE, "trade_date": ancient_ms, "bid_date": fresh_ms, "ask_date": fresh_ms}
+        c = _parse_option_json(raw, underlying_price=455.0, now=as_of)
+        assert c is not None
+        assert c.freshness_status(as_of) == FreshnessStatus.FRESH
+
+    def test_E_no_bid_ask_dates_falls_back_to_trade_date_for_option_contract(self):
+        raw = {**self.BASE, "trade_date": _LIVE_TRADE_DATE}
+        c = _parse_option_json(raw, underlying_price=455.0, now=self._now())
+        assert c is not None
+        assert c.timestamp == _epoch_ms_to_datetime(_LIVE_TRADE_DATE)
+
+    def test_F_no_provider_timestamps_falls_back_to_now_for_option_contract(self):
+        now = self._now()
+        c = _parse_option_json(dict(self.BASE), underlying_price=455.0, now=now)
+        assert c is not None
+        assert c.timestamp == now
 
 
 class TestParseExpirationsJson:

@@ -79,6 +79,40 @@ class TestFreshnessStatus:
         assert obj.freshness_status(NOW + timedelta(minutes=2), max_age=timedelta(minutes=1)) == FreshnessStatus.STALE
 
 
+class TestFutureTimestampDefensiveRule:
+    """Step 22.7 (PAPER_TRADING_V1.4.6): a provider timestamp materially
+    ahead of `as_of` must never be classified FRESH just because the
+    naive `age = as_of - timestamp` computation goes negative."""
+
+    def test_tiny_clock_skew_within_tolerance_is_still_fresh(self):
+        # A few seconds of ordinary clock skew must not spuriously fail
+        # otherwise-fresh data.
+        obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")
+        assert obj.freshness_status(NOW - timedelta(seconds=5)) == FreshnessStatus.FRESH
+
+    def test_exactly_at_the_skew_tolerance_boundary_is_still_fresh(self):
+        obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")
+        assert obj.freshness_status(NOW - timedelta(minutes=1)) == FreshnessStatus.FRESH
+
+    def test_materially_future_timestamp_is_stale_not_fresh(self):
+        # Without the defensive rule, age = as_of - timestamp = -1 hour,
+        # and -1h > 15m is False, so this would incorrectly read FRESH.
+        obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")
+        assert obj.freshness_status(NOW - timedelta(hours=1)) == FreshnessStatus.STALE
+
+    def test_materially_future_timestamp_fails_require_fresh(self):
+        obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")
+        with pytest.raises(StaleDataError, match="ahead of"):
+            obj.require_fresh(NOW - timedelta(hours=1))
+
+    def test_a_future_timestamp_does_not_bypass_require_fresh_via_a_huge_max_age(self):
+        # Confirms the guard is independent of max_age -- widening
+        # max_age must never rescue a future-dated timestamp.
+        obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")
+        with pytest.raises(StaleDataError):
+            obj.require_fresh(NOW - timedelta(hours=1), max_age=timedelta(days=365))
+
+
 class TestRequireFresh:
     def test_fresh_data_returns_self(self):
         obj = _SampleTimestamped(value=1, timestamp=NOW, source="mock")

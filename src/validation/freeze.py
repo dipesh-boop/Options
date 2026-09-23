@@ -66,29 +66,41 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # changed), Step 22.5 (PAPER_TRADING_V1.4.4: the Review-Only
 # operational runtime -- production module hashes for src/brokers/,
 # src/portfolio/, and the new src/review/ package legitimately changed
-# that step), and Step 22.6 (PAPER_TRADING_V1.4.5: operator CLI/
+# that step), Step 22.6 (PAPER_TRADING_V1.4.5: operator CLI/
 # preflight safety remediation ONLY -- scripts/run_validation_cycle.py
 # gained real CLI argument parsing (--help/--preflight never mutate
 # validation state) and a Tradier-production-provider preflight check
 # before any mutation; src/data/factory.py gained the policy function
 # that check calls. Does NOT modify frozen strategy, Quant,
 # deterministic Risk, lifecycle policy, or trade-selection behavior --
-# see STEP_22_6_FREEZE_REPORT.md) each bumped the freeze name/version in
+# see STEP_22_6_FREEZE_REPORT.md), and Step 22.7 (PAPER_TRADING_V1.4.6:
+# Tradier market-data timestamp semantics / freshness safety hotfix
+# ONLY -- src/data/tradier_provider.py's canonical timestamp selection
+# now prefers the freshest valid bid/ask quote timestamp over a
+# possibly-stale last-trade timestamp, and src/data/provider.py's
+# shared TimestampedModel gained a defensive rule so a provider
+# timestamp materially in the future can never read as FRESH. Does NOT
+# modify frozen strategy, Quant, deterministic Risk, lifecycle policy,
+# or trade-selection behavior, and does NOT loosen
+# DEFAULT_MAX_QUOTE_AGE or any other freshness threshold -- see
+# STEP_22_7_FREEZE_REPORT.md) each bumped the freeze name/version in
 # place without touching the prior versions' own artifacts -- see
 # progress.md and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
 # STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
 # STEP_22_4A_FREEZE_REPORT.md / STEP_22_4B_FREEZE_REPORT.md /
 # STEP_22_4C_FREEZE_REPORT.md / STEP_22_5_FREEZE_REPORT.md /
-# STEP_22_6_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
+# STEP_22_6_FREEZE_REPORT.md / STEP_22_7_FREEZE_REPORT.md.
+# FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4 manifests/reports remain recoverable
-# from git history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
-# `paper-trading-v1.2` / `paper-trading-v1.3` / `paper-trading-v1.4` /
-# `paper-trading-v1.4.1` / `paper-trading-v1.4.2` / `paper-trading-v1.4.3`
-# / `paper-trading-v1.4.4` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.5"
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5 manifests/reports remain
+# recoverable from git history at the `paper-trading-v1.0` /
+# `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
+# `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
+# / `paper-trading-v1.4.3` / `paper-trading-v1.4.4` / `paper-trading-v1.4.5`
+# tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.6"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.5"
+MANIFEST_VERSION = "1.4.6"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -185,6 +197,15 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # widened the approved provider set, dropped the token check, or
     # accepted Tradier's sandbox host) is caught as material drift.
     "factory_module": REPO_ROOT / "src" / "data" / "factory.py",
+    # Step 22.7: `TimestampedModel` -- the shared canonical freshness
+    # primitive (`age`/`freshness_status`/`require_fresh`) every
+    # `UnderlyingQuote`/`OptionContract`/`OptionChain` inherits, and the
+    # one place the future-timestamp defensive rule lives. Hashing this
+    # file means any future change (including one that quietly widened
+    # `DEFAULT_MAX_QUOTE_AGE`, removed the future-timestamp guard, or
+    # let `age > max_age` be bypassed) is caught as material drift --
+    # not previously hashed anywhere, so newly added here.
+    "data_provider_module": REPO_ROOT / "src" / "data" / "provider.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -294,6 +315,16 @@ class FreezeManifest(BaseModel):
     factory_module_hash: str
     help_cannot_execute_validation: bool  # must always be True -- scripts/run_validation_cycle.py parses CLI args (argparse) before any mutating call
     official_cycle_requires_tradier_preflight: bool  # must always be True -- the mutating cycle calls verify_official_provider_is_tradier_production before its first mutation
+
+    # Step 22.7 (PAPER_TRADING_V1.4.6): Tradier market-data timestamp
+    # semantics / freshness safety hotfix only -- does not modify
+    # frozen strategy, Quant, deterministic Risk, lifecycle policy, or
+    # trade-selection behavior. `data_provider_module_hash` is a
+    # previously-uncovered file (`src/data/provider.py`, the shared
+    # `TimestampedModel` freshness primitive every canonical quote/
+    # contract/chain in this codebase inherits) newly hashed because
+    # this step is the first to change it.
+    data_provider_module_hash: str
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -483,7 +514,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.5",
+        freeze_version="1.4.6",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -510,6 +541,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         factory_module_hash=compute_file_hash(_CODE_MODULE_FILES["factory_module"]),
         help_cannot_execute_validation=_verify_help_cannot_execute_validation(),
         official_cycle_requires_tradier_preflight=_verify_official_cycle_requires_tradier_preflight(),
+        data_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["data_provider_module"]),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -641,6 +673,7 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("run_validation_cycle_script_hash", _CODE_MODULE_FILES["run_validation_cycle_script"], False),
         ("confirm_candidate_script_hash", _CODE_MODULE_FILES["confirm_candidate_script"], False),
         ("factory_module_hash", _CODE_MODULE_FILES["factory_module"], False),
+        ("data_provider_module_hash", _CODE_MODULE_FILES["data_provider_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)

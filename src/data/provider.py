@@ -33,6 +33,24 @@ if TYPE_CHECKING:
 # config value when that phase lands — flagged, not silently unified.
 DEFAULT_MAX_QUOTE_AGE = timedelta(minutes=15)
 
+# Step 22.7 (PAPER_TRADING_V1.4.6): a provider timestamp materially
+# AHEAD of `as_of` means clock skew or malformed/corrupted provider
+# data, never genuinely fresher data than could possibly have been
+# captured. Left unguarded, `age = as_of - timestamp` goes negative and
+# `age > max_age` never fires, so a corrupted future timestamp would
+# sail through `freshness_status`/`require_fresh` as FRESH regardless
+# of `max_age` -- this is the general "future timestamp" gap in the
+# canonical freshness primitive itself (distinct from, and upstream of,
+# `src.llm.schemas.TradeProposal`'s and `src.brokers.fidelity`'s own
+# separate `data_timestamp > timestamp` checks, both of which already
+# fail closed on this and are untouched here). This tolerance absorbs
+# ordinary clock skew between this process and a provider's server
+# without loosening `max_age` itself -- it only ever makes an existing
+# freshness check *harder* to pass, never easier, and is far smaller
+# than `DEFAULT_MAX_QUOTE_AGE` so it cannot become a de facto freshness
+# window of its own.
+_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=1)
+
 # Well-known source identifiers concrete providers should use for
 # consistency. `source` is a plain string field, not a closed enum,
 # because the historical-data vendor and any future data providers are
@@ -91,7 +109,13 @@ class TimestampedModel(StrictModel):
         return as_of - self.timestamp
 
     def freshness_status(self, as_of: datetime, max_age: timedelta = DEFAULT_MAX_QUOTE_AGE) -> FreshnessStatus:
-        return FreshnessStatus.STALE if self.age(as_of) > max_age else FreshnessStatus.FRESH
+        age = self.age(as_of)
+        if age < -_MAX_FUTURE_CLOCK_SKEW:
+            # A timestamp materially in the future is never FRESH, no
+            # matter how negative `age` computes to -- see
+            # `_MAX_FUTURE_CLOCK_SKEW`'s own comment.
+            return FreshnessStatus.STALE
+        return FreshnessStatus.STALE if age > max_age else FreshnessStatus.FRESH
 
     def require_fresh(self, as_of: datetime, max_age: timedelta = DEFAULT_MAX_QUOTE_AGE):
         """Returns self if fresh; raises StaleDataError otherwise. This
@@ -99,6 +123,12 @@ class TimestampedModel(StrictModel):
         data (screen it, price it, propose a trade from it) must pass
         through."""
         age = self.age(as_of)
+        if age < -_MAX_FUTURE_CLOCK_SKEW:
+            raise StaleDataError(
+                f"{type(self).__name__} from {self.source!r} timestamped {self.timestamp.isoformat()} "
+                f"is {-age} ahead of as_of={as_of.isoformat()}, exceeding the {_MAX_FUTURE_CLOCK_SKEW} "
+                "clock-skew tolerance -- treated as an invalid/untrustworthy timestamp, never as fresh"
+            )
         if age > max_age:
             raise StaleDataError(
                 f"{type(self).__name__} from {self.source!r} timestamped {self.timestamp.isoformat()} "

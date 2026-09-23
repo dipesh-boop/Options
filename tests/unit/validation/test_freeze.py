@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.5"
-        assert manifest.freeze_version == "1.4.5"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.6"
+        assert manifest.freeze_version == "1.4.6"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -51,6 +51,8 @@ class TestBuildFreezeManifest:
         assert len(manifest.factory_module_hash) == 64
         assert manifest.help_cannot_execute_validation is True
         assert manifest.official_cycle_requires_tradier_preflight is True
+        # Step 22.7 (PAPER_TRADING_V1.4.6)
+        assert len(manifest.data_provider_module_hash) == 64
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -331,6 +333,20 @@ class TestVerifyFreezeDetectsDrift:
             assert any(c.name == "factory_module_hash" and not c.passed for c in result.checks)
         finally:
             factory_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_data_provider_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        data_provider_module = Path("src/data/provider.py")
+        original = data_provider_module.read_text(encoding="utf-8")
+        try:
+            data_provider_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "data_provider_module_hash" and not c.passed for c in result.checks)
+        finally:
+            data_provider_module.write_text(original, encoding="utf-8")
 
     def test_a_manifest_falsely_claiming_daily_cycle_never_calls_place_order_is_caught(self, tmp_path):
         manifest = build_freeze_manifest(generated_at=NOW)

@@ -1,4 +1,5 @@
-"""Tradier real-time market-data-only provider (Step 22.4).
+"""Tradier real-time market-data-only provider (Step 22.4; timestamp
+semantics corrected in Step 22.7, PAPER_TRADING_V1.4.6).
 
 **MARKET DATA ONLY — never execution.** This module calls exclusively
 Tradier's read-only `/v1/markets/*` GET endpoints (quotes, option
@@ -34,6 +35,23 @@ exception message — `_redact` strips it from any text before it can
 reach either, and `_request`'s own exception paths never interpolate
 raw response text that could still carry the `Authorization` header
 verbatim.
+
+**Canonical timestamp selection (Step 22.7)**: `UnderlyingQuote.timestamp`
+/`OptionContract.timestamp` — the field every freshness check in this
+codebase (`TimestampedModel.freshness_status`/`require_fresh`, the
+Risk Engine, PaperBroker, the data quality gate) actually reads — is
+selected by `_select_quote_timestamp`, never `trade_date` alone.
+Tradier's `trade_date` is the last-*trade* timestamp, which can
+meaningfully lag the current, actionable bid/ask quote (see that
+function's own docstring for the full rule and rationale). This fixed
+a real defect: a stale `trade_date` could make a currently-quoted,
+tradable contract appear STALE (or, before this fix, could even make
+an underlying quote appear fresher than it actually was if `trade_date`
+happened to be newer than a stale `bid_date` — the old code preferred
+`trade_date` unconditionally). `bid_timestamp`/`ask_timestamp`/
+`trade_timestamp` on `OptionContract` are unaffected by this change —
+they continue to carry Tradier's raw per-field timestamps exactly as
+reported, missing means missing, same as before.
 """
 from __future__ import annotations
 
@@ -150,6 +168,68 @@ def _epoch_ms_to_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _select_quote_timestamp(
+    *, bid_date: Any, ask_date: Any, trade_date: Any, now: datetime
+) -> datetime:
+    """Step 22.7 (PAPER_TRADING_V1.4.6): the canonical freshness
+    timestamp for a Tradier-sourced quote/contract.
+
+    **Tradier semantics** (per Tradier's own API documentation for
+    `/markets/quotes` and `/markets/options/chains`): `trade_date` is
+    the timestamp of the security's *last printed trade* — for a
+    thinly-traded name, or simply before the first trade of a session,
+    this can legitimately sit well behind the current wall clock even
+    while the market is open and actively quoting. `bid_date`/
+    `ask_date` are the timestamps of the current NBBO bid/ask
+    themselves, which update continuously as the market quotes,
+    independent of whether a trade has actually printed recently.
+
+    A quote/contract's *actionable* price — the number this platform
+    actually screens, prices, and risk-checks — is its bid/ask, not its
+    last trade. Using `trade_date` as the freshness timestamp therefore
+    risks rejecting a perfectly current, actionable quote as STALE
+    purely because the underlying hasn't traded in the last `max_age`
+    window, even though its bid/ask (what would actually be bought or
+    sold) is quoted right now. The fix: prefer the freshest available
+    quote-side timestamp, falling through only when quote-side data is
+    unavailable at all:
+
+    1. Both `bid_date` and `ask_date` valid -> `max(bid_date, ask_date)`
+       — the more recent of the two actionable-quote timestamps (a
+       one-sided quote can update without the other side moving).
+    2. Only one of `bid_date`/`ask_date` valid -> that one.
+    3. Neither quote-side timestamp valid, but `trade_date` valid ->
+       `trade_date` — a real, provider-reported timestamp is still
+       strictly better than none, even though it may under-represent
+       current quote freshness; this is the same trade-off the
+       pre-existing code already accepted, just demoted to last resort
+       rather than first choice.
+    4. No provider timestamp at all -> `now`, the local capture time of
+       this exact HTTP response. This is safe, not a freshness
+       loophole: `now` reflects the moment THIS specific snapshot was
+       received over the network, during this exact call — it cannot
+       make genuinely stale data look artificially fresh, because there
+       is no stale timestamp being overridden here; there is no
+       provider timestamp at all. This mirrors the identical fallback
+       every other provider adapter in this codebase already uses when
+       its SDK/response carries no timestamp of its own (see
+       `src/data/alpaca_provider.py`'s `getattr(quote, "timestamp",
+       None) or now`).
+    """
+    bid_dt = _epoch_ms_to_datetime(bid_date)
+    ask_dt = _epoch_ms_to_datetime(ask_date)
+    if bid_dt is not None and ask_dt is not None:
+        return max(bid_dt, ask_dt)
+    if bid_dt is not None:
+        return bid_dt
+    if ask_dt is not None:
+        return ask_dt
+    trade_dt = _epoch_ms_to_datetime(trade_date)
+    if trade_dt is not None:
+        return trade_dt
+    return now
+
+
 def _parse_quote_json(raw: dict, *, now: datetime) -> UnderlyingQuote | None:
     """Maps one Tradier `quote` object (from `/markets/quotes`) to the
     canonical `UnderlyingQuote`. Returns `None` — never a fabricated
@@ -163,7 +243,9 @@ def _parse_quote_json(raw: dict, *, now: datetime) -> UnderlyingQuote | None:
     if bid <= 0 and ask <= 0 and last <= 0:
         return None
     volume = int(raw.get("volume") or 0)
-    timestamp = _epoch_ms_to_datetime(raw.get("trade_date")) or _epoch_ms_to_datetime(raw.get("bid_date")) or now
+    timestamp = _select_quote_timestamp(
+        bid_date=raw.get("bid_date"), ask_date=raw.get("ask_date"), trade_date=raw.get("trade_date"), now=now
+    )
     try:
         return UnderlyingQuote(symbol=str(symbol).upper(), bid=bid, ask=ask, last=last, volume=volume, timestamp=timestamp, source=SOURCE_TRADIER)
     except ValueError:
@@ -213,7 +295,9 @@ def _parse_option_json(raw: dict, *, underlying_price: float, now: datetime) -> 
     theta = greeks.get("theta")
     vega = greeks.get("vega")
 
-    timestamp = _epoch_ms_to_datetime(raw.get("trade_date")) or _epoch_ms_to_datetime(raw.get("bid_date")) or now
+    timestamp = _select_quote_timestamp(
+        bid_date=raw.get("bid_date"), ask_date=raw.get("ask_date"), trade_date=raw.get("trade_date"), now=now
+    )
 
     try:
         return OptionContract(
