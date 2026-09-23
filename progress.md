@@ -5089,3 +5089,104 @@ freeze commit SHA, manifest hash, and remote tag verification. No new
 cohort was started, no existing cohort database was overwritten or
 reset, and no path capable of automatically transmitting a real
 securities/options order was created anywhere in this step.
+
+## Step 22.6 (PAPER_TRADING_V1.4.5): Operator CLI / Preflight Safety Remediation
+
+The operator ran `python scripts/run_validation_cycle.py --help`
+against V1.4.4 on their own machine; because `main()` had no CLI
+argument parser at all, `--help` was silently ignored and a real,
+state-mutating official cycle ran instead (2026-09-23). That cycle used
+the `mock` provider (its default), found no usable chains, entered
+degraded mode, generated a provider-outage alert, produced zero
+candidates/trades/fills, left NAV/cash at $100,000/$100,000, and
+recorded the 2026-09-23 daily snapshot — legitimate historical audit
+evidence, left untouched by this step. Two root causes, two fixes,
+strictly operator-CLI/preflight-safety in scope — no change to
+strategy, Quant, deterministic Risk, lifecycle policy, or
+trade-selection behavior anywhere in this step.
+
+**Defect 1 — `--help` mutates state:** `main()` now builds a real
+`argparse.ArgumentParser` (with a new `--preflight` flag) as its first
+statement. `argparse` itself calls `sys.exit(0)` for `-h`/`--help`
+(after printing help) and `sys.exit(2)` for an unrecognized argument,
+both inside `parser.parse_args()` — strictly before any store,
+provider, or `PaperBroker` construction. No-argument invocation is
+unchanged: it still runs the official mutating cycle.
+
+**Defect 2 — the official runner accepted `mock`:** `src/data/factory.py`
+gains `verify_official_provider_is_tradier_production()`, a new
+policy-level gate (distinct from `get_configured_market_data_provider`,
+whose job is "build whatever's configured," not "decide if this
+configuration is acceptable for an official run") that rejects
+`mock`/`alpaca`/`ibkr`/unknown provider names, a missing/empty Tradier
+token, and any non-production Tradier host (including the sandbox
+host) — with an error message that never contains the token itself.
+`run_validation_cycle()` now calls this immediately after the
+cohort-existence check and before constructing any of the four
+mutating Sqlite stores; a rejection prints `FAIL: provider preflight
+-- ...` and returns `False` before any of them exist. A real Tradier
+connectivity failure *after* this point is unchanged — still
+legitimately recorded as a degraded/data-insufficient cycle, per the
+existing architecture.
+
+**`--preflight` mode:** a new, read-only `run_preflight()` loads
+config, verifies the cohort exists, and calls the same provider-policy
+check, printing `PREFLIGHT ONLY -- NO VALIDATION STATE MUTATED` on
+success without ever constructing a mutating store, sweeping a
+candidate TTL, or touching `PaperBroker`. Wired into
+`scripts/run_validation_cycle.sh`/`make validate-preflight`.
+
+**Provider-name/source integrity:** reviewed
+`provider_name = next((c.source for c in chains_by_ticker.values()),
+"unknown")` — it reads `.source` off an actually-returned `OptionChain`
+object, so it can only ever report `"tradier"` if a chain that really
+came from `TradierMarketDataProvider` was returned, and `"unknown"` on
+an empty/failed fetch. Already honest; no change required.
+
+**Tests:** 16 new acceptance tests
+(`tests/acceptance/test_run_validation_cycle_cli.py` — help safety,
+unknown-argument safety, mock-provider rejection, Tradier-production
+acceptance, `--preflight` mode, each proving zero cycle
+record/snapshot/candidate-expiry/reviewed-candidate/account-state-
+change/PaperBroker-order on the rejected paths), 13 new unit tests
+(`tests/unit/data/test_factory.py`, for
+`verify_official_provider_is_tradier_production` directly), and 8 new
+freeze/drift tests (`tests/unit/validation/test_freeze.py`, for the
+three new manifest fields and their tamper-detection). The existing
+`tests/acceptance/test_review_only_daily_cycle.py` fixture now sets
+`OPTIONS_AGENT_DATA_PROVIDER=tradier` +
+`OPTIONS_AGENT_TRADIER_TOKEN=fake-token-for-tests-only` so its
+pre-existing (monkeypatched, offline) scenario keeps passing under the
+new preflight gate — full repository suite: **3439 passed, 6 skipped,
+0 failed** (net new: 37 tests over V1.4.4's 3402).
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.5** —
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place from
+`PAPER_TRADING_V1.4.4`/`1.4.4` to `PAPER_TRADING_V1.4.5`/`1.4.5`.
+`src/data/factory.py` is now hashed (`factory_module_hash`, brand new
+field); `run_validation_cycle_script_hash` legitimately changed (the
+script gained CLI parsing and the preflight call); every other module
+hash — including `confirm_candidate_script_hash`,
+`portfolio_module_hash`, `review_module_hash`, and
+`paper_broker_module_hash` — confirmed unchanged. Two new structural
+`make verify-freeze` checks were added, matching this codebase's
+existing `_verify_*` pattern: `help_cannot_execute_validation` and
+`official_cycle_requires_tradier_preflight`, both scoped to the
+relevant function's own body via a new `_extract_function_body()`
+helper (needed because the literal text each check searches for also
+appears in this module's own docstring, or in an unrelated helper
+function's `def` line/body, which would otherwise produce a false
+pass). Both were empirically verified to correctly fail when the
+property they claim is actually broken. All 57 checks pass, 55 of them
+carried unchanged from V1.4.4.
+
+**PAPER_TRADING_V1.4.5: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22, on the operator's own machine — never started, reset, or
+touched from this sandbox; its 2026-09-22 and 2026-09-23 records are
+unchanged by this step). **LIVE_TRADING: DISABLED. FIDELITY_EXECUTION:
+MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY. NEW_POSITION_EXECUTION:
+HUMAN_CONFIRMED_REVIEW_ONLY.** See `STEP_22_6_FREEZE_REPORT.md` for
+the freeze commit SHA, manifest hash, and tag verification. No
+official mutating validation cycle and no `confirm_candidate` call
+against the official cohort were executed anywhere in this step.

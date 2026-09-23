@@ -1,8 +1,8 @@
 {
-  "manifest_version": "1.4.4",
-  "freeze_name": "PAPER_TRADING_V1.4.4",
-  "freeze_timestamp": "2026-09-22T23:03:48.972703Z",
-  "git_commit": "88b0d2754b4553c725adfa62e5d89bde690325df",
+  "manifest_version": "1.4.5",
+  "freeze_name": "PAPER_TRADING_V1.4.5",
+  "freeze_timestamp": "2026-09-23T10:28:16.616423Z",
+  "git_commit": "0ff889cab46d2d74163779ae3b41b4c2bfd034a1",
   "git_branch": "claude/options-trading-agent-2b4yi8",
   "repository_state": "clean",
   "python_version": "3.11.15 (CPython)",
@@ -88,7 +88,7 @@
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
   "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
-  "freeze_version": "1.4.4",
+  "freeze_version": "1.4.5",
   "alpaca_provider_module_hash": "2cf7fbd0555847b0a2568b61cdeca1f24b1ea166774eea8c78255c8df0b92eaf",
   "data_provider_at_freeze_time": "mock",
   "required_options_feed_for_validation": "opra",
@@ -108,10 +108,13 @@
   "orchestrator_cannot_bypass_risk_or_lifecycle": true,
   "opportunity_scan_never_outranks_risk_monitoring": true,
   "review_module_hash": "e031cc0a785d8a70ea1cf1892ddb807c85485ab3eaa73a51f9d370fd110e0244",
-  "run_validation_cycle_script_hash": "7d5c5ee4b90df565e609b0a314339f9eb91541dfbc8edc84f8ebe2752c788098",
+  "run_validation_cycle_script_hash": "cfb28fc669e3b4f5cefd8e9df6501ffa24d136c9d3d1d38a9d130aa710c08a2e",
   "confirm_candidate_script_hash": "3dae767a65beefb3ac0c592099a0a8d20878f1fc66faf4ccb1b5ed211be14d1e",
   "daily_cycle_never_calls_place_order": true,
   "review_only_path_never_imports_llm": true,
+  "factory_module_hash": "6a468bb360571af6924c7fa2973fc98139e263f73f45b156209603205d16b410",
+  "help_cannot_execute_validation": true,
+  "official_cycle_requires_tradier_preflight": true,
   "fill_model_assumptions": {
     "fill_model": "liquidity_adjusted",
     "thin_volume_threshold": 50,
@@ -156,5 +159,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "153c0ea42471f0a1dd805ba93add70d0ab71fd494366faa70b827a92f60fcf24"
+  "manifest_hash": "6ca14b630d333c30c9037d6dd9e807787f2647b9a8bad336937bb177ca51118f"
 }
