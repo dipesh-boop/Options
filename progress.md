@@ -5190,3 +5190,96 @@ HUMAN_CONFIRMED_REVIEW_ONLY.** See `STEP_22_6_FREEZE_REPORT.md` for
 the freeze commit SHA, manifest hash, and tag verification. No
 official mutating validation cycle and no `confirm_candidate` call
 against the official cohort were executed anywhere in this step.
+
+## Step 22.7 (PAPER_TRADING_V1.4.6): Tradier Market-Data Timestamp Semantics / Freshness Safety Hotfix
+
+Discovered during the operator's own local V1.4.5 acceptance testing
+(a real Tradier smoke test succeeded functionally, but the raw
+response's timestamps revealed a defect): `src/data/tradier_provider.py`
+picked `trade_date` (the last-PRINTED-TRADE timestamp) as the canonical
+`UnderlyingQuote`/`OptionContract` timestamp before ever considering
+`bid_date`/`ask_date`. Tradier's `trade_date` can legitimately lag well
+behind the current market -- confirmed against a live raw SPY quote
+where `trade_date` was a stale ~00:00Z print while `bid_date`/
+`ask_date` were the actual, current ~11:10Z quote, over 11 hours newer.
+This risked treating a currently-quoted, tradable contract as STALE by
+the ~15-minute freshness gate purely because the underlying hadn't
+printed a trade recently -- never the other direction (never made
+stale data look fresh), but a real false-negative that could have
+blocked legitimate candidates from the daily scan.
+
+**Fix 1:** new `_select_quote_timestamp()` prefers
+`max(bid_date, ask_date)` when both are present, falls to whichever one
+is present, then to `trade_date` only when neither quote-side
+timestamp exists, and to local capture time (`now`) only when the
+provider supplies no timestamp at all -- wired into both
+`_parse_quote_json` and `_parse_option_json`. `bid_timestamp`/
+`ask_timestamp`/`trade_timestamp` on `OptionContract` are unaffected,
+continuing to carry Tradier's raw per-field values exactly as before.
+
+**Fix 2 (general architecture gap, not Tradier-specific):**
+`TimestampedModel.freshness_status()`/`require_fresh()` in
+`src/data/provider.py` computed `age = as_of - timestamp` with no
+floor -- a provider timestamp materially in the future (clock skew or
+corrupted data) produced a negative age that `age > max_age` could
+never catch, so a corrupted future timestamp would read as FRESH
+regardless of `max_age`. `src.llm.schemas.TradeProposal` and
+`src.brokers.fidelity` already fail closed on this
+(`data_timestamp`/`market_data_timestamp > timestamp` rejected
+outright) -- confirmed and left untouched, both explicitly protected
+areas this step's scope lock named. The shared canonical
+`TimestampedModel` primitive itself -- which the Risk Engine, PaperBroker,
+the data quality gate, and every workflow's freshness check all rely
+on -- did not have an equivalent guard until now. Added a new
+`_MAX_FUTURE_CLOCK_SKEW` (1 minute) tolerance: a timestamp more than 1
+minute ahead of `as_of` is now unconditionally STALE/raises,
+independent of `max_age`, while ordinary sub-minute clock skew still
+reads FRESH exactly as before. `DEFAULT_MAX_QUOTE_AGE` (15 minutes) is
+completely unchanged -- this addition only ever makes an existing check
+harder to pass, never easier.
+
+**Tests:** 22 new tests (17 in `tests/unit/data/test_tradier_provider.py`,
+5 in `tests/unit/data/test_provider.py`) covering every case the task
+specification enumerated by letter (A-K: trade_date-older-than-bid/ask,
+both-present deterministic selection, bid-only, ask-only,
+trade-date-only fallback, no-timestamp-at-all fallback,
+option-contract canonical-vs-per-side-timestamp preservation,
+stale-quote-side-timestamps-still-fail, fresh-quote-despite-ancient-
+last-trade, future/invalid-timestamp handling, and unaffected existing
+field mapping), reconstructing the exact live epoch-millisecond values
+the operator's smoke test surfaced. Plus 1 new freeze-drift test. Full
+repository suite: **3462 passed, 6 skipped, 0 failed** (net new: 23
+tests over V1.4.5's 3439).
+
+No Tradier credentials were available in this sandbox (no
+`OPTIONS_AGENT_TRADIER_*` env vars, no `.env` file) -- a live,
+read-only smoke test could not be performed here; this step relies
+entirely on deterministic tests, per the task's explicit allowance. The
+operator's own separate real Tradier smoke test remains the final
+confirmation step.
+
+**Freeze extension:** re-frozen as **PAPER_TRADING_V1.4.6** --
+`FREEZE_NAME`/`MANIFEST_VERSION`/`freeze_version` bumped in place from
+`PAPER_TRADING_V1.4.5`/`1.4.5` to `PAPER_TRADING_V1.4.6`/`1.4.6`.
+`tradier_provider_module_hash` legitimately changed (the file gained
+`_select_quote_timestamp` and its call sites); a brand-new
+`data_provider_module_hash` field/check was added for
+`src/data/provider.py`, which had never been individually hashed by
+any prior freeze check despite being the shared freshness primitive
+every canonical quote/contract/chain inherits -- same precedent as
+V1.4.5's `factory_module_hash`. Every other module hash -- including
+`quality_gate_module_hash`, `risk_module_hash`, `quant_module_hash`,
+and `paper_broker_module_hash` -- confirmed unchanged. All 58 checks
+pass, 56 of them carried unchanged from V1.4.5.
+
+**PAPER_TRADING_V1.4.6: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22, on the operator's own machine -- never started, reset, or
+touched from this sandbox; its 2026-09-22 and 2026-09-23 records are
+unchanged by this step). **LIVE_TRADING: DISABLED. FIDELITY_EXECUTION:
+MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY. NEW_POSITION_EXECUTION:
+HUMAN_CONFIRMED_REVIEW_ONLY.** See `STEP_22_7_FREEZE_REPORT.md` for the
+freeze commit SHA, manifest hash, and tag verification. No official
+mutating validation cycle and no `confirm_candidate` call against the
+official cohort were executed anywhere in this step. `DEFAULT_MAX_QUOTE_AGE`
+and every existing risk/data-quality threshold are unchanged.
