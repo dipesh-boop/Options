@@ -1,4 +1,4 @@
-.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle confirm-candidate
+.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle validate-preflight confirm-candidate
 
 install:
 	pip install -r requirements.txt -r requirements-dev.txt
@@ -26,11 +26,18 @@ verify-freeze:
 freeze-manifest:
 	python -m src.validation.freeze build
 
-# Runs one daily validation cycle (Step 22.5). Never opens a new
-# PaperBroker position -- see scripts/run_validation_cycle.py's own
-# module docstring.
+# Runs one daily validation cycle (Step 22.6). Never opens a new
+# PaperBroker position; refuses to run at all unless the configured
+# market-data provider is Tradier production -- see
+# scripts/run_validation_cycle.py's own module docstring.
 validate-cycle:
 	./scripts/run_validation_cycle.sh
+
+# Read-only readiness check (Step 22.6) -- verifies configuration, cohort
+# existence, and Tradier production provider configuration, and exits.
+# Mutates NO validation state.
+validate-preflight:
+	./scripts/run_validation_cycle.sh --preflight
 
 # Confirms exactly one Review-Only new-position candidate. The ONLY
 # command that may open a real (simulated) PaperBroker position.

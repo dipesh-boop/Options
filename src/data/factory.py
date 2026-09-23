@@ -42,6 +42,78 @@ class DataProviderConfigError(RuntimeError):
     substitutes a different provider than the one configured."""
 
 
+_OFFICIAL_VALIDATION_PROVIDER = SOURCE_TRADIER
+# Tradier's own production market-data host (`.env.example`'s own
+# documented default) -- distinct from Tradier's separate sandbox host,
+# which serves delayed/simulated data and is legitimate for local
+# development but not for the official 90-day validation cycle.
+_OFFICIAL_VALIDATION_TRADIER_BASE_URL = "https://api.tradier.com/v1"
+
+
+class OfficialProviderPreflightError(RuntimeError):
+    """Step 22.6 (PAPER_TRADING_V1.4.5): raised when the configured
+    market-data provider is not Tradier's own production market-data
+    endpoint with a token configured -- the one provider configuration
+    the official, state-mutating 90-day validation cycle is permitted to
+    run against. Distinct from `DataProviderConfigError` (which reports
+    a provider that's simply broken/misconfigured for ANY use): this is
+    a policy check specific to the official validation runner, verifying
+    configuration VALUES only -- it never constructs a real provider
+    instance, makes no network call, and its own message never contains
+    a token (only a yes/no presence check)."""
+
+
+def verify_official_provider_is_tradier_production(
+    selection: DataProviderSelection | None = None,
+    tradier_config: TradierConfig | None = None,
+) -> None:
+    """Fails closed, before any official-validation-cycle state
+    mutation, unless the configured provider is exactly Tradier's
+    production market-data endpoint with a token configured. Read-only:
+    reads only `DataProviderSelection`/`TradierConfig` (both plain
+    environment-variable reads via `pydantic_settings.BaseSettings`) --
+    never constructs `TradierMarketDataProvider` itself (no `httpx`
+    client is built, no network request is made, no market data is
+    fetched). This is deliberately a CONFIGURATION preflight, distinct
+    from PROVIDER CONNECTIVITY (the real market-data fetch that may
+    only happen once this check has already passed): a Tradier API
+    outage discovered during that later fetch is legitimately recorded
+    as a degraded cycle by the existing architecture (Part 7's
+    isolation doctrine); an explicitly disallowed provider (`mock`,
+    `alpaca`, `ibkr`, an unknown value, or Tradier's own sandbox host)
+    is refused here instead, before that fetch, and before any
+    validation state -- a cycle record, a daily snapshot, a candidate
+    expiry, a paper-account bootstrap -- is touched.
+
+    Raises `OfficialProviderPreflightError` on failure; returns `None`
+    (no value) on success."""
+    from src.data.tradier_provider import TradierConfig as _TradierConfig
+
+    selection = selection or DataProviderSelection()
+    provider_name = selection.data_provider.lower()
+    if provider_name != _OFFICIAL_VALIDATION_PROVIDER:
+        raise OfficialProviderPreflightError(
+            f"official validation requires OPTIONS_AGENT_DATA_PROVIDER={_OFFICIAL_VALIDATION_PROVIDER!r} "
+            f"(Tradier production market data) -- currently configured as {selection.data_provider!r}. "
+            "Refusing to run an official cycle against mock/synthetic/non-Tradier data."
+        )
+
+    config = tradier_config or _TradierConfig()
+    if not config.token:
+        raise OfficialProviderPreflightError(
+            "official validation requires OPTIONS_AGENT_TRADIER_TOKEN to be set -- no Tradier token is "
+            "configured (see .env.example). Refusing to run an official cycle with no Tradier credentials."
+        )
+    normalized_base_url = config.base_url.rstrip("/")
+    if normalized_base_url != _OFFICIAL_VALIDATION_TRADIER_BASE_URL:
+        raise OfficialProviderPreflightError(
+            "official validation requires Tradier's production market-data endpoint "
+            f"({_OFFICIAL_VALIDATION_TRADIER_BASE_URL!r}) -- the configured OPTIONS_AGENT_TRADIER_BASE_URL "
+            f"{config.base_url!r} does not match (this looks like Tradier's sandbox/delayed-data host, or "
+            "a non-standard override). Refusing to run an official cycle against non-production data."
+        )
+
+
 class DataProviderSelection(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_")
 

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Operator-run daily validation-cycle runner (Step 22.5, PAPER_TRADING_V1.4.4).
+"""Operator-run daily validation-cycle runner (Step 22.6, PAPER_TRADING_V1.4.5).
+
+**Explicit CLI, parsed before anything else runs.** `main()`'s very first
+statement is `parser.parse_args()`. `--help`/`-h` prints usage and exits 0;
+an unrecognized argument exits 2 (`argparse`'s own default behavior) --
+either way, `sys.exit()` fires from inside `parse_args()` itself, before
+any config is loaded, any store is constructed, any provider is touched,
+or any validation state is read or written. With no arguments, runs one
+official, state-mutating validation cycle. `--preflight` runs only the
+read-only readiness checks below and mutates nothing (see `run_preflight`).
 
 **Never opens a new PaperBroker position.** This script identifies at most
 one Risk-Engine-approved new-position candidate per day and persists it as
@@ -22,6 +31,24 @@ already exist; they are bootstrapped from `config/validation.yaml`'s
 `starting_capital.default_nav` ONLY the very first time this script runs
 against a given account (no prior saved state at all).
 
+**Official validation requires Tradier production market data --
+verified BEFORE any mutation.** `run_validation_cycle`'s very first
+non-read-only step, after config/cohort verification, is
+`src.data.factory.verify_official_provider_is_tradier_production` (Step
+22.6): if `OPTIONS_AGENT_DATA_PROVIDER` does not resolve to `tradier`, or
+no Tradier token is configured, or the configured base URL is not
+Tradier's own production host (never the sandbox host), this function
+raises before `_expire_stale_candidates`, before any Portfolio/
+PaperAccountState bootstrap, before the market-data provider is even
+constructed, and before any cycle record or daily snapshot is written.
+This is a CONFIGURATION preflight, never a network call -- a Tradier API
+outage discovered during the real fetch that follows (once this check
+has already passed) is legitimately recorded as a degraded cycle by the
+existing architecture (Part 7's isolation doctrine); this check exists
+so a provider that was never going to be Tradier in the first place
+(`mock`, `alpaca`, `ibkr`, Tradier's own sandbox host) can never reach
+that fetch, or touch official validation state, at all.
+
 Existing positions are still evaluated every cycle through the unmodified
 `src.portfolio.orchestrator.run_outer_cycle` (Lifecycle Engine + Risk kill-
 switch), exactly as designed -- only new-position execution is gated behind
@@ -32,14 +59,19 @@ Cycle-level idempotent: if today's cycle already completed
 without re-running anything.
 
 Usage:
-    python scripts/run_validation_cycle.py
+    python scripts/run_validation_cycle.py              # run one official cycle
+    python scripts/run_validation_cycle.py --preflight   # read-only readiness check
+    python scripts/run_validation_cycle.py --help        # usage; mutates nothing
 
-Exit codes: 0 = cycle ran (even if degraded, or no candidate found) or was
-already done today. 1 = could not start or complete the cycle at all
-(config error, cohort not started, database unreachable).
+Exit codes: 0 = cycle ran (even if degraded, or no candidate found), was
+already done today, or `--preflight` reported ready. 1 = could not start
+or complete the cycle/preflight at all (config error, cohort not started,
+provider not Tradier production, database unreachable). 2 = bad CLI usage
+(argparse's own default for an unrecognized argument).
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from dataclasses import replace
@@ -48,7 +80,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.factory import get_configured_market_data_provider  # noqa: E402
+from src.data.factory import (  # noqa: E402
+    OfficialProviderPreflightError,
+    get_configured_market_data_provider,
+    verify_official_provider_is_tradier_production,
+)
 from src.data.market_calendar import is_market_open, is_trading_day  # noqa: E402
 from src.data.option_chain import OptionChain  # noqa: E402
 from src.data.universe import load_universe, load_universe_strategies  # noqa: E402
@@ -103,7 +139,7 @@ def _expire_stale_candidates(review_store, cohort_id: str, validation_store, now
 
 
 async def run_validation_cycle() -> bool:
-    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.4.4)")
+    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.4.5)")
     print("This path never calls PaperBroker.place_order for a new position.\n")
 
     try:
@@ -139,6 +175,18 @@ async def run_validation_cycle() -> bool:
             "proceed. This runner NEVER starts a new cohort."
         )
         return False
+
+    # Step 22.6: provider CONFIGURATION preflight -- read-only (no network
+    # call, no provider instance constructed), and strictly before every
+    # mutating step below (candidate expiry, Portfolio/PaperAccountState
+    # bootstrap, the cycle record, the daily snapshot). An official cycle
+    # must never run against mock/synthetic/non-Tradier-production data.
+    try:
+        verify_official_provider_is_tradier_production()
+    except OfficialProviderPreflightError as exc:
+        print(f"FAIL: provider preflight -- {exc}")
+        return False
+    _line("provider preflight", "Tradier production market data configured")
 
     control_loop_store = SqliteControlLoopStore(ops.control_loop_db_path)
     lifecycle_store = SqliteLifecycleStore(ops.lifecycle_db_path)
@@ -283,7 +331,95 @@ async def run_validation_cycle() -> bool:
     return True
 
 
+async def run_preflight() -> bool:
+    """Step 22.6 (`--preflight`): read-only readiness check. Verifies
+    configuration loads, the expected cohort has already been started,
+    and the configured market-data provider is Tradier production -- the
+    exact same checks `run_validation_cycle` performs before its own
+    first mutating step, run here in isolation and never followed by
+    anything that could mutate validation state. Never constructs a
+    `PaperBroker`, a `SqliteControlLoopStore`, a `SqliteCandidateReviewStore`,
+    or any other store this script's mutating path uses; never expires a
+    candidate, never records a cycle or a snapshot, never fetches a
+    single market-data quote. Does not perform a live Tradier network
+    call -- this is configuration-only, matching `run_validation_cycle`'s
+    own provider preflight exactly (see that function's docstring for why
+    connectivity and configuration are deliberately kept separate)."""
+    print("Validation-cycle preflight -- read-only readiness check (PAPER_TRADING_V1.4.5)")
+    print("Mutates NO validation state.\n")
+
+    try:
+        ops = load_operations_config()
+        val_config = load_validation_config()
+        load_universe()
+        configured_strategy_names = load_universe_strategies()
+    except (OperationsConfigError, ValidationConfigError) as exc:
+        print(f"FAIL: configuration error -- {exc}")
+        return False
+
+    try:
+        tuple(StrategyType[name] for name in configured_strategy_names)
+    except KeyError as exc:
+        print(f"FAIL: configuration error -- config/universe.yaml lists an unknown strategy: {exc}")
+        return False
+    _line("configuration", "loaded OK")
+
+    validation_store = SqliteValidationStore(val_config.db_path)
+    if not has_cohort_started(validation_store) or validation_store.get_cohort(ops.cohort_id) is None:
+        print(f"FAIL: cohort {ops.cohort_id!r} has not been started in {val_config.db_path!r}.")
+        return False
+    _line("cohort", f"{ops.cohort_id!r} -- already started, as required")
+
+    try:
+        verify_official_provider_is_tradier_production()
+    except OfficialProviderPreflightError as exc:
+        print(f"FAIL: provider preflight -- {exc}")
+        return False
+    _line("provider", "tradier (production endpoint, token configured)")
+
+    print("\nPREFLIGHT ONLY -- NO VALIDATION STATE MUTATED")
+    print("PASS: ready for an official validation cycle (python scripts/run_validation_cycle.py).")
+    return True
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="run_validation_cycle.py",
+        description=(
+            "Operator-run daily validation-cycle runner for the official PAPER_TRADING 90-day "
+            "validation. With no arguments, runs one official, state-mutating validation cycle "
+            "against Tradier production market data. Never opens a new PaperBroker position -- "
+            "see the module docstring for the full safety guarantees."
+        ),
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "Run read-only readiness checks only (configuration, cohort existence, Tradier "
+            "production provider configuration) and exit. Mutates NO validation state."
+        ),
+    )
+    return parser
+
+
 def main() -> int:
+    # Parsed before anything else -- argparse itself calls sys.exit(0) for
+    # --help/-h and sys.exit(2) for an unrecognized argument, in both
+    # cases before a single line past this point ever runs: no config is
+    # loaded, no store is constructed, no provider is touched, no
+    # validation state is read or written.
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.preflight:
+        try:
+            ok = asyncio.run(run_preflight())
+        except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly
+            print(f"FAIL: preflight could not complete -- {exc!r}")
+            return 1
+        return 0 if ok else 1
+
     try:
         ok = asyncio.run(run_validation_cycle())
     except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly

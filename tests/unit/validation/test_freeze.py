@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.4"
-        assert manifest.freeze_version == "1.4.4"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.5"
+        assert manifest.freeze_version == "1.4.5"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -47,6 +47,10 @@ class TestBuildFreezeManifest:
         assert len(manifest.confirm_candidate_script_hash) == 64
         assert manifest.daily_cycle_never_calls_place_order is True
         assert manifest.review_only_path_never_imports_llm is True
+        # Step 22.6 (PAPER_TRADING_V1.4.5)
+        assert len(manifest.factory_module_hash) == 64
+        assert manifest.help_cannot_execute_validation is True
+        assert manifest.official_cycle_requires_tradier_preflight is True
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -313,6 +317,20 @@ class TestVerifyFreezeDetectsDrift:
             assert any(c.name == "confirm_candidate_script_hash" and not c.passed for c in result.checks)
         finally:
             script.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_factory_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        factory_module = Path("src/data/factory.py")
+        original = factory_module.read_text(encoding="utf-8")
+        try:
+            factory_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "factory_module_hash" and not c.passed for c in result.checks)
+        finally:
+            factory_module.write_text(original, encoding="utf-8")
 
     def test_a_manifest_falsely_claiming_daily_cycle_never_calls_place_order_is_caught(self, tmp_path):
         manifest = build_freeze_manifest(generated_at=NOW)
@@ -648,3 +666,118 @@ class TestOpportunityScanNeverOutranksRiskMonitoringCheck:
         result = verify_freeze(path)
         assert result.passed is False
         assert any(c.name == "opportunity_scan_never_outranks_risk_monitoring" and not c.passed for c in result.checks)
+
+
+class TestHelpCannotExecuteValidationCheck:
+    """Step 22.6 (PAPER_TRADING_V1.4.5): `--help` (and any unrecognized
+    argument) must never be able to reach a mutating call, because
+    `argparse.ArgumentParser.parse_args()` runs strictly before either
+    mutating entry point in `main()`."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "help_cannot_execute_validation" and c.passed for c in result.checks)
+
+    def test_removing_argparse_construction_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace("argparse.ArgumentParser", "_NotArgparseAnymore")
+            assert poisoned != original  # sanity: the replacement actually did something
+            script.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "help_cannot_execute_validation" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_calling_parse_args_after_the_mutating_entry_points_is_caught(self, tmp_path):
+        # Simulates the actual regression this check exists to prevent:
+        # main() reaching run_validation_cycle()/run_preflight() before
+        # parser.parse_args() has had a chance to exit() on --help or an
+        # unknown argument.
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace(".parse_args(", ".parse_args_MOVED_LATER(")
+            assert poisoned != original
+            script.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "help_cannot_execute_validation" and not c.passed for c in result.checks)
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_help_cannot_execute_validation_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["help_cannot_execute_validation"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "help_cannot_execute_validation" and not c.passed for c in result.checks)
+
+
+class TestOfficialCycleRequiresTradierPreflightCheck:
+    """Step 22.6 (PAPER_TRADING_V1.4.5): the official, state-mutating
+    validation cycle must call `verify_official_provider_is_tradier_
+    production` strictly before its first mutation (candidate expiry,
+    portfolio/account-state save, or daily snapshot record)."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "official_cycle_requires_tradier_preflight" and c.passed for c in result.checks)
+
+    def test_removing_the_preflight_call_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace(
+                "verify_official_provider_is_tradier_production(",
+                "_verify_official_provider_is_tradier_production_RENAMED(",
+            )
+            assert poisoned != original
+            script.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "official_cycle_requires_tradier_preflight" and not c.passed for c in result.checks
+            )
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_official_cycle_requires_tradier_preflight_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["official_cycle_requires_tradier_preflight"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "official_cycle_requires_tradier_preflight" and not c.passed for c in result.checks
+        )

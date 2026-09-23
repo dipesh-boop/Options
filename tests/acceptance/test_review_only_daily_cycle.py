@@ -177,6 +177,18 @@ def environment(tmp_path, monkeypatch):
 
 @pytest.fixture
 def scripts(environment, monkeypatch):
+    # Step 22.6: run_validation_cycle.py now refuses to proceed past its
+    # provider preflight unless OPTIONS_AGENT_DATA_PROVIDER resolves to
+    # "tradier" with a token configured and the production base URL (the
+    # default when OPTIONS_AGENT_TRADIER_BASE_URL is unset) -- satisfy
+    # that preflight here so this fixture's own FakeMarketDataProvider
+    # monkeypatch (below) is what actually serves the subsequent real
+    # fetch, exactly as before. The preflight itself never touches the
+    # network -- it only reads these two environment variables.
+    monkeypatch.setenv("OPTIONS_AGENT_DATA_PROVIDER", "tradier")
+    monkeypatch.setenv("OPTIONS_AGENT_TRADIER_TOKEN", "fake-token-for-tests-only")
+    monkeypatch.delenv("OPTIONS_AGENT_TRADIER_BASE_URL", raising=False)
+
     cycle = _load_script_module("_acceptance_run_validation_cycle", REPO_ROOT / "scripts" / "run_validation_cycle.py")
     confirm = _load_script_module("_acceptance_confirm_candidate", REPO_ROOT / "scripts" / "confirm_candidate.py")
     monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())

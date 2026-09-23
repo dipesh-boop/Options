@@ -63,25 +63,32 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # acceptance remediation), Step 22.4B (test-portability/fixture
 # remediation only), Step 22.4C (SQLite backup acceptance-test
 # semantic-verification remediation only -- no production behavior
-# changed), and Step 22.5 (PAPER_TRADING_V1.4.4: the Review-Only
+# changed), Step 22.5 (PAPER_TRADING_V1.4.4: the Review-Only
 # operational runtime -- production module hashes for src/brokers/,
-# src/portfolio/, and the new src/review/ package DO legitimately
-# change this time, unlike 22.4B/22.4C's zero-production-drift steps --
-# see STEP_22_5_FREEZE_REPORT.md) each bumped the freeze name/version in
+# src/portfolio/, and the new src/review/ package legitimately changed
+# that step), and Step 22.6 (PAPER_TRADING_V1.4.5: operator CLI/
+# preflight safety remediation ONLY -- scripts/run_validation_cycle.py
+# gained real CLI argument parsing (--help/--preflight never mutate
+# validation state) and a Tradier-production-provider preflight check
+# before any mutation; src/data/factory.py gained the policy function
+# that check calls. Does NOT modify frozen strategy, Quant,
+# deterministic Risk, lifecycle policy, or trade-selection behavior --
+# see STEP_22_6_FREEZE_REPORT.md) each bumped the freeze name/version in
 # place without touching the prior versions' own artifacts -- see
 # progress.md and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
 # STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
 # STEP_22_4A_FREEZE_REPORT.md / STEP_22_4B_FREEZE_REPORT.md /
-# STEP_22_4C_FREEZE_REPORT.md / STEP_22_5_FREEZE_REPORT.md.
-# FREEZE_NAME/MANIFEST_VERSION always reflect the *current* frozen state;
-# the original V1.0/V1.1/V1.2/V1.3/V1.4/V1.4.1/V1.4.2/V1.4.3 manifests/
-# reports remain recoverable from git history at the `paper-trading-v1.0`
-# / `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
-# `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
-# / `paper-trading-v1.4.3` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.4"
+# STEP_22_4C_FREEZE_REPORT.md / STEP_22_5_FREEZE_REPORT.md /
+# STEP_22_6_FREEZE_REPORT.md. FREEZE_NAME/MANIFEST_VERSION always
+# reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4 manifests/reports remain recoverable
+# from git history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
+# `paper-trading-v1.2` / `paper-trading-v1.3` / `paper-trading-v1.4` /
+# `paper-trading-v1.4.1` / `paper-trading-v1.4.2` / `paper-trading-v1.4.3`
+# / `paper-trading-v1.4.4` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.5"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.4"
+MANIFEST_VERSION = "1.4.5"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -171,6 +178,13 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # material drift, exactly like `smoke_tradier_script` above.
     "run_validation_cycle_script": REPO_ROOT / "scripts" / "run_validation_cycle.py",
     "confirm_candidate_script": REPO_ROOT / "scripts" / "confirm_candidate.py",
+    # Step 22.6: `verify_official_provider_is_tradier_production` -- the
+    # policy check that decides whether the official, state-mutating
+    # validation cycle is even allowed to proceed -- lives here. Hashing
+    # this file means any future change (including one that quietly
+    # widened the approved provider set, dropped the token check, or
+    # accepted Tradier's sandbox host) is caught as material drift.
+    "factory_module": REPO_ROOT / "src" / "data" / "factory.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -273,6 +287,13 @@ class FreezeManifest(BaseModel):
     confirm_candidate_script_hash: str
     daily_cycle_never_calls_place_order: bool  # must always be True -- scripts/run_validation_cycle.py never calls PaperBroker.place_order
     review_only_path_never_imports_llm: bool  # must always be True -- no real or faked LLM review anywhere on the new-position confirmation path
+
+    # Step 22.6 (PAPER_TRADING_V1.4.5): operator CLI/preflight safety
+    # remediation only -- does not modify frozen strategy, Quant,
+    # deterministic Risk, lifecycle policy, or trade-selection behavior.
+    factory_module_hash: str
+    help_cannot_execute_validation: bool  # must always be True -- scripts/run_validation_cycle.py parses CLI args (argparse) before any mutating call
+    official_cycle_requires_tradier_preflight: bool  # must always be True -- the mutating cycle calls verify_official_provider_is_tradier_production before its first mutation
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -462,7 +483,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.4",
+        freeze_version="1.4.5",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -486,6 +507,9 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         confirm_candidate_script_hash=compute_file_hash(_CODE_MODULE_FILES["confirm_candidate_script"]),
         daily_cycle_never_calls_place_order=_verify_daily_cycle_never_calls_place_order(),
         review_only_path_never_imports_llm=_verify_review_only_path_never_imports_llm(),
+        factory_module_hash=compute_file_hash(_CODE_MODULE_FILES["factory_module"]),
+        help_cannot_execute_validation=_verify_help_cannot_execute_validation(),
+        official_cycle_requires_tradier_preflight=_verify_official_cycle_requires_tradier_preflight(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -616,6 +640,7 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("review_module_hash", _CODE_MODULE_DIRS["review_module"], True),
         ("run_validation_cycle_script_hash", _CODE_MODULE_FILES["run_validation_cycle_script"], False),
         ("confirm_candidate_script_hash", _CODE_MODULE_FILES["confirm_candidate_script"], False),
+        ("factory_module_hash", _CODE_MODULE_FILES["factory_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -782,6 +807,28 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "an src.llm import (other than src.llm.schemas) was found on the Review-Only new-position "
         "execution path, or the manifest wrongly claims otherwise -- no real or faked LLM review may "
         "ever occur there",
+    ))
+
+    help_safety_ok = _verify_help_cannot_execute_validation() and manifest.help_cannot_execute_validation
+    checks.append(FreezeCheck(
+        name="help_cannot_execute_validation", passed=help_safety_ok,
+        detail="scripts/run_validation_cycle.py's main() parses CLI arguments (argparse) before its first "
+        "mutating call, and manifest records True" if help_safety_ok
+        else "scripts/run_validation_cycle.py's main() no longer demonstrably parses CLI arguments before a "
+        "mutating call, or the manifest wrongly claims otherwise -- python scripts/run_validation_cycle.py "
+        "--help must never run an official validation cycle",
+    ))
+
+    official_provider_preflight_ok = (
+        _verify_official_cycle_requires_tradier_preflight() and manifest.official_cycle_requires_tradier_preflight
+    )
+    checks.append(FreezeCheck(
+        name="official_cycle_requires_tradier_preflight", passed=official_provider_preflight_ok,
+        detail="scripts/run_validation_cycle.py calls verify_official_provider_is_tradier_production before "
+        "every one of its known mutating calls, and manifest records True" if official_provider_preflight_ok
+        else "scripts/run_validation_cycle.py no longer demonstrably verifies Tradier production provider "
+        "configuration before a mutating call, or the manifest wrongly claims otherwise -- the official cycle "
+        "must never mutate validation state while configured for mock/synthetic/non-Tradier-production data",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1054,6 +1101,110 @@ def _verify_review_only_path_never_imports_llm() -> bool:
                     module_name = node.module
             if module_name is not None and module_name not in allowed:
                 return False
+    return True
+
+
+def _extract_function_body(text: str, start_marker: str) -> str | None:
+    """Returns the source text strictly between `start_marker` (a
+    function's own signature line, e.g. `"\\ndef main() -> int:\\n"`) and
+    the next top-level (column-0) `def`/`async def` -- i.e. just that one
+    function's body, excluding every other function's own definition
+    (including ones whose *name* happens to be a substring this module
+    searches for elsewhere, e.g. a helper's `def` line containing the
+    same call-shaped text its own callers use). `None` if `start_marker`
+    isn't found at all."""
+    import re
+
+    start = text.find(start_marker)
+    if start == -1:
+        return None
+    body_start = start + len(start_marker)
+    rest = text[body_start:]
+    match = re.search(r"\n(?:async )?def ", rest)
+    end = body_start + match.start() if match else len(text)
+    return text[body_start:end]
+
+
+def _verify_help_cannot_execute_validation() -> bool:
+    """Step 22.6: a direct, executable proof (not just a docstring claim)
+    that `scripts/run_validation_cycle.py`'s `main()` parses its CLI
+    arguments (`argparse`) before it can reach either of its two mutating
+    calls (`run_validation_cycle()`/`run_preflight()`). Scoped to `main()`'s
+    own body only (`_extract_function_body`) -- a naive whole-file
+    substring search would instead match this very module's own
+    docstring (which explains the invariant by quoting `parser
+    .parse_args()`) or `run_validation_cycle`'s own `def` line (which
+    appears earlier in the file than `main()` regardless of what `main()`
+    actually does) and could pass for the wrong reason. Within `main()`'s
+    body, checks that `.parse_args(` appears strictly before both
+    `run_validation_cycle()` and `run_preflight()` are ever called --
+    `argparse` itself calls `sys.exit()` for `-h`/`--help` and for an
+    unrecognized argument, so parsing strictly first is what guarantees
+    neither case ever reaches a mutating call. Independent of (and
+    re-checked on every `verify_freeze` run alongside)
+    `tests/acceptance/test_run_validation_cycle_cli.py`'s own behavioral
+    (subprocess-based) proof."""
+    path = REPO_ROOT / "scripts" / "run_validation_cycle.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    if "argparse.ArgumentParser" not in text:
+        return False
+    main_body = _extract_function_body(text, "\ndef main() -> int:\n")
+    if main_body is None:
+        return False
+    parse_args_index = main_body.find(".parse_args(")
+    if parse_args_index == -1:
+        return False
+    for call in ("run_validation_cycle()", "run_preflight()"):
+        call_index = main_body.find(call)
+        if call_index == -1:
+            continue  # this branch of main() doesn't call it -- nothing to order here
+        if parse_args_index > call_index:
+            return False
+    return True
+
+
+def _verify_official_cycle_requires_tradier_preflight() -> bool:
+    """Step 22.6: a direct, executable proof that
+    `scripts/run_validation_cycle.py` calls
+    `verify_official_provider_is_tradier_production` strictly before
+    every one of its own known mutating calls (candidate expiry, the
+    Portfolio/PaperAccountState bootstrap-and-save calls, and the daily
+    snapshot record) -- scoped to `run_validation_cycle()`'s own body
+    only (`_extract_function_body`), since some of those mutating call
+    names are also substrings of a helper function's own `def` line
+    (`_expire_stale_candidates`) or appear a second time inside that
+    helper's own body (`review_store.save_candidate`), both of which sit
+    earlier in the file regardless of this function's actual call
+    ordering and would otherwise make a naive whole-file search
+    unreliable. Independent of (and re-checked on every `verify_freeze`
+    run alongside) `tests/acceptance/test_run_validation_cycle_cli.py`'s
+    own behavioral proof that a `mock`-configured environment is refused
+    before any validation state is touched."""
+    path = REPO_ROOT / "scripts" / "run_validation_cycle.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    body = _extract_function_body(text, "\nasync def run_validation_cycle() -> bool:\n")
+    if body is None:
+        return False
+    preflight_index = body.find("verify_official_provider_is_tradier_production(")
+    if preflight_index == -1:
+        return False
+    known_mutating_calls = (
+        "_expire_stale_candidates(",
+        "portfolio_store.save(",
+        "account_state_store.save(",
+        "review_store.save_candidate(",
+        "validation_store.record_snapshot(",
+    )
+    for call in known_mutating_calls:
+        call_index = body.find(call)
+        if call_index == -1:
+            return False
+        if preflight_index > call_index:
+            return False
     return True
 
 
