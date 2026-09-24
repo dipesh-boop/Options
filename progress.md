@@ -5283,3 +5283,130 @@ freeze commit SHA, manifest hash, and tag verification. No official
 mutating validation cycle and no `confirm_candidate` call against the
 official cohort were executed anywhere in this step. `DEFAULT_MAX_QUOTE_AGE`
 and every existing risk/data-quality threshold are unchanged.
+
+## Step 22.8 (PAPER_TRADING_V1.4.7): Operator Usability / Daily-Startup Hotfix
+
+By 2026-09-24 the official cohort had recorded a third day: a
+successful 2026-09-24 Tradier production cycle (degraded_mode=False,
+no existing positions, no Risk-approved candidate, NAV/cash $100,000
+unchanged, no trade opened) on top of the 2026-09-22 Day-1 snapshot and
+the 2026-09-23 degraded/mock cycle + alert. Running the daily cycle
+from a clean shell surfaced two real operator-facing defects, plus a
+request for a materially simpler nontechnical daily workflow.
+
+**Bug 1 -- blank `.env` values crash config loading.**
+`scripts/run_validation_cycle.sh` sources `.env` via `set -a; source
+.env; set +a`, which exports the shipped `.env.example` template's
+~37 intentionally-blank `KEY=` lines as empty-string environment
+variables rather than as unset ones. Four byte-identical
+`_resolved(section, key)` config-override helpers
+(`src/risk/limits.py`, `src/portfolio/operations_config.py`,
+`src/validation/protocol.py`, `src/data/universe.py`) each treated a
+present-but-blank override (`""`) as a real override via `if override
+is not None:`, so a blank `OPTIONS_AGENT_RISK_MIN_OPEN_INTEREST` (for
+example) reached `int("")` and crashed -- even though
+`python scripts/run_validation_cycle.py --preflight` passed cleanly
+once the blank vars were manually removed. Separately, four
+`pydantic_settings.BaseSettings` subclasses (`TradierConfig`,
+`DataProviderSelection`, `AlpacaConfig`, `IBKRConfig`) had the
+analogous defect for the same reason (`env_prefix` alone, without
+`env_ignore_empty`, treats a blank env var as a real override too).
+
+**Fix:** every `_resolved()` helper's `if override is not None:`
+became `if override:` (empty string is falsy in Python, so both
+truly-unset and present-but-blank now correctly fall through to the
+YAML default; any real, non-blank override -- including the literal
+string `"0"` -- still applies exactly as before); every affected
+`BaseSettings` subclass's `model_config` gained
+`env_ignore_empty=True` (verified working in a direct sandbox test);
+`requirements.txt`'s `pydantic-settings` pin was bumped `2.5.2` ->
+`2.15.0` to guarantee the installed version actually supports it. No
+shell-level parsing workaround was used. No risk limit, validation
+threshold, or config default was added, removed, or changed anywhere.
+Reproduced the operator's exact failure end-to-end (sourced
+`.env.example` in a real bash subshell, ran `--preflight`, confirmed
+the crash) and confirmed the fix resolves it (now fails only on the
+expected, legitimate "cohort has not been started" in this sandbox,
+which has no real cohort database).
+
+**Bug 2 -- stale version labels.** `scripts/run_validation_cycle.py`'s
+docstring and two operator-facing print banners, plus
+`scripts/run_validation_cycle.sh`'s header comment, still said
+"PAPER_TRADING_V1.4.5"; updated to V1.4.7. `scripts/confirm_candidate.py`'s
+own separate, older "PAPER_TRADING_V1.4.4" label was deliberately left
+untouched -- outside the validation-cycle startup path this step was
+scoped to, and rewriting historical version text was explicitly
+out-of-scope.
+
+**Operator experience -- new dashboard visibility + one safe trigger,
+plus a macOS one-click launcher.** New `src/dashboard/validation_ops.py`
+adds a pure-read `GET /api/operator-status` route surfacing cohort id,
+latest NAV/cash/open-position-count/drawdown, today's cycle
+ran/degraded/halted/errors status, Tradier-production provider
+readiness (reusing the existing preflight check unmodified), any
+candidate awaiting human review, and validation-progress counters --
+never a secret (provider `detail` text comes only from
+`OfficialProviderPreflightError`'s own already-safe message). A single
+new state-changing route, `POST /api/validation-cycle/run`, is the
+*only* dashboard action that can run the daily cycle: it loads
+`scripts/run_validation_cycle.py` as a module (the same in-process
+technique `tests/acceptance/test_review_only_daily_cycle.py` already
+uses) and awaits its **unmodified** `run_validation_cycle()` coroutine
+directly, so every existing safety guarantee (Tradier-production
+preflight before mutation, cycle-level idempotency, never calling
+`PaperBroker.place_order` for a new position) applies identically --
+no logic is reimplemented. A new macOS launcher, `Options Trading
+Dashboard.command` (repo root, executable, repo-relative via
+`BASH_SOURCE`), loads `.env` safely, execs the existing unmodified
+`scripts/start.sh`, and opens the browser once the dashboard responds
+-- and does nothing else. **Confirmation deliberately stays CLI-only**
+this step: `src.review.confirmation.confirm_candidate` is not imported
+anywhere under `src/dashboard/` (enforced by a new
+`dashboard_cannot_confirm_candidates` freeze check), because building a
+dashboard-native confirmation action that preserved every one of
+`confirm_candidate`'s existing safeguards (fresh quote, fresh Quant, a
+full Risk Engine re-run against the current portfolio, price/capital
+drift tolerances, TTL expiry) would materially broaden this step's
+scope beyond a narrow operational hotfix.
+
+**Tests:** 8 existing unit-test files gained a blank-env-override
+regression test each (202 tests total across those files); a new
+`tests/unit/dashboard/test_operator_status.py` (14 tests) covers
+operator-status correctness and no-secret-leak, the validation-cycle
+trigger route (mock-provider-rejected case and a full end-to-end
+acceptance-style pass), that no dashboard route can confirm a
+candidate, that the dashboard/launcher default to `127.0.0.1` only,
+and that the launcher never automates the validation cycle or a
+confirmation; `test_app_security.py`'s route allowlist was extended
+for the 2 new routes; `test_freeze.py` gained 5 new/updated tests for
+the 3 new manifest fields. Full repository suite: **3491 passed, 6
+skipped, 0 failed** (up from V1.4.6's 3462 -- net new: 29 tests).
+
+**Re-frozen as PAPER_TRADING_V1.4.7.** `src/dashboard/app.py` (a
+pre-existing, previously-documented freeze-coverage gap, closed now
+because this step is the one that materially changed it) and the new
+`src/dashboard/validation_ops.py` each gained a whole-file hash field;
+a new `dashboard_cannot_confirm_candidates` structural check was added.
+All **61 of 61 checks pass**. Protected-file comparison against
+V1.4.6 confirmed exactly one protected file touched --
+`src/risk/limits.py`, and only its `_resolved()` blank-env fix (one
+`if` condition plus a comment), no threshold or decision-logic change
+-- with zero diff in `src/strategies/`, `src/quant/`, `src/lifecycle/`,
+`src/brokers/paper.py`, `src/brokers/fidelity.py`, `src/llm/`,
+`config/risk_limits.yaml`, `config/brokers.yaml`,
+`config/validation.yaml`, or any order/confirmation-path module. See
+`STEP_22_8_FREEZE_REPORT.md` for the full check-by-check breakdown,
+the exact diffs, and an explicit discussion distinguishing this
+software freeze from the cohort's own live operational state.
+
+**PAPER_TRADING_V1.4.7: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine, now three days in as of
+2026-09-24 -- never started, reset, or touched from this sandbox; its
+2026-09-22, 2026-09-23, and 2026-09-24 records are all unchanged by
+this step; this software freeze event is distinct from, and does not
+restart or interrupt, that ongoing operational cohort). **LIVE_TRADING:
+DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
+NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY.** No official
+mutating validation cycle and no `confirm_candidate` call against the
+official cohort were executed anywhere in this step.
