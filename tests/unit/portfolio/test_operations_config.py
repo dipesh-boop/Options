@@ -59,6 +59,22 @@ def test_cohort_id_env_override(tmp_path, monkeypatch):
     assert cfg.cohort_id == "overridden-cohort"
 
 
+def test_blank_env_override_is_treated_as_unset(tmp_path, monkeypatch):
+    """Step 22.8 (PAPER_TRADING_V1.4.7): a blank-but-present env var
+    (the shipped .env template's own convention) falls through to the
+    YAML value, never attempting int()/float() on an empty string."""
+    data = _valid_data()
+    data["cohort"]["cohort_id_env"] = "OPTIONS_AGENT_TEST_COHORT_ID_BLANK"
+    data["review"]["confirmation_ttl_seconds_env"] = "OPTIONS_AGENT_TEST_TTL_BLANK"
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_COHORT_ID_BLANK", "")
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_TTL_BLANK", "")
+    cfg = load_operations_config(p)
+    assert cfg.cohort_id == "test-cohort"
+    assert cfg.confirmation_ttl_seconds == 900
+
+
 def test_valid_config_round_trips_every_field(tmp_path):
     p = tmp_path / "operations.yaml"
     p.write_text(yaml.safe_dump(_valid_data()))

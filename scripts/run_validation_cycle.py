@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Operator-run daily validation-cycle runner (Step 22.6, PAPER_TRADING_V1.4.5).
+"""Operator-run daily validation-cycle runner (Step 22.6; operator
+usability/startup fixes in Step 22.8, PAPER_TRADING_V1.4.7).
 
 **Explicit CLI, parsed before anything else runs.** `main()`'s very first
 statement is `parser.parse_args()`. `--help`/`-h` prints usage and exits 0;
@@ -139,7 +140,7 @@ def _expire_stale_candidates(review_store, cohort_id: str, validation_store, now
 
 
 async def run_validation_cycle() -> bool:
-    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.4.5)")
+    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.4.7)")
     print("This path never calls PaperBroker.place_order for a new position.\n")
 
     try:
@@ -345,7 +346,7 @@ async def run_preflight() -> bool:
     call -- this is configuration-only, matching `run_validation_cycle`'s
     own provider preflight exactly (see that function's docstring for why
     connectivity and configuration are deliberately kept separate)."""
-    print("Validation-cycle preflight -- read-only readiness check (PAPER_TRADING_V1.4.5)")
+    print("Validation-cycle preflight -- read-only readiness check (PAPER_TRADING_V1.4.7)")
     print("Mutates NO validation state.\n")
 
     try:

@@ -107,6 +107,17 @@ class TestConfig:
         cfg = TradierConfig()
         assert cfg.token == "env-token"
 
+    def test_blank_base_url_env_value_is_treated_as_unset(self, monkeypatch):
+        """Step 22.8 (PAPER_TRADING_V1.4.7): the shipped .env template
+        leaves OPTIONS_AGENT_TRADIER_BASE_URL blank by convention -- a
+        blank-but-present override must fall through to the production
+        default, never become base_url="" (which would fail
+        validate_config()'s https:// check)."""
+        monkeypatch.setenv("OPTIONS_AGENT_TRADIER_BASE_URL", "")
+        cfg = TradierConfig(token=TOKEN)
+        assert cfg.base_url == "https://api.tradier.com/v1"
+        cfg.validate_config()  # does not raise
+
 
 # ------------------------------------------------------------- redaction
 

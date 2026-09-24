@@ -40,6 +40,7 @@ from src.dashboard.control_loop_projection import load_latest_control_loop_state
 from src.dashboard.models import DashboardState
 from src.dashboard.risk_state import build_risk_panel
 from src.dashboard.service import DashboardActionError, OpportunityNotFoundError
+from src.dashboard.validation_ops import OperatorStatusView, ValidationCycleRunView, build_operator_status, trigger_validation_cycle
 from src.portfolio.persistence import ControlLoopStore
 from src.review.candidates import CandidateReviewStore
 
@@ -306,6 +307,40 @@ def get_candidate(
     if candidate is None:
         raise HTTPException(status_code=404, detail=f"no candidate found for candidate_id={candidate_id!r}")
     return schemas.build_candidate_review_view(candidate)
+
+
+@app.get("/api/operator-status", response_model=OperatorStatusView)
+def operator_status() -> OperatorStatusView:
+    """Step 22.8 (PAPER_TRADING_V1.4.7): the one-glance status a
+    nontechnical operator needs -- validation cohort, current NAV/cash,
+    open PaperBroker positions, today's cycle status, market-data
+    provider, provider/preflight readiness, degraded/halted state, and
+    any Review-Only candidate awaiting human confirmation. Pure read,
+    same as every other `/api/*` GET route in this file; does not
+    depend on a `/morning-scan` session (`get_state`), since the
+    validation-cycle stores it reads from are independent of that."""
+    return build_operator_status()
+
+
+@app.post("/api/validation-cycle/run", response_model=ValidationCycleRunView)
+async def run_validation_cycle_action() -> ValidationCycleRunView:
+    """Step 22.8: the ONLY dashboard action that may run the daily
+    validation cycle -- and it can only ever run the exact same,
+    unmodified `scripts/run_validation_cycle.py` code path the operator
+    could already run from a terminal (`make validate-cycle`), with
+    every one of that path's own safety guarantees intact: Tradier-
+    production-provider preflight before any mutation, cycle-level
+    idempotency (running this twice the same day is a documented
+    no-op), and it never calls `PaperBroker.place_order` for a new
+    position -- a Risk-approved candidate still only ever becomes
+    AWAITING_HUMAN, exactly as before. This route accepts no request
+    body and no parameters: there is nothing about which cycle, which
+    date, or which provider for a caller to influence, so there is
+    nothing here to validate beyond that the request itself has no
+    body. There is no route anywhere in this dashboard that can confirm
+    a candidate -- see `src.review.confirmation`'s own module docstring
+    and `scripts/confirm_candidate.py`, both untouched and CLI-only."""
+    return await trigger_validation_cycle()
 
 
 @app.get("/api/audit", response_model=list[schemas.AuditEventView])

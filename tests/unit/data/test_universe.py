@@ -99,3 +99,22 @@ def test_strategies_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("OPTIONS_AGENT_TEST_UNIVERSE_STRATEGIES", "COVERED_CALL,PUT_CREDIT_SPREAD")
     strategies = load_universe_strategies(p)
     assert strategies == ("COVERED_CALL", "PUT_CREDIT_SPREAD")
+
+
+def test_blank_strategies_env_override_is_treated_as_unset(tmp_path, monkeypatch):
+    """Step 22.8 (PAPER_TRADING_V1.4.7): a blank-but-present override
+    falls through to the YAML default, never treated as 'override with
+    an empty strategy list.'"""
+    p = tmp_path / "universe.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "tickers": [{"ticker": "SPY", "sector": "ETF"}],
+                "strategies": ["CASH_SECURED_PUT"],
+                "strategies_env": "OPTIONS_AGENT_TEST_UNIVERSE_STRATEGIES_BLANK",
+            }
+        )
+    )
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_UNIVERSE_STRATEGIES_BLANK", "")
+    strategies = load_universe_strategies(p)
+    assert strategies == ("CASH_SECURED_PUT",)

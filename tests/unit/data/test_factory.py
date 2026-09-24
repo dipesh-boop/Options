@@ -18,6 +18,18 @@ class TestDataProviderSelection:
     def test_defaults_to_mock(self):
         assert DataProviderSelection().data_provider == "mock"
 
+    def test_blank_env_value_is_treated_as_unset(self, monkeypatch):
+        """Step 22.8 (PAPER_TRADING_V1.4.7): the shipped .env template
+        leaves OPTIONS_AGENT_DATA_PROVIDER blank by convention -- a
+        blank-but-present override must still resolve to "mock", never
+        an empty-string provider name that would fail resolution."""
+        monkeypatch.setenv("OPTIONS_AGENT_DATA_PROVIDER", "")
+        assert DataProviderSelection().data_provider == "mock"
+
+    def test_nonblank_env_override_still_works(self, monkeypatch):
+        monkeypatch.setenv("OPTIONS_AGENT_DATA_PROVIDER", "tradier")
+        assert DataProviderSelection().data_provider == "tradier"
+
 
 class TestGetConfiguredProvider:
     def test_mock_returns_mock_provider(self):

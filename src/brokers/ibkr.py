@@ -76,7 +76,10 @@ _READ_RETRY_BASE_DELAY_SECONDS = 0.05
 
 
 class IBKRConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_IBKR_")
+    # Step 22.8: env_ignore_empty=True -- see DataProviderSelection's
+    # comment in src/data/factory.py for why this matters given the
+    # shipped .env template's intentionally-blank optional variables.
+    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_IBKR_", env_ignore_empty=True)
 
     host: str = "127.0.0.1"
     port: int = 7497  # TWS paper by default — the safer default of the two paper ports

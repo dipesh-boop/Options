@@ -73,7 +73,10 @@ class AlpacaConfig(BaseSettings):
     (`OPTIONS_AGENT_ALPACA_*`) — nothing is hardcoded, and no credential
     ever has a source-code default. See `.env.example`."""
 
-    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_ALPACA_")
+    # Step 22.8: env_ignore_empty=True -- see DataProviderSelection's
+    # comment in src/data/factory.py for why this matters given the
+    # shipped .env template's intentionally-blank optional variables.
+    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_ALPACA_", env_ignore_empty=True)
 
     api_key: str | None = None
     api_secret: str | None = None

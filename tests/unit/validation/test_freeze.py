@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.6"
-        assert manifest.freeze_version == "1.4.6"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.4.7"
+        assert manifest.freeze_version == "1.4.7"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -53,6 +53,10 @@ class TestBuildFreezeManifest:
         assert manifest.official_cycle_requires_tradier_preflight is True
         # Step 22.7 (PAPER_TRADING_V1.4.6)
         assert len(manifest.data_provider_module_hash) == 64
+        # Step 22.8 (PAPER_TRADING_V1.4.7)
+        assert len(manifest.dashboard_app_module_hash) == 64
+        assert len(manifest.dashboard_validation_ops_module_hash) == 64
+        assert manifest.dashboard_cannot_confirm_candidates is True
         assert manifest.fidelity_execution_mode == "MANUAL_EXECUTION"
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
@@ -347,6 +351,34 @@ class TestVerifyFreezeDetectsDrift:
             assert any(c.name == "data_provider_module_hash" and not c.passed for c in result.checks)
         finally:
             data_provider_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_dashboard_app_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        dashboard_app_module = Path("src/dashboard/app.py")
+        original = dashboard_app_module.read_text(encoding="utf-8")
+        try:
+            dashboard_app_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "dashboard_app_module_hash" and not c.passed for c in result.checks)
+        finally:
+            dashboard_app_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_dashboard_validation_ops_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        dashboard_validation_ops_module = Path("src/dashboard/validation_ops.py")
+        original = dashboard_validation_ops_module.read_text(encoding="utf-8")
+        try:
+            dashboard_validation_ops_module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "dashboard_validation_ops_module_hash" and not c.passed for c in result.checks)
+        finally:
+            dashboard_validation_ops_module.write_text(original, encoding="utf-8")
 
     def test_a_manifest_falsely_claiming_daily_cycle_never_calls_place_order_is_caught(self, tmp_path):
         manifest = build_freeze_manifest(generated_at=NOW)
@@ -797,3 +829,44 @@ class TestOfficialCycleRequiresTradierPreflightCheck:
         assert any(
             c.name == "official_cycle_requires_tradier_preflight" and not c.passed for c in result.checks
         )
+
+
+class TestDashboardCannotConfirmCandidatesCheck:
+    """Step 22.8 (PAPER_TRADING_V1.4.7): no file under `src/dashboard/`
+    may import `src.review.confirmation` or `confirm_candidate` --
+    confirming a Review-Only candidate must always stay a separate,
+    deliberate `scripts/confirm_candidate.py` operator command."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "dashboard_cannot_confirm_candidates" and c.passed for c in result.checks)
+
+    def test_an_import_of_confirmation_added_to_the_dashboard_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        poison_file = Path("src/dashboard/_temp_drift_probe.py")
+        try:
+            poison_file.write_text("from src.review.confirmation import confirm_candidate\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "dashboard_cannot_confirm_candidates" and not c.passed for c in result.checks)
+        finally:
+            poison_file.unlink(missing_ok=True)
+
+    def test_a_manifest_falsely_claiming_dashboard_cannot_confirm_candidates_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["dashboard_cannot_confirm_candidates"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "dashboard_cannot_confirm_candidates" and not c.passed for c in result.checks)

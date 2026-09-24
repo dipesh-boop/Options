@@ -127,6 +127,19 @@ class TestAlpacaConfig:
     def test_valid_indicative_feed_accepted(self):
         AlpacaConfig(options_feed="indicative").validate_feeds()
 
+    def test_blank_env_value_is_treated_as_unset(self, monkeypatch):
+        """Step 22.8 (PAPER_TRADING_V1.4.7): the shipped .env template
+        leaves OPTIONS_AGENT_ALPACA_OPTIONS_FEED/STOCK_FEED blank by
+        convention -- a blank-but-present override must fall through to
+        the field default, never become options_feed="" (which would
+        fail validate_feeds())."""
+        monkeypatch.setenv("OPTIONS_AGENT_ALPACA_OPTIONS_FEED", "")
+        monkeypatch.setenv("OPTIONS_AGENT_ALPACA_STOCK_FEED", "")
+        config = AlpacaConfig()
+        assert config.options_feed == "opra"
+        assert config.stock_feed == "sip"
+        config.validate_feeds()  # does not raise
+
 
 class TestAuthenticationRequired:
     def test_missing_credentials_raises_without_injected_clients(self):

@@ -82,7 +82,10 @@ class TradierConfig(BaseSettings):
     (`OPTIONS_AGENT_TRADIER_*`) — the token has no source-code default
     of any kind. See `.env.example`."""
 
-    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_TRADIER_")
+    # Step 22.8: env_ignore_empty=True -- see DataProviderSelection's
+    # comment in src/data/factory.py for why this matters given the
+    # shipped .env template's intentionally-blank optional variables.
+    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_TRADIER_", env_ignore_empty=True)
 
     token: str | None = None
     base_url: str = "https://api.tradier.com/v1"

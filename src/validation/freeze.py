@@ -83,24 +83,40 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # modify frozen strategy, Quant, deterministic Risk, lifecycle policy,
 # or trade-selection behavior, and does NOT loosen
 # DEFAULT_MAX_QUOTE_AGE or any other freshness threshold -- see
-# STEP_22_7_FREEZE_REPORT.md) each bumped the freeze name/version in
-# place without touching the prior versions' own artifacts -- see
-# progress.md and STEP_22_1_FREEZE_REPORT.md / STEP_22_2_FREEZE_REPORT.md /
-# STEP_22_3_FREEZE_REPORT.md / STEP_22_4_FREEZE_REPORT.md /
-# STEP_22_4A_FREEZE_REPORT.md / STEP_22_4B_FREEZE_REPORT.md /
-# STEP_22_4C_FREEZE_REPORT.md / STEP_22_5_FREEZE_REPORT.md /
-# STEP_22_6_FREEZE_REPORT.md / STEP_22_7_FREEZE_REPORT.md.
+# STEP_22_7_FREEZE_REPORT.md), and Step 22.8 (PAPER_TRADING_V1.4.7:
+# operator usability / daily-startup hotfix ONLY -- fixed a bug where
+# the shipped .env template's intentionally-blank optional values
+# (sourced via `set -a; source .env; set +a`) crashed config parsing
+# (int('')/float('')); bumped stale PAPER_TRADING_V1.4.5 operator-
+# facing version labels to V1.4.7; added a read-only dashboard
+# operator-status view and the one new dashboard action that may run
+# the daily validation cycle (reusing scripts/run_validation_cycle.py's
+# own unmodified, already-safety-proven `run_validation_cycle()`
+# coroutine in-process -- never a reimplementation); added a portable,
+# repo-relative macOS one-click launcher that starts the dashboard
+# only, never the validation cycle, never a candidate confirmation.
+# Does NOT modify frozen strategy, Quant, deterministic Risk, lifecycle
+# policy, PaperBroker fill model, Fidelity behavior, or trade-selection
+# behavior, and does NOT touch the active validation cohort/database in
+# any way -- see STEP_22_8_FREEZE_REPORT.md) each bumped the freeze
+# name/version in place without touching the prior versions' own
+# artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
+# STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
+# STEP_22_4_FREEZE_REPORT.md / STEP_22_4A_FREEZE_REPORT.md /
+# STEP_22_4B_FREEZE_REPORT.md / STEP_22_4C_FREEZE_REPORT.md /
+# STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
+# STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5 manifests/reports remain
-# recoverable from git history at the `paper-trading-v1.0` /
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6 manifests/reports
+# remain recoverable from git history at the `paper-trading-v1.0` /
 # `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
 # `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
 # / `paper-trading-v1.4.3` / `paper-trading-v1.4.4` / `paper-trading-v1.4.5`
-# tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.6"
+# / `paper-trading-v1.4.6` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.7"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.6"
+MANIFEST_VERSION = "1.4.7"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -206,6 +222,19 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # let `age > max_age` be bypassed) is caught as material drift --
     # not previously hashed anywhere, so newly added here.
     "data_provider_module": REPO_ROOT / "src" / "data" / "provider.py",
+    # Step 22.8: the dashboard app gained two new routes --
+    # GET /api/operator-status and POST /api/validation-cycle/run, the
+    # latter the one new dashboard action capable of running the daily
+    # cycle at all. `src/dashboard/app.py` itself was a pre-existing,
+    # documented coverage gap (no prior step hashed the whole-file
+    # dashboard app despite hashing e.g. `control_loop_projection.py`)
+    # -- closed here alongside the brand-new `validation_ops.py`, the
+    # one file that may call `run_validation_cycle()` in-process.
+    # Hashing both means any future change (including one that widened
+    # the trigger route to accept a candidate id, or added a route
+    # shaped like AUTO TRADE/EXECUTE) is caught as material drift.
+    "dashboard_app_module": REPO_ROOT / "src" / "dashboard" / "app.py",
+    "dashboard_validation_ops_module": REPO_ROOT / "src" / "dashboard" / "validation_ops.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -325,6 +354,20 @@ class FreezeManifest(BaseModel):
     # contract/chain in this codebase inherits) newly hashed because
     # this step is the first to change it.
     data_provider_module_hash: str
+
+    # Step 22.8 (PAPER_TRADING_V1.4.7): operator usability/daily-startup
+    # hotfix only -- .env blank-optional-value handling, operator-
+    # facing version labels, a read-only dashboard operator-status
+    # view, the one new dashboard action that may run the daily
+    # validation cycle (reusing that script's own unmodified,
+    # already-safety-proven code path), and a macOS one-click launcher.
+    # Does NOT modify frozen strategy, Quant, deterministic Risk,
+    # lifecycle policy, PaperBroker fill model, Fidelity behavior, or
+    # trade-selection behavior, and does NOT change the active
+    # validation cohort/database in any way.
+    dashboard_app_module_hash: str
+    dashboard_validation_ops_module_hash: str
+    dashboard_cannot_confirm_candidates: bool  # must always be True -- no src.dashboard file imports src.review.confirmation or confirm_candidate
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -514,7 +557,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.6",
+        freeze_version="1.4.7",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -542,6 +585,9 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         help_cannot_execute_validation=_verify_help_cannot_execute_validation(),
         official_cycle_requires_tradier_preflight=_verify_official_cycle_requires_tradier_preflight(),
         data_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["data_provider_module"]),
+        dashboard_app_module_hash=compute_file_hash(_CODE_MODULE_FILES["dashboard_app_module"]),
+        dashboard_validation_ops_module_hash=compute_file_hash(_CODE_MODULE_FILES["dashboard_validation_ops_module"]),
+        dashboard_cannot_confirm_candidates=_verify_dashboard_cannot_confirm_candidates(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -674,6 +720,8 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("confirm_candidate_script_hash", _CODE_MODULE_FILES["confirm_candidate_script"], False),
         ("factory_module_hash", _CODE_MODULE_FILES["factory_module"], False),
         ("data_provider_module_hash", _CODE_MODULE_FILES["data_provider_module"], False),
+        ("dashboard_app_module_hash", _CODE_MODULE_FILES["dashboard_app_module"], False),
+        ("dashboard_validation_ops_module_hash", _CODE_MODULE_FILES["dashboard_validation_ops_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)
@@ -862,6 +910,18 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "scripts/run_validation_cycle.py no longer demonstrably verifies Tradier production provider "
         "configuration before a mutating call, or the manifest wrongly claims otherwise -- the official cycle "
         "must never mutate validation state while configured for mock/synthetic/non-Tradier-production data",
+    ))
+
+    dashboard_confirm_ok = (
+        _verify_dashboard_cannot_confirm_candidates() and manifest.dashboard_cannot_confirm_candidates
+    )
+    checks.append(FreezeCheck(
+        name="dashboard_cannot_confirm_candidates", passed=dashboard_confirm_ok,
+        detail="no src.dashboard file imports src.review.confirmation or confirm_candidate, and manifest "
+        "records True" if dashboard_confirm_ok
+        else "a src.dashboard file now imports src.review.confirmation/confirm_candidate, or the manifest "
+        "wrongly claims otherwise -- confirming a Review-Only candidate must always stay a separate, explicit "
+        "scripts/confirm_candidate.py command, never a dashboard action",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1237,6 +1297,36 @@ def _verify_official_cycle_requires_tradier_preflight() -> bool:
         if call_index == -1:
             return False
         if preflight_index > call_index:
+            return False
+    return True
+
+
+def _verify_dashboard_cannot_confirm_candidates() -> bool:
+    """Step 22.8: a direct, executable proof (not just a docstring
+    claim) that no file under `src/dashboard/` imports
+    `src.review.confirmation` or the `confirm_candidate` module --
+    confirming a Review-Only candidate must always stay a separate,
+    deliberate `scripts/confirm_candidate.py` operator command, never
+    something reachable from a dashboard route. Scoped to actual
+    `import`/`from ... import` statement lines, not whole-file
+    substring matching -- both `app.py` and `validation_ops.py`
+    legitimately explain, in prose, that confirmation stays CLI-only,
+    which names these exact identifiers to describe their own absence
+    and would otherwise trip a naive scan. Independent of (and
+    re-checked on every `verify_freeze` run alongside)
+    `tests/unit/dashboard/test_operator_status.py`'s own structural
+    proof."""
+    import re
+
+    import_pattern = re.compile(r"^\s*(?:import|from)\s+\S*(?:review\.confirmation|confirm_candidate)\S*", re.MULTILINE)
+    dashboard_dir = REPO_ROOT / "src" / "dashboard"
+    if not dashboard_dir.is_dir():
+        return False
+    for path in dashboard_dir.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        if import_pattern.search(text):
             return False
     return True
 

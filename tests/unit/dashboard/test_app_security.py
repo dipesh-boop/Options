@@ -153,6 +153,13 @@ class TestNoExecutionShapedRoute:
         # CLI-only (scripts/confirm_candidate.py), never a dashboard click.
         ("GET", "/api/candidates"),
         ("GET", "/api/candidates/{candidate_id}"),
+        # Step 22.8 (PAPER_TRADING_V1.4.7): operator-status visibility
+        # (read-only, GET) plus the one explicit, non-implicit action
+        # that may run the daily validation cycle -- never a candidate
+        # confirmation, which stays CLI-only (no route accepts a
+        # candidate id for that purpose anywhere in this file).
+        ("GET", "/api/operator-status"),
+        ("POST", "/api/validation-cycle/run"),
     }
     _FORBIDDEN_PATH_SUBSTRINGS = [
         "auto-trade", "auto_trade", "autotrade", "execute", "send-to-fidelity", "send_to_fidelity",

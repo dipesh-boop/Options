@@ -115,7 +115,12 @@ def verify_official_provider_is_tradier_production(
 
 
 class DataProviderSelection(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_")
+    # Step 22.8: env_ignore_empty=True -- the shipped .env template
+    # leaves this (and every other optional variable) blank by
+    # convention ("leave unset for the default"); without this, a
+    # blank OPTIONS_AGENT_DATA_PROVIDER would set data_provider="" and
+    # break provider resolution instead of falling through to "mock".
+    model_config = SettingsConfigDict(env_prefix="OPTIONS_AGENT_", env_ignore_empty=True)
 
     data_provider: str = "mock"
 

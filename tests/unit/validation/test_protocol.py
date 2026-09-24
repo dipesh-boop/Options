@@ -44,6 +44,18 @@ class TestLoadValidationConfig:
         cfg = load_validation_config(real)
         assert cfg.minimum_completed_trades == 5
 
+    def test_blank_env_override_is_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch):
+        """Step 22.8 (PAPER_TRADING_V1.4.7): the shipped .env template
+        leaves OPTIONS_AGENT_VALIDATION_* blank by convention -- a
+        blank-but-present override must fall through to the YAML
+        default, never attempt int('')."""
+        real = Path(__file__).resolve().parents[3] / "config" / "validation.yaml"
+        monkeypatch.setenv("OPTIONS_AGENT_VALIDATION_MIN_TRADES", "")
+        monkeypatch.setenv("OPTIONS_AGENT_VALIDATION_DURATION_DAYS", "")
+        cfg = load_validation_config(real)
+        assert cfg.minimum_completed_trades == 50
+        assert cfg.duration_days == 90
+
     def test_inconsistent_thresholds_rejected(self, tmp_path: Path):
         bad = tmp_path / "validation.yaml"
         bad.write_text(

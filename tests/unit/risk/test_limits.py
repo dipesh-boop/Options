@@ -77,6 +77,41 @@ def test_env_override_takes_precedence(tmp_path, monkeypatch: pytest.MonkeyPatch
     assert cfg.target_risk_per_trade_pct == 0.005
 
 
+def test_blank_env_override_is_treated_as_unset(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Step 22.8 (PAPER_TRADING_V1.4.7): the shipped .env template ships
+    every optional override blank by convention ('leave unset for the
+    default'). Sourcing that file with `set -a; source .env; set +a`
+    exports those blank values as present-but-empty-string env vars --
+    this must fall through to the YAML default, never attempt
+    `float('')`/`int('')` and crash."""
+    p = tmp_path / "risk_limits.yaml"
+    data = _full_valid_config()
+    data["position_risk"]["target_risk_per_trade_pct_env"] = "OPTIONS_AGENT_TEST_TARGET_RISK_BLANK"
+    data["liquidity"]["min_open_interest_env"] = "OPTIONS_AGENT_TEST_MIN_OI_BLANK"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_TARGET_RISK_BLANK", "")
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_MIN_OI_BLANK", "")
+    cfg = load_risk_limits(p)
+    assert cfg.target_risk_per_trade_pct == 0.01
+    assert cfg.min_open_interest == 100
+
+
+def test_blank_env_override_does_not_shadow_a_real_nonblank_override(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A blank override for one key must never affect a different,
+    genuinely nonblank override elsewhere -- both are resolved
+    independently."""
+    p = tmp_path / "risk_limits.yaml"
+    data = _full_valid_config()
+    data["position_risk"]["target_risk_per_trade_pct_env"] = "OPTIONS_AGENT_TEST_TARGET_RISK_BLANK2"
+    data["liquidity"]["min_open_interest_env"] = "OPTIONS_AGENT_TEST_MIN_OI_REAL"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_TARGET_RISK_BLANK2", "")
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_MIN_OI_REAL", "250")
+    cfg = load_risk_limits(p)
+    assert cfg.target_risk_per_trade_pct == 0.01  # fell through to YAML default
+    assert cfg.min_open_interest == 250  # real override still respected
+
+
 def test_no_hardcoded_policy_numbers_in_limits_module():
     """src/risk/limits.py must never hard-code a policy value; every
     number in it should be a Field constraint bound, not a default."""

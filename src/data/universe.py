@@ -46,7 +46,9 @@ def _resolved(section: dict[str, Any], key: str) -> Any:
     env_key = section.get(f"{key}_env")
     if env_key:
         override = os.environ.get(env_key)
-        if override is not None:
+        # Step 22.8: blank-but-present means UNSET, matching
+        # src.risk.limits._resolved -- see that function's own comment.
+        if override:
             return override
     if key not in section:
         raise UniverseConfigError(f"missing required key {key!r}")

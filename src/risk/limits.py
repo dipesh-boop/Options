@@ -75,7 +75,14 @@ def _resolved(section: dict[str, Any], key: str) -> Any:
     env_key = section.get(f"{key}_env")
     if env_key:
         override = os.environ.get(env_key)
-        if override is not None:
+        # Step 22.8: a blank-but-present env var (the shipped .env
+        # template's own convention for "leave unset") means UNSET, not
+        # "override with an empty string" -- `if override:` is False for
+        # both `None` (truly unset) and `""` (present but blank), so
+        # either case correctly falls through to the YAML default below.
+        # A real, non-blank override (including the literal string "0")
+        # still takes effect exactly as before.
+        if override:
             return override
     if key not in section:
         raise RiskLimitsConfigError(f"missing required key {key!r}")

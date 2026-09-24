@@ -33,6 +33,19 @@ class TestEnvironmentVariableLoading:
         monkeypatch.setenv("OPTIONS_AGENT_IBKR_ACCOUNT_ID", "DU9999999")
         assert IBKRConfig().account_id == "DU9999999"
 
+    def test_blank_env_value_is_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch):
+        """Step 22.8 (PAPER_TRADING_V1.4.7): a blank-but-present env var
+        (the shape `set -a; source .env; set +a` produces for the
+        shipped template's intentionally-blank optional keys) must fall
+        through to the field default -- env_ignore_empty=True does
+        this; without it, OPTIONS_AGENT_IBKR_PORT="" would fail
+        int('') validation instead of using the default paper port."""
+        monkeypatch.setenv("OPTIONS_AGENT_IBKR_PORT", "")
+        monkeypatch.setenv("OPTIONS_AGENT_IBKR_HOST", "")
+        cfg = IBKRConfig()
+        assert cfg.port in PAPER_PORTS
+        assert cfg.host == "127.0.0.1"
+
     def test_no_credential_fields_exist_on_the_model(self):
         # IBKR's API authenticates via an already-logged-in local
         # TWS/Gateway session, not a credential sent over the wire - so
