@@ -1,14 +1,23 @@
-/* Fidelity Human-Execution Dashboard — frontend (Step 18).
+/* Fidelity Human-Execution Dashboard — frontend (Step 18; Daily
+ * Validation Control added Step 22.9, PAPER_TRADING_V1.4.8).
  *
  * This file only ever calls the five allowed-action endpoints
- * (refresh / copy / mark-order-entered / fill / cancel / reject) plus
- * read-only GETs. There is no code here, and no button anywhere in the
- * rendered page, for AUTO TRADE, EXECUTE, or SEND TO FIDELITY — see
- * README notes in src/dashboard/app.py for the server-side half of that
- * guarantee.
+ * (refresh / copy / mark-order-entered / fill / cancel / reject), the
+ * one explicit daily-validation-cycle trigger
+ * (`POST /api/validation-cycle/run`, from `onRunDailyValidation` only,
+ * never from page load or polling), plus read-only GETs. There is no
+ * code here, and no button anywhere in the rendered page, for AUTO
+ * TRADE, EXECUTE, SEND TO FIDELITY, or CONFIRM CANDIDATE — see README
+ * notes in src/dashboard/app.py for the server-side half of that
+ * guarantee. Candidate confirmation stays CLI-only
+ * (`scripts/confirm_candidate.py`) in this version; this file never
+ * imports, references, or calls anything shaped like it.
  */
 
 const API = "";
+const SOFTWARE_VERSION = "PAPER_TRADING_V1.4.8";
+const runGuard = createRunGuard();
+let lastOperatorStatus = null;
 
 function fmtMoney(v) {
   if (v === null || v === undefined) return "—";
@@ -45,6 +54,12 @@ async function api(path, options = {}) {
 
 async function loadAll() {
   document.getElementById("clock").textContent = new Date().toLocaleString();
+  // Read-only, GET-only, and deliberately independent of the rest of
+  // this function's Promise.all: the Daily Validation Control card must
+  // still render (so a novice operator can see "is the system ready?")
+  // even when no `/morning-scan` session has been loaded into this
+  // dashboard process yet and every other panel below 503s.
+  await loadOperatorStatus();
   try {
     const [providerHealth, header, risk, wheels, lifecycle, opps, audit] = await Promise.all([
       api("/api/data-provider-health"),
@@ -65,6 +80,197 @@ async function loadAll() {
   } catch (err) {
     console.error(err);
   }
+}
+
+// This is a GET only -- called on page load and by the 30s poll below.
+// It never POSTs; the only POST to /api/validation-cycle/run anywhere
+// in this file is inside onRunDailyValidation(), which only runs after
+// an explicit button click and an explicit browser confirmation.
+async function loadOperatorStatus() {
+  try {
+    const status = await api("/api/operator-status");
+    lastOperatorStatus = status;
+    renderControlCenter(status, { clientRunning: runGuard.isInFlight() });
+  } catch (err) {
+    console.error(err);
+    lastOperatorStatus = null;
+    renderControlCenter(null, { clientRunning: runGuard.isInFlight() });
+  }
+}
+
+// ---------------------------------------------- daily validation control
+// The ONLY dashboard action that can run the daily validation cycle is
+// onRunDailyValidation() below, and it only ever calls the existing,
+// unmodified POST /api/validation-cycle/run endpoint -- no business
+// logic (Tradier preflight, Risk Engine, idempotency, Review-Only
+// new-position handling) is duplicated or re-derived here; the backend
+// remains the sole authority. There is no button, link, or code path
+// anywhere in this file that can confirm a Review-Only candidate --
+// confirmation stays a separate, deliberate `scripts/confirm_candidate.py`
+// terminal command in this version.
+
+function renderControlCenter(status, opts = {}) {
+  const clientRunning = !!opts.clientRunning;
+
+  document.getElementById("cc-software-badge").textContent = SOFTWARE_VERSION;
+
+  renderCcCohort(status);
+  renderCcMarketData(status);
+  renderCcTodayCycle(status, clientRunning);
+  renderCcPortfolio(status);
+  renderCcProgress(status);
+  renderCcReview(status);
+  renderCcAlerts(status);
+  renderCcRunButton(status, clientRunning);
+}
+
+function renderCcCohort(status) {
+  const el = document.getElementById("cc-cohort");
+  if (!status || !status.configured) {
+    el.innerHTML = `<div class="empty">${esc((status && status.detail) || "Validation configuration is not available.")}</div>`;
+    return;
+  }
+  el.innerHTML = [
+    statTile("Cohort ID", status.cohort_id || "—"),
+    statTile("Status", status.cohort_id ? "ACTIVE" : "—", status.cohort_id ? "pos" : ""),
+    statTile("Started", status.cohort_started_at || "—"),
+    statTile("Planned End", status.cohort_planned_end_date || "—"),
+  ].join("");
+}
+
+function renderCcMarketData(status) {
+  const el = document.getElementById("cc-market-data");
+  const provider = status && status.provider;
+  if (!provider) {
+    el.innerHTML = `<div class="empty">Market data provider status is not available.</div>`;
+    return;
+  }
+  el.innerHTML =
+    [
+      statTile("Provider", provider.provider ? provider.provider.toUpperCase() : "—"),
+      statTile("Tradier Production", provider.is_tradier_production ? "YES" : "NO", provider.is_tradier_production ? "pos" : "neg"),
+      statTile("Readiness", provider.ready ? "READY" : "NOT READY", provider.ready ? "pos" : "neg"),
+    ].join("") + `<div class="muted">${esc(provider.detail || "")}</div>`;
+}
+
+function renderCcTodayCycle(status, clientRunning) {
+  const el = document.getElementById("cc-today-cycle");
+  const cycleState = deriveCycleState(status, clientRunning);
+  const label = CYCLE_STATE_LABEL[cycleState] || cycleState;
+  const ranText = status ? String(!!status.today_cycle_ran) : "n/a";
+  const degradedText = status && status.today_cycle_degraded != null ? String(status.today_cycle_degraded) : "n/a";
+  const haltedText = status && status.today_cycle_halted != null ? String(status.today_cycle_halted) : "n/a";
+  el.innerHTML = `
+    <div class="cc-state-badge cc-state-${esc(cycleState)}">${esc(label)}</div>
+    <div class="muted">SYSTEM HEALTH: ${esc(systemHealthLabel(status))}</div>
+    <div class="muted">Technical: today_cycle_ran=${esc(ranText)}, degraded_mode=${esc(degradedText)}, halted=${esc(haltedText)}</div>
+  `;
+}
+
+function renderCcPortfolio(status) {
+  const el = document.getElementById("cc-portfolio");
+  if (!status || !status.configured || status.nav === null || status.nav === undefined) {
+    el.innerHTML = `<div class="empty">No portfolio snapshot recorded yet.</div>`;
+    return;
+  }
+  el.innerHTML = [
+    statTile("NAV", fmtMoney(status.nav)),
+    statTile("Cash", fmtMoney(status.cash)),
+    statTile("Open PaperBroker Positions", status.open_position_count === null || status.open_position_count === undefined ? "—" : status.open_position_count),
+    statTile("Drawdown", status.drawdown_pct === null || status.drawdown_pct === undefined ? "—" : fmtPct(status.drawdown_pct), status.drawdown_pct > 0 ? "neg" : ""),
+  ].join("");
+}
+
+function renderCcProgress(status) {
+  const el = document.getElementById("cc-progress");
+  const progress = validationProgress(status);
+  if (!progress) {
+    el.innerHTML = `<div class="empty">Validation progress is not available.</div>`;
+    return;
+  }
+  const preferredNote = progress.preferredTrades ? `, preferred ${progress.preferredTrades}+` : "";
+  el.innerHTML = `
+    <div class="progress-row">
+      <div class="progress-label">Days elapsed: ${progress.daysElapsed} / ${progress.totalDays}</div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${(progress.dayPct * 100).toFixed(1)}%"></div></div>
+    </div>
+    <div class="progress-row">
+      <div class="progress-label">Candidates awaiting review: ${progress.trades} completed trades (minimum ${progress.minTrades ?? "—"}${preferredNote})</div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${(progress.minTradePct * 100).toFixed(1)}%"></div></div>
+    </div>
+  `;
+}
+
+function renderCcReview(status) {
+  const el = document.getElementById("cc-review");
+  if (!status || !status.awaiting_review_count) {
+    el.innerHTML = `<div class="empty">Candidates awaiting review: 0. No position has been opened.</div>`;
+    return;
+  }
+  const ids = (status.awaiting_review_candidate_ids || []).map((id) => `<li><span>${esc(id)}</span></li>`).join("");
+  el.innerHTML = `
+    <div class="cc-candidate-banner">CANDIDATE AWAITING HUMAN REVIEW (${status.awaiting_review_count})</div>
+    <div class="muted">No position has been opened. Human confirmation required separately (Terminal).</div>
+    <ul class="bar-list">${ids}</ul>
+  `;
+}
+
+function renderCcAlerts(status) {
+  const el = document.getElementById("cc-alerts");
+  const alerts = (status && status.alerts) || [];
+  if (alerts.length === 0) {
+    el.innerHTML = `<div class="empty">No current alerts.</div>`;
+    return;
+  }
+  el.innerHTML = `<ul class="bar-list">${alerts
+    .map((a) => `<li><span class="cc-alert cc-alert-${esc(a.severity)}">${esc(a.severity.toUpperCase())}</span><span>${esc(a.reason)}</span></li>`)
+    .join("")}</ul>`;
+}
+
+function renderCcRunButton(status, clientRunning) {
+  const btn = document.getElementById("run-validation-btn");
+  const reasonEl = document.getElementById("cc-run-reason");
+  const { disabled, reason } = runButtonState(status, clientRunning);
+  btn.disabled = disabled;
+  btn.textContent = clientRunning ? "RUNNING…" : "RUN DAILY VALIDATION";
+  reasonEl.textContent = reason;
+}
+
+async function onRunDailyValidation() {
+  // Structural double-click / duplicate-submission guard: refuses
+  // immediately if a request from an earlier click is still in flight.
+  if (runGuard.isInFlight()) return;
+
+  const confirmed = window.confirm(CONFIRM_RUN_MESSAGE);
+  if (!confirmed) return;
+
+  if (!runGuard.beginRun()) return; // belt-and-braces; isInFlight() above already covers this
+  renderControlCenter(lastOperatorStatus, { clientRunning: true });
+  document.getElementById("cc-run-result").innerHTML = "";
+
+  try {
+    const result = await api("/api/validation-cycle/run", { method: "POST" });
+    renderRunResult(result);
+  } catch (err) {
+    renderRunResult({ success: false, cycle_id: "", log: err.message || String(err) });
+  } finally {
+    runGuard.endRun();
+    // Backend idempotency/state remains the final authority -- this
+    // refresh only reflects what the server now reports, never
+    // invents a "complete" state on its own.
+    await loadOperatorStatus();
+  }
+}
+
+function renderRunResult(result) {
+  const el = document.getElementById("cc-run-result");
+  const cls = result.success ? "pos" : "neg";
+  el.innerHTML = `
+    <div class="cc-run-result">
+      <strong class="${cls}">${result.success ? "Validation cycle complete." : "Validation cycle could not complete."}</strong>
+      <div class="muted">No position was opened automatically. Any new-position candidate now awaits separate human review.</div>
+      <details><summary>Details</summary><pre class="ticket-text">${esc(result.log || "")}</pre></details>
+    </div>`;
 }
 
 // ------------------------------------------------- data provider health
@@ -123,13 +329,11 @@ function renderPortfolioHeader(h) {
 // other strategy uses, never from this dashboard.
 
 function renderWheels(wheels) {
-  const section = document.getElementById("wheels-section");
   const container = document.getElementById("wheels-list");
   if (!wheels.length) {
-    section.style.display = "none";
+    container.innerHTML = '<div class="empty">No wheel research available for this cycle.</div>';
     return;
   }
-  section.style.display = "";
   container.innerHTML = wheels.map(renderWheelCard).join("");
 }
 
@@ -192,13 +396,11 @@ const LIFECYCLE_STATUS_NEGATIVE = new Set([
 ]);
 
 function renderLifecycle(positions) {
-  const section = document.getElementById("lifecycle-section");
   const container = document.getElementById("lifecycle-list");
   if (!positions.length) {
-    section.style.display = "none";
+    container.innerHTML = '<div class="empty">No active positions in lifecycle research for this cycle.</div>';
     return;
   }
-  section.style.display = "";
   container.innerHTML = positions.map(renderLifecycleCard).join("");
 }
 

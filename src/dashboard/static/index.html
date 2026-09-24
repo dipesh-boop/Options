@@ -16,6 +16,54 @@
 </header>
 
 <main>
+  <!-- ================= DAILY VALIDATION CONTROL ================= -->
+  <section id="control-center" class="panel control-center">
+    <div class="control-center-header">
+      <h2>Daily Validation Control</h2>
+      <span id="cc-software-badge" class="badge">—</span>
+    </div>
+
+    <div class="control-grid">
+      <div class="control-block">
+        <h3>Validation Cohort</h3>
+        <div id="cc-cohort" class="control-block-body"></div>
+      </div>
+      <div class="control-block">
+        <h3>Market Data</h3>
+        <div id="cc-market-data" class="control-block-body"></div>
+      </div>
+      <div class="control-block">
+        <h3>Today's Cycle</h3>
+        <div id="cc-today-cycle" class="control-block-body"></div>
+      </div>
+      <div class="control-block">
+        <h3>Portfolio</h3>
+        <div id="cc-portfolio" class="control-block-body"></div>
+      </div>
+    </div>
+
+    <div class="control-subsection">
+      <h3>Validation Progress</h3>
+      <div id="cc-progress"></div>
+    </div>
+
+    <div class="control-subsection">
+      <h3>Human Review</h3>
+      <div id="cc-review"></div>
+    </div>
+
+    <div class="control-subsection">
+      <h3>Alerts</h3>
+      <div id="cc-alerts"></div>
+    </div>
+
+    <div class="control-run">
+      <button id="run-validation-btn" class="btn btn-primary" disabled onclick="onRunDailyValidation()">RUN DAILY VALIDATION</button>
+      <div id="cc-run-reason" class="muted"></div>
+      <div id="cc-run-result"></div>
+    </div>
+  </section>
+
   <!-- ================= DATA PROVIDER HEALTH ================= -->
   <section id="data-provider-health" class="panel">
     <h2>Market Data <span id="data-provider-badge" class="badge">—</span></h2>
@@ -82,6 +130,7 @@
   <div id="modal" class="modal"></div>
 </div>
 
+<script src="/static/operator_control.js"></script>
 <script src="/static/dashboard.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs one daily validation cycle (Step 22.6; PAPER_TRADING_V1.4.7). Safe
+# Runs one daily validation cycle (Step 22.6; PAPER_TRADING_V1.4.8). Safe
 # to run manually now and to schedule externally (cron/launchd) later --
 # see scripts/run_validation_cycle.py's own module docstring for the full
 # safety guarantees (never opens a new PaperBroker position, never starts

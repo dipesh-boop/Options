@@ -29,12 +29,13 @@ import contextlib
 import importlib.util
 import io
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
 from pydantic import BaseModel, ConfigDict
 
+from src.dashboard import schemas
 from src.data.factory import (
     DataProviderSelection,
     OfficialProviderPreflightError,
@@ -77,6 +78,8 @@ class OperatorStatusView(BaseModel):
     detail: str | None = None
 
     cohort_id: str | None = None
+    cohort_started_at: date | None = None
+    cohort_planned_end_date: date | None = None
 
     nav: float | None = None
     cash: float | None = None
@@ -98,7 +101,10 @@ class OperatorStatusView(BaseModel):
     validation_duration_days: int | None = None
     validation_days_recorded: int = 0
     validation_minimum_completed_trades: int | None = None
+    validation_preferred_completed_trades: int | None = None
     validation_completed_trades: int = 0
+
+    alerts: tuple[schemas.ControlLoopAlertView, ...] = ()
 
 
 def _provider_readiness() -> ProviderReadinessView:
@@ -139,13 +145,22 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
     control_loop_store = SqliteControlLoopStore(ops.control_loop_db_path)
     today_cycle_id = f"validation-{now.date().isoformat()}"
     cycle_record = control_loop_store.get_cycle_record(today_cycle_id)
+    alerts = tuple(
+        schemas.build_control_loop_alert_view(a) for a in control_loop_store.all_unresolved_alerts()
+    )
 
     review_store = SqliteCandidateReviewStore(ops.candidate_review_db_path)
     awaiting = review_store.candidates_awaiting_human(cohort_id=ops.cohort_id)
 
+    cohort_record = validation_store.get_cohort(ops.cohort_id)
+    cohort_start = _cohort_start_date(cohort_record, snapshots)
+    planned_end = cohort_start + timedelta(days=val_config.duration_days) if cohort_start is not None else None
+
     return OperatorStatusView(
         configured=True,
         cohort_id=ops.cohort_id,
+        cohort_started_at=cohort_start,
+        cohort_planned_end_date=planned_end,
         nav=latest.nav if latest else None,
         cash=latest.cash if latest else None,
         open_position_count=latest.open_position_count if latest else None,
@@ -162,8 +177,24 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
         validation_duration_days=val_config.duration_days,
         validation_days_recorded=len(snapshots),
         validation_minimum_completed_trades=val_config.minimum_completed_trades,
+        validation_preferred_completed_trades=val_config.preferred_completed_trades,
         validation_completed_trades=len(trades),
+        alerts=alerts,
     )
+
+
+def _cohort_start_date(cohort_record, snapshots) -> date | None:
+    """The cohort's real start date, never fabricated: prefers the
+    registered `CohortRecord.started_at` (the same record
+    `src.validation.cohort.start_new_cohort` writes), and falls back to
+    the earliest recorded `DailySnapshot.snapshot_date` only when no
+    `CohortRecord` row exists for this `cohort_id` -- both are real,
+    already-persisted facts, never a value this function invents."""
+    if cohort_record is not None and cohort_record.started_at is not None:
+        return cohort_record.started_at.date()
+    if snapshots:
+        return snapshots[0].snapshot_date
+    return None
 
 
 # ------------------------------------------------------------ trigger

@@ -98,25 +98,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Does NOT modify frozen strategy, Quant, deterministic Risk, lifecycle
 # policy, PaperBroker fill model, Fidelity behavior, or trade-selection
 # behavior, and does NOT touch the active validation cohort/database in
-# any way -- see STEP_22_8_FREEZE_REPORT.md) each bumped the freeze
+# any way -- see STEP_22_8_FREEZE_REPORT.md), and Step 22.9
+# (PAPER_TRADING_V1.4.8: operator dashboard UI completion ONLY -- wired
+# the existing V1.4.7 backend operator APIs
+# (GET /api/operator-status, POST /api/validation-cycle/run) into the
+# actual rendered dashboard for the first time via a new,
+# DOM-free pure-logic module (src/dashboard/static/operator_control.js)
+# plus additive read-only fields on OperatorStatusView (cohort start/
+# planned-end date, preferred completed-trade target, unresolved
+# alerts); the Run Daily Validation button only ever calls the
+# existing, unmodified POST endpoint, is fail-closed (disabled unless
+# configured, not-yet-run-today, and provider-ready), and is guarded
+# against double-submission; candidate confirmation stays CLI-only --
+# no dashboard control of any kind was added for it. Does NOT modify
+# frozen strategy, Quant, deterministic Risk, lifecycle policy,
+# PaperBroker fill model, Fidelity behavior, or trade-selection
+# behavior, adds no new dashboard route, and does NOT touch the active
+# validation cohort/database in any way -- see
+# STEP_22_9_FREEZE_REPORT.md) each bumped the freeze
 # name/version in place without touching the prior versions' own
 # artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
 # STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
 # STEP_22_4_FREEZE_REPORT.md / STEP_22_4A_FREEZE_REPORT.md /
 # STEP_22_4B_FREEZE_REPORT.md / STEP_22_4C_FREEZE_REPORT.md /
 # STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
-# STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md.
+# STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
+# STEP_22_9_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6 manifests/reports
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7 manifests/reports
 # remain recoverable from git history at the `paper-trading-v1.0` /
 # `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
 # `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
 # / `paper-trading-v1.4.3` / `paper-trading-v1.4.4` / `paper-trading-v1.4.5`
-# / `paper-trading-v1.4.6` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.7"
+# / `paper-trading-v1.4.6` / `paper-trading-v1.4.7` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.4.8"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.7"
+MANIFEST_VERSION = "1.4.8"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -557,7 +575,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.7",
+        freeze_version="1.4.8",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
