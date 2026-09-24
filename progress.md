@@ -5410,3 +5410,93 @@ DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
 NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY.** No official
 mutating validation cycle and no `confirm_candidate` call against the
 official cohort were executed anywhere in this step.
+
+## Step 22.9 (PAPER_TRADING_V1.4.8): Operator Dashboard UI Completion
+
+V1.4.7 built the backend operator-status/validation-cycle-trigger APIs
+(`GET /api/operator-status`, `POST /api/validation-cycle/run`) but
+never wired them into the actual rendered dashboard -- confirmed by a
+repository search before any implementation work began, which found
+neither `operator-status`, `validation-cycle/run`, nor "Run Daily
+Validation" anywhere under `src/dashboard/static/`. This step is a
+narrow frontend/operator-UX completion hotfix closing exactly that gap
+-- no trading logic, Risk Engine, Quant, or backend route was touched.
+
+**Implementation:** a new, DOM-free pure-logic module,
+`src/dashboard/static/operator_control.js`, derives every piece of UI
+state (today's-cycle label, fail-closed run-button disabled/reason,
+validation-progress fractions, system-health label) as a pure function
+of the existing `OperatorStatusView` JSON -- no business logic is
+duplicated or re-derived client-side. A new "Daily Validation Control"
+card at the top of `index.html` shows cohort/market-data/today's-
+cycle/portfolio/validation-progress/human-review/alert status in named
+states (NOT_RUN/READY/RUNNING/COMPLETE/DEGRADED/HALTED/ERROR) and hosts
+the "RUN DAILY VALIDATION" button. `dashboard.js`'s `loadOperatorStatus()`
+(GET-only) runs independently of the rest of the page on every load and
+by the existing 30s poll; `onRunDailyValidation()` is the *only* place
+in the entire frontend that POSTs to `/api/validation-cycle/run`, gated
+behind an explicit browser confirmation (the exact text the task
+specified) and a structural double-submit guard (`createRunGuard()`).
+The button is fail-closed by construction: disabled unless
+`configured && !today_cycle_ran && provider.ready` all hold, with any
+missing/malformed status also disabling it. `OperatorStatusView` gained
+four small, additive, read-only fields (`cohort_started_at`,
+`cohort_planned_end_date`, `validation_preferred_completed_trades`,
+`alerts`) computed from already-persisted data, never fabricated.
+Wheels/Lifecycle sections now show a helpful empty-state message
+instead of disappearing entirely when there is nothing to show.
+**Candidate confirmation stays CLI-only, reaffirmed unchanged** from
+V1.4.7's own explicit scope decision -- no button, element, or fetch
+call anywhere in the frontend references a confirmation action; the
+"No position has been opened. Human confirmation required separately
+(Terminal)." message is shown verbatim when a candidate is awaiting
+review.
+
+**Tests:** a new Node test suite (`tests/frontend/operator_control.test.js`,
+24 tests via `node --test`, requiring the exact file the browser loads
+-- no DOM shim, no new framework) exercises every branch of the pure
+cycle-state/button-state/run-guard logic, including the double-click/
+duplicate-submission case. A new
+`tests/unit/dashboard/test_frontend_control_center.py` (29 tests)
+covers the remaining spec items structurally against the real frontend
+source and end-to-end against the dashboard's own `TestClient`
+(idempotency, secret-non-leakage, historical-vs-current-alert
+decoupling -- proving a resolved 2026-09-23-style alert never appears
+in the current `alerts` list and never affects today's cycle-state
+derivation), including a subprocess test that runs the Node suite as
+part of the ordinary `pytest` invocation. Full repository suite:
+**3520 passed, 6 skipped, 0 failed** (up from V1.4.7's 3491 -- net new:
+29 tests).
+
+**Re-frozen as PAPER_TRADING_V1.4.8.** No new manifest field was
+needed: `dashboard_validation_ops_module_hash` (added in V1.4.7)
+legitimately drifted from the four additive fields; `dashboard_app_module_hash`
+is confirmed **unchanged** -- this step adds no route and does not
+touch `src/dashboard/app.py` at all. Following the established,
+deliberate precedent that this manifest has never hashed the static
+frontend files since Step 18 (the server-side Risk Engine/preflight/
+idempotency remain the actual safety boundary, not client-side
+rendering code), no new hash field was added for the frontend files
+either. All **61 of 61 checks pass**. Protected-file comparison
+against V1.4.7 confirmed **zero diff** in every named protected
+directory/file (`src/strategies/`, `src/quant/`, `src/risk/`,
+`src/lifecycle/`, `src/brokers/paper.py`, `src/brokers/fidelity.py`,
+`src/llm/`, `config/risk_limits.yaml`, `config/brokers.yaml`,
+`config/validation.yaml`, `src/portfolio/orchestrator.py`,
+`src/review/confirmation.py`, `src/orchestration/pipeline.py`,
+**and `src/dashboard/app.py`**). See `STEP_22_9_FREEZE_REPORT.md` for
+the full check-by-check breakdown, the exact diffs, and the same
+explicit software-freeze-vs-operational-cohort-state discussion
+V1.4.7's report established.
+
+**PAPER_TRADING_V1.4.8: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine, now three days in as of
+2026-09-24 -- never started, reset, or touched from this sandbox; its
+2026-09-22, 2026-09-23, and 2026-09-24 records are all unchanged by
+this step; this software freeze event is distinct from, and does not
+restart or interrupt, that ongoing operational cohort). **LIVE_TRADING:
+DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
+NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY.** No official
+mutating validation cycle and no `confirm_candidate` call against the
+official cohort were executed anywhere in this step.
