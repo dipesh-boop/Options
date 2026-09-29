@@ -168,6 +168,17 @@ class TradeRecord:
     realistic_pnl: float
     theoretical_pnl: float
     entry_spread_pct: float  # the widest leg's bid/ask spread (as a fraction of its mid) at entry
+    # PAPER_TRADING_V1.5.0, Step 1: optional, defaulted reference to the
+    # src.validation.experiment_version.ExperimentVersion active when
+    # this trade was recorded in a validation cohort -- always None for
+    # an ordinary backtest trade (backtests have no "experiment version"
+    # concept; this field exists so src.validation.session's reuse of
+    # this same dataclass for a live validation cohort's closed trades
+    # can carry it). None for every trade recorded before this field
+    # existed, honestly, never backfilled. Both existing construction
+    # sites in src/backtest/engine.py use keyword arguments, so this
+    # trailing defaulted field changes nothing about them.
+    experiment_version_id: str | None = None
 
     @property
     def holding_period_days(self) -> int:

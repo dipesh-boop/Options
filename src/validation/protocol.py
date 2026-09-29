@@ -246,6 +246,17 @@ class StrategyVersionManifest(BaseModel):
     # src.validation.cohort for the PRE_EXPANSION_VALIDATION /
     # MULTI_STRATEGY_VALIDATION_V1 (or any later) distinction.
     cohort_label: str = "default"
+    # PAPER_TRADING_V1.5.0, Step 1 addition: additive, defaults to None
+    # so every existing manifest construction/serialization (including
+    # every historical V1.4.x manifest already on disk) is unaffected --
+    # the exact same "optional, defaulted, never backfilled" pattern
+    # `cohort_label` above already established. A reference id into a
+    # separately-persisted `src.validation.experiment_version
+    # .ExperimentVersion` record -- never a duplicated copy of its
+    # hashes -- naming the exact experiment configuration this cohort
+    # was started under. `None` for any manifest built before this
+    # field existed, honestly, never a guessed/backfilled value.
+    experiment_version_id: str | None = None
 
     @model_validator(mode="after")
     def _tz_aware(self) -> "StrategyVersionManifest":
@@ -264,6 +275,7 @@ def build_validation_manifest(
     config_paths: tuple[Path, ...] = DEFAULT_MANIFEST_CONFIG_PATHS,
     notes: str = "",
     cohort_label: str = "default",
+    experiment_version_id: str | None = None,
 ) -> StrategyVersionManifest:
     hashes = {str(p): compute_file_hash(p) for p in config_paths}
     return StrategyVersionManifest(
@@ -275,6 +287,7 @@ def build_validation_manifest(
         strategy_versions=strategy_versions,
         notes=notes,
         cohort_label=cohort_label,
+        experiment_version_id=experiment_version_id,
     )
 
 

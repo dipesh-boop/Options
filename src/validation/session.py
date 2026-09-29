@@ -42,6 +42,7 @@ from pathlib import Path
 
 from src.backtest.simulator import TradeRecord
 from src.llm.schemas import StrategyType
+from src.validation.experiment_version import ExperimentVersion
 from src.validation.records import CohortRecord, OpportunityRecord, from_jsonable, to_jsonable
 from src.workflows.rejected_trade_review import HypotheticalOutcome
 
@@ -90,6 +91,14 @@ class DailySnapshot:
     drawdown_pct: float
     per_strategy_nav: dict[str, float]
     recorded_at: datetime
+    # PAPER_TRADING_V1.5.0, Step 1: optional, defaulted reference to the
+    # src.validation.experiment_version.ExperimentVersion active when
+    # this snapshot was recorded -- None for every snapshot recorded
+    # before this field existed (every V1.4.x snapshot), honestly, never
+    # backfilled. `_snapshot_to_dict`/`_snapshot_from_dict` need no
+    # change: `asdict`/`DailySnapshot(**d)` already round-trip a missing
+    # key to this default.
+    experiment_version_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,12 @@ class ValidationStore(ABC):
     @abstractmethod
     def reconciliation_failures(self, *, unresolved_only: bool = False) -> list[ReconciliationFailureRecord]: ...
 
+    @abstractmethod
+    def record_experiment_version(self, version: ExperimentVersion) -> None: ...
+
+    @abstractmethod
+    def get_experiment_version(self, version_id: str) -> ExperimentVersion | None: ...
+
 
 class InMemoryValidationStore(ValidationStore):
     def __init__(self) -> None:
@@ -228,6 +243,7 @@ class InMemoryValidationStore(ValidationStore):
         self._cohorts: dict[str, CohortRecord] = {}
         self._opportunities: dict[str, OpportunityRecord] = {}
         self._reconciliation_failures: dict[str, ReconciliationFailureRecord] = {}
+        self._experiment_versions: dict[str, ExperimentVersion] = {}
 
     def record_trade(self, trade: TradeRecord, *, cohort_id: str = DEFAULT_COHORT_ID) -> None:
         self._trades.setdefault(trade.position_id, trade)
@@ -275,6 +291,15 @@ class InMemoryValidationStore(ValidationStore):
             return list(self._opportunities.values())
         return [o for o in self._opportunities.values() if o.cohort_id == cohort_id]
 
+    def record_experiment_version(self, version: ExperimentVersion) -> None:
+        # Content-addressed: setdefault, not overwrite -- identical
+        # content always carries the identical version_id, so a repeat
+        # write is a genuine no-op, never a mutation.
+        self._experiment_versions.setdefault(version.version_id, version)
+
+    def get_experiment_version(self, version_id: str) -> ExperimentVersion | None:
+        return self._experiment_versions.get(version_id)
+
     def reconciliation_failures(self, *, unresolved_only: bool = False) -> list[ReconciliationFailureRecord]:
         values = list(self._reconciliation_failures.values())
         return [f for f in values if not f.resolved] if unresolved_only else values
@@ -289,6 +314,13 @@ _APPEND_ONLY_TABLES = {
     "rejected_outcomes": ("proposal_id",),
     "violations": ("violation_id",),
     "opportunities": ("opportunity_id",),
+    # PAPER_TRADING_V1.5.0, Step 1: content-addressed and therefore
+    # naturally append-only/immutable, exactly like the tables above --
+    # the same configuration always produces the same version_id
+    # (src.validation.experiment_version.compute_experiment_version_id),
+    # so INSERT OR IGNORE on this natural key is not just idempotent
+    # retry-safety, it is the correct behavior for identical content.
+    "experiment_versions": ("version_id",),
 }
 
 
@@ -374,6 +406,13 @@ class SqliteValidationStore(ValidationStore):
                 "ON CONFLICT(failure_id) DO UPDATE SET record_json = excluded.record_json",
                 (failure.failure_id, json.dumps(to_jsonable(failure, ReconciliationFailureRecord))),
             )
+
+    def record_experiment_version(self, version: ExperimentVersion) -> None:
+        self._insert("experiment_versions", (version.version_id,), json.dumps(to_jsonable(version, ExperimentVersion)))
+
+    def get_experiment_version(self, version_id: str) -> ExperimentVersion | None:
+        rows = self._all("experiment_versions", where="version_id = ?", params=(version_id,))
+        return from_jsonable(rows[0], ExperimentVersion) if rows else None
 
     def trades(self, *, cohort_id: str | None = None) -> list[TradeRecord]:
         return [_trade_from_dict(d) for d in self._all("trades")]

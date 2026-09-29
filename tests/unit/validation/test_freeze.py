@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.4.8"
-        assert manifest.freeze_version == "1.4.8"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.5.0"
+        assert manifest.freeze_version == "1.5.0"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -61,6 +61,10 @@ class TestBuildFreezeManifest:
         assert manifest.live_trading_enabled is False
         assert manifest.automatic_fidelity_execution is False
         assert manifest.validation_cohort_started is False
+        # Step 23-1 (PAPER_TRADING_V1.5.0): experiment-version metadata foundation.
+        assert len(manifest.experiment_version_module_hash) == 64
+        assert len(manifest.validation_protocol_module_hash) == 64
+        assert len(manifest.validation_session_module_hash) == 64
         assert len(manifest.manifest_hash) == 64  # sha256 hex digest
 
     def test_naive_generated_at_rejected(self):
@@ -379,6 +383,48 @@ class TestVerifyFreezeDetectsDrift:
             assert any(c.name == "dashboard_validation_ops_module_hash" and not c.passed for c in result.checks)
         finally:
             dashboard_validation_ops_module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_experiment_version_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        module = Path("src/validation/experiment_version.py")
+        original = module.read_text(encoding="utf-8")
+        try:
+            module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "experiment_version_module_hash" and not c.passed for c in result.checks)
+        finally:
+            module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_validation_protocol_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        module = Path("src/validation/protocol.py")
+        original = module.read_text(encoding="utf-8")
+        try:
+            module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "validation_protocol_module_hash" and not c.passed for c in result.checks)
+        finally:
+            module.write_text(original, encoding="utf-8")
+
+    def test_tampering_with_the_validation_session_module_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        module = Path("src/validation/session.py")
+        original = module.read_text(encoding="utf-8")
+        try:
+            module.write_text(original + "\n# drift test\n", encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(c.name == "validation_session_module_hash" and not c.passed for c in result.checks)
+        finally:
+            module.write_text(original, encoding="utf-8")
 
     def test_a_manifest_falsely_claiming_daily_cycle_never_calls_place_order_is_caught(self, tmp_path):
         manifest = build_freeze_manifest(generated_at=NOW)

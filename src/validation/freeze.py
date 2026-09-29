@@ -115,7 +115,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # PaperBroker fill model, Fidelity behavior, or trade-selection
 # behavior, adds no new dashboard route, and does NOT touch the active
 # validation cohort/database in any way -- see
-# STEP_22_9_FREEZE_REPORT.md) each bumped the freeze
+# STEP_22_9_FREEZE_REPORT.md), and Step 23-1 (PAPER_TRADING_V1.5.0:
+# the first V1.5 development step -- the experiment-version metadata
+# FOUNDATION ONLY, per the read-only V1.5 architecture plan. Adds a new
+# `src.validation.experiment_version.ExperimentVersion` content-
+# addressed identity object (version_id deterministically derived from
+# a canonical hash of the software freeze version, the universe/risk/
+# validation config file hashes, a strategy-activation-stage label, and
+# a market-data provider/production-designation hash that never touches
+# a credential) plus a new, empty-until-used `experiment_versions`
+# table in `SqliteValidationStore`, and a single new optional,
+# defaulted `experiment_version_id: str | None = None` field on
+# `ControlCycleRecord`, `TradeRecord`, `DailySnapshot`, and
+# `StrategyVersionManifest` -- every pre-existing record without this
+# field deserializes unchanged, defaulting to `None`, never backfilled.
+# Does NOT wire this into `scripts/run_validation_cycle.py` or any live
+# cohort -- no candidate generation, ticker universe, active strategy,
+# Quant calculation, Risk decision, Risk threshold, sizing, lifecycle
+# logic, Tradier/PaperBroker/Fidelity behavior, human confirmation,
+# dashboard execution behavior, market-hours behavior, or the active
+# validation cohort's state changed in any way -- see
+# STEP_23_1_FREEZE_REPORT.md) each bumped the freeze
 # name/version in place without touching the prior versions' own
 # artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
 # STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
@@ -123,18 +143,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_4B_FREEZE_REPORT.md / STEP_22_4C_FREEZE_REPORT.md /
 # STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
 # STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
-# STEP_22_9_FREEZE_REPORT.md.
+# STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7 manifests/reports
-# remain recoverable from git history at the `paper-trading-v1.0` /
-# `paper-trading-v1.1` / `paper-trading-v1.2` / `paper-trading-v1.3` /
-# `paper-trading-v1.4` / `paper-trading-v1.4.1` / `paper-trading-v1.4.2`
-# / `paper-trading-v1.4.3` / `paper-trading-v1.4.4` / `paper-trading-v1.4.5`
-# / `paper-trading-v1.4.6` / `paper-trading-v1.4.7` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.4.8"
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8
+# manifests/reports remain recoverable from git history at the
+# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
+# `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1` /
+# `paper-trading-v1.4.2` / `paper-trading-v1.4.3` / `paper-trading-v1.4.4`
+# / `paper-trading-v1.4.5` / `paper-trading-v1.4.6` / `paper-trading-v1.4.7`
+# / `paper-trading-v1.4.8` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.0"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.4.8"
+MANIFEST_VERSION = "1.5.0"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -253,6 +274,23 @@ _CODE_MODULE_FILES: dict[str, Path] = {
     # shaped like AUTO TRADE/EXECUTE) is caught as material drift.
     "dashboard_app_module": REPO_ROOT / "src" / "dashboard" / "app.py",
     "dashboard_validation_ops_module": REPO_ROOT / "src" / "dashboard" / "validation_ops.py",
+    # PAPER_TRADING_V1.5.0, Step 1: the experiment-version metadata
+    # foundation -- a new, brand-new module, plus the two existing
+    # validation-persistence modules it touches
+    # (StrategyVersionManifest's new optional experiment_version_id
+    # field in protocol.py; DailySnapshot's new optional field and the
+    # new experiment_versions table/store methods in session.py).
+    # Hashing all three individually (not as part of any pre-existing
+    # entry -- src/validation/ as a whole was, itself, a pre-existing
+    # coverage gap this step does not attempt to close in full, see
+    # STEP_23_1_FREEZE_REPORT.md) means any future change to any of
+    # them (including one that tried to make version_id non-deterministic,
+    # let a secret enter market_data_config_hash, or silently changed
+    # what DailySnapshot/StrategyVersionManifest persist) is caught as
+    # material drift.
+    "experiment_version_module": REPO_ROOT / "src" / "validation" / "experiment_version.py",
+    "validation_protocol_module": REPO_ROOT / "src" / "validation" / "protocol.py",
+    "validation_session_module": REPO_ROOT / "src" / "validation" / "session.py",
 }
 
 # For the formal 90-day validation, OPRA is the required options feed
@@ -386,6 +424,10 @@ class FreezeManifest(BaseModel):
     dashboard_app_module_hash: str
     dashboard_validation_ops_module_hash: str
     dashboard_cannot_confirm_candidates: bool  # must always be True -- no src.dashboard file imports src.review.confirmation or confirm_candidate
+    # PAPER_TRADING_V1.5.0, Step 1
+    experiment_version_module_hash: str
+    validation_protocol_module_hash: str
+    validation_session_module_hash: str
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -575,7 +617,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.4.8",
+        freeze_version="1.5.0",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -606,6 +648,9 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         dashboard_app_module_hash=compute_file_hash(_CODE_MODULE_FILES["dashboard_app_module"]),
         dashboard_validation_ops_module_hash=compute_file_hash(_CODE_MODULE_FILES["dashboard_validation_ops_module"]),
         dashboard_cannot_confirm_candidates=_verify_dashboard_cannot_confirm_candidates(),
+        experiment_version_module_hash=compute_file_hash(_CODE_MODULE_FILES["experiment_version_module"]),
+        validation_protocol_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_protocol_module"]),
+        validation_session_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_session_module"]),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -740,6 +785,9 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         ("data_provider_module_hash", _CODE_MODULE_FILES["data_provider_module"], False),
         ("dashboard_app_module_hash", _CODE_MODULE_FILES["dashboard_app_module"], False),
         ("dashboard_validation_ops_module_hash", _CODE_MODULE_FILES["dashboard_validation_ops_module"], False),
+        ("experiment_version_module_hash", _CODE_MODULE_FILES["experiment_version_module"], False),
+        ("validation_protocol_module_hash", _CODE_MODULE_FILES["validation_protocol_module"], False),
+        ("validation_session_module_hash", _CODE_MODULE_FILES["validation_session_module"], False),
     )
     for field_name, target_path, is_dir in module_checks:
         recorded = getattr(manifest, field_name)

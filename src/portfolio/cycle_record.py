@@ -52,6 +52,15 @@ class ControlCycleRecord(BaseModel):
     degraded_mode: bool = False
     halt_state: bool = False
 
+    # PAPER_TRADING_V1.5.0, Step 1: optional, defaulted reference to the
+    # src.validation.experiment_version.ExperimentVersion active when
+    # this cycle ran -- None for every cycle record from before this
+    # field existed (every V1.4.x cycle), honestly, never backfilled.
+    # `extra="forbid"` above governs UNKNOWN keys on deserialization,
+    # not MISSING ones -- an old JSON blob lacking this key still
+    # deserializes cleanly, filling in this default.
+    experiment_version_id: str | None = None
+
     _validate_started = field_validator("started_at")(_tz_aware)
 
     @field_validator("completed_at")
