@@ -5580,3 +5580,107 @@ HUMAN_CONFIRMED_REVIEW_ONLY.** No official mutating validation cycle
 and no `confirm_candidate` call against the official cohort were
 executed anywhere in this step. This step deliberately stops here --
 no V1.5 Step 2 (market-hours gating or any other feature) was started.
+
+## 2026-09-29 -- Step 23-2 (PAPER_TRADING_V1.5.1): new-position daily
+## validation cycle market-hours safety gate
+
+**Fixes the 2026-09-25 incident** where the daily validation cycle
+could start scanning for new-position candidates around 9:21 AM ET --
+before the regular market session even opened. **Changes ONLY whether
+the new-position opportunity scan may start** -- no universe, active
+strategy, Quant logic/threshold, Risk logic/threshold, sizing,
+lifecycle logic, PaperBroker fill, collateral rule, Tradier
+normalization, freshness threshold, transaction-cost/slippage
+assumption, or human-confirmation semantic changed.
+
+Built `src.portfolio.market_session.evaluate_validation_cycle_eligibility`:
+a deterministic decision built entirely on the existing, unmodified
+`src.data.market_calendar` calendar primitive (holidays, early closes,
+timezone-aware session membership -- all reused, none reimplemented)
+plus a new, operator-configurable post-open/pre-close buffer
+(`config/operations.yaml`'s new `market_hours` section, 5/15 minutes
+by default, documented and overridable) -- distinct from this
+platform's existing 15-minute quote-staleness tolerance, which no such
+buffer policy existed as before this step. A new `MarketSessionState`
+vocabulary (`MARKET_CLOSED`/`PRE_MARKET`/`REGULAR_MARKET`/`POST_MARKET`)
+gives the dashboard a small, backend-decided session label.
+
+Wired into `scripts/run_validation_cycle.py`'s `run_validation_cycle()`
+-- the single production entry point both the CLI and the dashboard's
+`POST /api/validation-cycle/run` route call -- as the first check
+after the existing Tradier-production preflight, strictly before any
+provider call, candidate generation, Quant/Risk evaluation of a new
+candidate, or persistence of a cycle/candidate/snapshot record.
+
+**Existing-position safety fully preserved, proven directly.** The
+gate lives ONLY in this one script/dashboard-route layer -- never
+added inside `run_control_cycle`/`evaluate_position`/`check_kill_switch`,
+all three of which remain completely unmodified and structurally
+proven (source scan) to never mention the gate, and behaviorally
+proven to evaluate an existing position identically whether the market
+is open or closed. Gating the WHOLE daily invocation (rather than only
+the opportunity-scan sub-stage) was the deliberate, safe choice: since
+`run_control_cycle` itself unconditionally persists a
+`ControlCycleRecord` the moment it runs (consuming that day's
+cycle-level idempotency slot), letting existing-position monitoring
+run pre-market while only the scan was skipped would silently prevent
+a later, in-window retry the same day from ever running the
+opportunity scan at all.
+
+`OperatorStatusView` gained six additive, read-only fields
+(`market_session_state`/`is_trading_day`/`regular_session_open`/
+`regular_session_close`/`validation_cycle_allowed`/
+`validation_cycle_block_reason`). The dashboard's Run button
+(`runButtonState` in `operator_control.js`) now also requires the
+backend's `validation_cycle_allowed` -- the frontend never computes
+market hours itself, only renders the backend's own decision. A new
+"Market Session" card was added to the Daily Validation Control
+section.
+
+Added a new `market_hours_gate_precedes_mutation` freeze check,
+mirroring the established `official_cycle_requires_tradier_preflight`
+precedent exactly -- no new whole-file/directory hash was needed since
+`src/portfolio/market_session.py` and the modified
+`src/portfolio/operations_config.py` are both automatically covered by
+the existing `portfolio_module_hash` whole-directory hash.
+
+**Tests:** `tests/unit/portfolio/test_market_session.py` (18 tests,
+covering all 12 calendar/buffer/timezone/fail-closed scenarios the
+task required) and `tests/acceptance/test_market_hours_gate.py` (8
+tests: backend POST/CLI inside/outside session, zero provider
+calls/persistence when blocked, historical-record readability, API
+backward compatibility, and the mandatory existing-position safety
+proof) are new. 7 new Node tests for the market-hours branch of
+`runButtonState`/`marketSessionLabel` (31 total, up from 24). Every
+pre-existing test reaching the real daily-cycle path was updated to
+bypass the gate via monkeypatch (each such file's own purpose is the
+Review-Only workflow or dashboard/CLI wiring, never the gate itself)
+so no pre-existing test's pass/fail depends on the real wall-clock
+time the suite happens to run at. Full repository suite: **3583
+passed, 6 skipped, 0 failed** (up from V1.5.0's 3552 -- net new: 31
+tests).
+
+**Re-frozen as PAPER_TRADING_V1.5.1.** All **66 of 66 checks pass**,
+65 carried unchanged from V1.5.0 plus the 1 new
+`market_hours_gate_precedes_mutation` check. Protected-config SHA-256
+hashes (`universe.yaml`, `risk_limits.yaml`, `validation.yaml`,
+`brokers.yaml`) and the operational database (absent, before and
+after) were confirmed byte-for-byte/exactly unchanged.
+`config/operations.yaml` (not a protected config) was extended with
+the new `market_hours` buffer policy. See `STEP_23_2_FREEZE_REPORT.md`
+for the full check-by-check breakdown, source-verification notes, and
+the software-freeze-vs-operational-cohort-state discussion every prior
+report has established.
+
+**PAPER_TRADING_V1.5.1: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine -- never started, reset, or
+touched from this sandbox; this software freeze event is distinct
+from, and does not restart or interrupt, that ongoing operational
+cohort). **LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY.
+TRADIER: MARKET_DATA_ONLY. NEW_POSITION_EXECUTION:
+HUMAN_CONFIRMED_REVIEW_ONLY. NEW_POSITION_SCAN:
+REGULAR_MARKET_SESSION_ONLY (buffer-adjusted).** No official mutating
+validation cycle and no `confirm_candidate` call against the official
+cohort were executed anywhere in this step. This step deliberately
+stops here -- no V1.5 Step 3 or any other later feature was started.
