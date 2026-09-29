@@ -5500,3 +5500,83 @@ DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
 NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY.** No official
 mutating validation cycle and no `confirm_candidate` call against the
 official cohort were executed anywhere in this step.
+
+## 2026-09-29 -- Step 23-1 (PAPER_TRADING_V1.5.0): experiment-version
+## metadata foundation
+
+**Metadata/auditability only -- no trading, universe, strategy, Quant,
+Risk, sizing, lifecycle, Tradier, PaperBroker, or Fidelity behavior
+changed, and the current validation cohort was never touched.**
+
+Built `src.validation.experiment_version.ExperimentVersion`: a frozen,
+deterministic record identifying the exact experimental configuration
+(software freeze version, universe/risk/validation config hashes,
+strategy-activation stage, market-data provider identity) behind
+future paper-trading records. `version_id` is a SHA-256 digest over a
+canonical JSON encoding of every field except `recorded_at` -- two
+identically-configured builds always produce the same id regardless of
+build time; deliberately not a random UUID. Market-data identity is
+captured only as `provider` name + `is_production` boolean, never a
+token or secret -- proven by a structural import-scan test that the
+module never imports a provider module, `os`, or `dotenv`.
+
+Added an optional, defaulted `experiment_version_id: str | None = None`
+to `ControlCycleRecord`, `TradeRecord`, `DailySnapshot`, and (mirroring
+the existing `cohort_label` precedent exactly, rather than duplicating
+a second source of truth onto `CohortRecord`)
+`StrategyVersionManifest`. Every addition is a trailing, defaulted
+field -- old JSON-blob records and old pydantic payloads missing the
+key continue to deserialize unchanged, resolving to `None`, never
+fabricated or backfilled. A new append-only `experiment_versions` table
+was added to the existing `SqliteValidationStore`/
+`InMemoryValidationStore` trio via the established
+`_APPEND_ONLY_TABLES` pattern -- **no `ALTER TABLE`, no destructive
+migration, no schema-version bump anywhere** (every change is additive
+and no on-disk table shape became incompatible with an older reader).
+
+**No behavioral wiring this step** -- no script or orchestrator
+constructs or attaches an `ExperimentVersion` yet; every test exercises
+the new model/stores directly against `tmp_path`-scoped fixture
+configs and throwaway SQLite databases, never `data/options_agent.db`
+or the real `config/*.yaml` files.
+
+**Tests:** `tests/unit/validation/test_experiment_version.py` (29
+tests) covers all 7 required determinism/hashing scenarios (same
+config -> same id; changed universe/risk/validation config -> changed
+id; changed strategy-activation stage -> changed id; `recorded_at`
+alone does not change id; secrets never participate in identity),
+4 no-secrets tests, 5 backward-compatibility tests (old-shaped
+fixtures for all 4 record types, each resolving to `None`, never
+fabricated), 5 new-shaped round-trip tests, and 4 persistence tests
+against both `InMemoryValidationStore` and a `tmp_path`-scoped
+`SqliteValidationStore`. `tests/unit/validation/test_freeze.py` gained
+3 new tampering-detection tests for the 3 new manifest hash fields.
+Full repository suite: **3552 passed, 6 skipped, 0 failed** (up from
+V1.4.8's 3520 -- net new: 32 tests).
+
+**Re-frozen as PAPER_TRADING_V1.5.0.** Three new individual whole-file
+hashes were added (`experiment_version_module_hash`,
+`validation_protocol_module_hash`, `validation_session_module_hash`)
+-- deliberately file hashes, not a `src/validation/` directory hash,
+since `freeze.py` itself lives inside that directory and a directory
+hash would self-reference on every future version bump. All **73 of
+73 checks pass**, 70 carried unchanged from V1.4.8. Protected-config
+SHA-256 hashes (`universe.yaml`, `risk_limits.yaml`, `validation.yaml`,
+`brokers.yaml`) and the operational database (absent in this sandbox,
+before and after) were confirmed byte-for-byte/exactly unchanged. See
+`STEP_23_1_FREEZE_REPORT.md` for the full check-by-check breakdown,
+source-verification notes, and the same explicit
+software-freeze-vs-operational-cohort-state discussion every prior
+report has established.
+
+**PAPER_TRADING_V1.5.0: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine -- never started, reset, or
+touched from this sandbox; this software freeze event is distinct
+from, and does not restart or interrupt, that ongoing operational
+cohort). **LIVE_TRADING: DISABLED. FIDELITY_EXECUTION: MANUAL_ONLY.
+TRADIER: MARKET_DATA_ONLY. NEW_POSITION_EXECUTION:
+HUMAN_CONFIRMED_REVIEW_ONLY.** No official mutating validation cycle
+and no `confirm_candidate` call against the official cohort were
+executed anywhere in this step. This step deliberately stops here --
+no V1.5 Step 2 (market-hours gating or any other feature) was started.
