@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from src.data.historical import HistoricalDataProvider
 from src.data.option_chain import OptionRight
 from src.data.provider import FreshnessStatus, ProviderError, StaleDataError
 from src.data.rate_limiter import RateLimitPriority
@@ -25,6 +26,7 @@ from src.data.tradier_provider import (
     TradierRateLimitError,
     _epoch_ms_to_datetime,
     _parse_expirations_json,
+    _parse_history_json,
     _parse_option_json,
     _parse_quote_json,
     _redact,
@@ -641,3 +643,232 @@ class TestClose:
         provider, client = _provider(FakeResponse())
         _run(provider.close())
         assert client._closed is True
+
+
+# ---------------------------------------------------- historical bars (Step 3B)
+
+
+class TestParseHistoryJson:
+    """Unit tests for `_parse_history_json` -- mirrors the existing
+    per-entry validate-or-skip style already established for
+    `_parse_option_json`/`_parse_quote_json`/`_parse_expirations_json`
+    above, applied to `/markets/history`'s `history.day` shape."""
+
+    def test_maps_a_multi_day_list(self):
+        raw = {"history": {"day": [
+            {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
+            {"date": "2026-01-03", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1100},
+        ]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert [b.bar_date.isoformat() for b in bars] == ["2026-01-02", "2026-01-03"]
+        assert bars[0].close == 101.0 and bars[0].symbol == "SPY" and bars[0].source == SOURCE_TRADIER
+
+    def test_single_day_bare_object_collapses_to_one_bar(self):
+        """Tradier's XML-legacy single-item-collapses-to-bare-object
+        quirk, already handled 3x elsewhere in this module for
+        quotes/chains/expirations -- applies identically to `day`."""
+        raw = {"history": {"day": {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000}}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert len(bars) == 1 and bars[0].bar_date.isoformat() == "2026-01-02"
+
+    def test_null_history_object_returns_empty(self):
+        assert _parse_history_json({"history": None}, symbol="SPY") == []
+
+    def test_missing_history_key_returns_empty(self):
+        assert _parse_history_json({}, symbol="SPY") == []
+
+    def test_null_day_returns_empty(self):
+        assert _parse_history_json({"history": {"day": None}}, symbol="SPY") == []
+
+    def test_malformed_date_entry_skipped_not_raised(self):
+        raw = {"history": {"day": [
+            {"date": "not-a-date", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
+            {"date": "2026-01-03", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1100},
+        ]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert len(bars) == 1 and bars[0].bar_date.isoformat() == "2026-01-03"
+
+    def test_missing_date_key_skipped(self):
+        raw = {"history": {"day": [{"open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000}]}}
+        assert _parse_history_json(raw, symbol="SPY") == []
+
+    def test_high_below_low_skipped_never_fabricated(self):
+        raw = {"history": {"day": [{"date": "2026-01-02", "open": 100, "high": 99, "low": 102, "close": 101, "volume": 1000}]}}
+        assert _parse_history_json(raw, symbol="SPY") == []
+
+    def test_missing_required_price_field_skipped(self):
+        raw = {"history": {"day": [{"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "volume": 1000}]}}  # no close
+        assert _parse_history_json(raw, symbol="SPY") == []
+
+    def test_non_numeric_price_skipped(self):
+        raw = {"history": {"day": [{"date": "2026-01-02", "open": "abc", "high": 102, "low": 99, "close": 101, "volume": 1000}]}}
+        assert _parse_history_json(raw, symbol="SPY") == []
+
+    def test_zero_close_skipped(self):
+        raw = {"history": {"day": [{"date": "2026-01-02", "open": 100, "high": 102, "low": 0, "close": 0, "volume": 1000}]}}
+        assert _parse_history_json(raw, symbol="SPY") == []
+
+    def test_missing_volume_defaults_to_zero_not_skipped(self):
+        raw = {"history": {"day": [{"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101}]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert len(bars) == 1 and bars[0].volume == 0
+
+    def test_duplicate_date_keeps_first_occurrence_skips_the_rest(self):
+        raw = {"history": {"day": [
+            {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
+            {"date": "2026-01-02", "open": 200, "high": 202, "low": 199, "close": 201, "volume": 2000},
+        ]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert len(bars) == 1 and bars[0].close == 101.0
+
+    def test_output_is_chronologically_sorted_regardless_of_input_order(self):
+        raw = {"history": {"day": [
+            {"date": "2026-01-05", "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1},
+            {"date": "2026-01-02", "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1},
+            {"date": "2026-01-03", "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1},
+        ]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert [b.bar_date.isoformat() for b in bars] == ["2026-01-02", "2026-01-03", "2026-01-05"]
+
+    def test_non_dict_entry_in_list_skipped(self):
+        raw = {"history": {"day": ["not-a-dict", {"date": "2026-01-02", "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1}]}}
+        bars = _parse_history_json(raw, symbol="SPY")
+        assert len(bars) == 1
+
+
+class TestGetBars:
+    """`TradierMarketDataProvider.get_bars` -- Step 3B's one new
+    capability. Every test injects a fake HTTP client, exactly like
+    every other provider test in this file; no real network call, no
+    real token."""
+
+    def test_provider_satisfies_historical_data_provider(self):
+        assert issubclass(TradierMarketDataProvider, HistoricalDataProvider)
+
+    def test_requests_the_history_endpoint_with_expected_params(self):
+        response = FakeResponse(json_body={"history": {"day": []}})
+        provider, client = _provider(response)
+        _run(provider.get_bars("spy", date(2026, 1, 1), date(2026, 1, 31)))
+        assert client.calls[0][0] == "/markets/history"
+        params = client.calls[0][1]
+        assert params["symbol"] == "SPY"  # uppercased, same convention as every other method
+        assert params["interval"] == "daily"
+        assert params["start"] == "2026-01-01"
+        assert params["end"] == "2026-01-31"
+
+    def test_returns_parsed_bars_on_success(self):
+        response = FakeResponse(json_body={"history": {"day": [
+            {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
+            {"date": "2026-01-03", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 1100},
+        ]}})
+        provider, _ = _provider(response)
+        bars = _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert len(bars) == 2
+        assert bars[0].source == SOURCE_TRADIER
+
+    def test_empty_history_returns_empty_list_not_error(self):
+        provider, _ = _provider(FakeResponse(json_body={"history": {"day": None}}))
+        assert _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31))) == []
+
+    def test_single_day_response_returns_one_bar(self):
+        response = FakeResponse(json_body={"history": {"day": {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000}}})
+        provider, _ = _provider(response)
+        bars = _run(provider.get_bars("SPY", date(2026, 1, 2), date(2026, 1, 2)))
+        assert len(bars) == 1
+
+    def test_malformed_entry_isolated_not_whole_response(self):
+        response = FakeResponse(json_body={"history": {"day": [
+            {"date": "2026-01-02", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
+            {"date": "not-a-date", "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1},
+        ]}})
+        provider, _ = _provider(response)
+        bars = _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert len(bars) == 1
+
+    def test_malformed_json_raises_typed_error(self):
+        response = FakeResponse(status_code=200, json_body=_MALFORMED)
+        provider, _ = _provider(response)
+        with pytest.raises(TradierMalformedResponseError):
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+
+    def test_401_raises_authentication_error_never_retried(self):
+        response = FakeResponse(status_code=401, text="unauthorized")
+        provider, client = _provider(response, max_retries=3)
+        with pytest.raises(TradierAuthenticationError):
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert len(client.calls) == 1
+
+    def test_429_retries_then_raises_rate_limit_error(self):
+        response = FakeResponse(status_code=429, text="too many requests")
+        provider, client = _provider(response, max_retries=3, retry_base_delay_seconds=0.001)
+        with pytest.raises(TradierRateLimitError):
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert len(client.calls) == 3
+
+    def test_network_failure_retried_then_succeeds(self):
+        client = FakeHttpClient(FakeResponse(status_code=200, json_body={"history": {"day": None}}), raise_on_call=ConnectionError("boom"))
+        provider = TradierMarketDataProvider(TradierConfig(token=TOKEN, max_retries=3, retry_base_delay_seconds=0.001), http_client=client)
+        result = _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert result == []
+        assert len(client.calls) == 2
+
+    def test_timeout_like_failure_is_retried_and_eventually_raises(self):
+        client = FakeHttpClient(FakeResponse(status_code=200, json_body={"history": {"day": None}}))
+
+        async def _always_times_out(path, params=None):
+            client.calls.append((path, params or {}))
+            raise TimeoutError("simulated timeout")
+
+        client.get = _always_times_out
+        provider = TradierMarketDataProvider(TradierConfig(token=TOKEN, max_retries=2, retry_base_delay_seconds=0.001), http_client=client)
+        with pytest.raises(ProviderError):
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert len(client.calls) == 2
+
+    def test_defaults_to_lowest_priority_and_is_throttled_first(self):
+        """P5_BACKGROUND_RESEARCH's utilization ceiling (0.70) is the
+        lowest of any priority -- confirms get_bars is subordinate to
+        position-risk/lifecycle/repricing requests sharing the same
+        rate-limit budget, per Part 9's precedence and this module's own
+        get_bars docstring."""
+        response = FakeResponse(json_body={"history": {"day": None}})
+        provider, client = _provider(response)
+        from datetime import datetime, timezone
+
+        from src.data.rate_limiter import RateLimitState
+
+        provider._rate_limit_state = RateLimitState(
+            allowed=100, used=75, available=25, reset_at=None, observed_at=datetime.now(timezone.utc)
+        )
+        # 75% utilization: below P0-P3's ceilings, at/above P4 (0.80) is fine,
+        # but strictly above P5's 0.70 ceiling -- get_bars must be blocked here
+        # while a higher-priority request at the same state would proceed.
+        with pytest.raises(TradierRateLimitError):
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert client.calls == []
+        # A P0 request at the identical state is NOT blocked -- proves this
+        # is priority-specific throttling, not a blanket rate-limit outage.
+        _run(provider.get_expirations("SPY", priority=RateLimitPriority.P0_POSITION_RISK))
+
+    def test_explicit_priority_override_is_honored(self):
+        response = FakeResponse(json_body={"history": {"day": None}})
+        provider, client = _provider(response)
+        _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31), priority=RateLimitPriority.P4_OPPORTUNITY_SCANNING))
+        assert len(client.calls) == 1
+
+    def test_secret_never_appears_in_raised_exception_text(self):
+        response = FakeResponse(status_code=500, text=f"internal error, token={TOKEN} invalid")
+        provider, _ = _provider(response, max_retries=1)
+        with pytest.raises(ProviderError) as exc_info:
+            _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert TOKEN not in str(exc_info.value)
+
+    def test_never_calls_an_order_or_account_endpoint(self):
+        """Structural reinforcement of this module's MARKET DATA ONLY
+        guarantee (see tests/acceptance/test_tradier_market_data_only.py
+        for the repo-wide version): get_bars's only request path is
+        `/markets/history`."""
+        response = FakeResponse(json_body={"history": {"day": None}})
+        provider, client = _provider(response)
+        _run(provider.get_bars("SPY", date(2026, 1, 1), date(2026, 1, 31)))
+        assert all(path == "/markets/history" for path, _ in client.calls)

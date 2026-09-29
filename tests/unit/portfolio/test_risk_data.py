@@ -12,6 +12,7 @@ import pytest
 from src.data.historical import HistoricalBar
 from src.portfolio.risk_data import (
     CorrelationDataUnavailableError,
+    _date_price_map_from_bars,
     apply_correlation_wiring,
     apply_risk_data_wiring,
     apply_sector_wiring,
@@ -202,6 +203,130 @@ class TestResolvePriceHistoryForCorrelation:
             lookback_days=60, min_observations=20,
         )
         assert len(result["SPY"]) == len(result["QQQ"]) == 22
+
+
+class TestDatePriceMapFromBars:
+    """Step 3B (PAPER_TRADING_V1.5.4): the date-carrying replacement for
+    the old `_prices_from_bars` (which discarded dates entirely and
+    returned a plain positionally-ordered `list[float]`)."""
+
+    def test_maps_each_bar_date_to_its_close(self):
+        bars = [
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 2), open=100.0, high=100.0, low=100.0, close=100.0, volume=1, source="test"),
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 3), open=101.0, high=101.0, low=101.0, close=101.0, volume=1, source="test"),
+        ]
+        result = _date_price_map_from_bars(bars)
+        assert result == {date(2026, 1, 2): 100.0, date(2026, 1, 3): 101.0}
+
+    def test_out_of_order_input_is_handled_correctly(self):
+        bars = [
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 3), open=101.0, high=101.0, low=101.0, close=101.0, volume=1, source="test"),
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 2), open=100.0, high=100.0, low=100.0, close=100.0, volume=1, source="test"),
+        ]
+        result = _date_price_map_from_bars(bars)
+        assert result == {date(2026, 1, 2): 100.0, date(2026, 1, 3): 101.0}
+
+    def test_duplicate_date_within_one_series_keeps_first_seen_never_merges(self):
+        bars = [
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 2), open=100.0, high=100.0, low=100.0, close=100.0, volume=1, source="test"),
+            HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 2), open=999.0, high=999.0, low=999.0, close=999.0, volume=1, source="test"),
+        ]
+        result = _date_price_map_from_bars(bars)
+        assert result == {date(2026, 1, 2): 100.0}
+
+
+class TestResolvePriceHistoryDateIntersectionAlignment:
+    """Step 3B's critical correction: alignment must be by DATE
+    INTERSECTION, never by positional/length-based trimming. These
+    scenarios are specifically constructed so the two approaches give
+    DIFFERENT answers -- proving the fix, not just re-confirming the
+    already-passing contiguous-calendar case."""
+
+    @pytest.mark.asyncio
+    async def test_a_mid_series_gap_is_correctly_excluded_not_positionally_misaligned(self):
+        """QQQ is missing 2026-01-10 (a single mid-range gap) while SPY
+        has a full run. The OLD positional-trim code would have kept
+        both series' most-recent N=len(shortest) prices, silently
+        pairing SPY's price from one calendar date against QQQ's price
+        from a DIFFERENT calendar date once the gap shifted everything
+        after it by one slot. The fix must use only genuinely shared
+        dates, and never include 2026-01-10 in either series."""
+        end = date(2026, 1, 20)
+        spy_bars = [
+            HistoricalBar(
+                symbol="SPY", bar_date=date(2026, 1, 2) + timedelta(days=i),
+                open=100.0 + i, high=101.0 + i, low=99.0 + i, close=100.0 + i, volume=1000, source="test",
+            )
+            for i in range(19)  # 2026-01-02 .. 2026-01-20, every calendar day
+        ]
+        qqq_bars = [
+            HistoricalBar(
+                symbol="QQQ", bar_date=date(2026, 1, 2) + timedelta(days=i),
+                open=200.0 + i, high=201.0 + i, low=199.0 + i, close=200.0 + i, volume=1000, source="test",
+            )
+            for i in range(19)
+            if date(2026, 1, 2) + timedelta(days=i) != date(2026, 1, 10)  # one mid-range gap
+        ]
+        provider = _FakeHistoricalProvider({"SPY": spy_bars, "QQQ": qqq_bars})
+        now = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        result = await resolve_price_history_for_correlation(
+            frozenset({"SPY", "QQQ"}), historical_provider=provider, now=now,
+            lookback_days=60, min_observations=5,
+        )
+        spy_map = _date_price_map_from_bars(spy_bars)
+        # The gap date's SPY price must never appear anywhere in the result.
+        gap_price = spy_map[date(2026, 1, 10)]
+        assert gap_price not in result["SPY"]
+        # Every surviving pair must correspond to an actually-shared date.
+        qqq_map = _date_price_map_from_bars(qqq_bars)
+        common = sorted(set(spy_map) & set(qqq_map))
+        assert result["SPY"] == [spy_map[d] for d in common]
+        assert result["QQQ"] == [qqq_map[d] for d in common]
+        assert len(result["SPY"]) == 18  # 19 calendar days minus the one gap
+
+    @pytest.mark.asyncio
+    async def test_fails_closed_when_fewer_than_min_observations_dates_intersect(self):
+        """Two tickers each individually have >= min_observations bars,
+        but their calendars barely overlap -- the intersection itself
+        must be checked against min_observations, not just each raw
+        series' own length."""
+        provider = _FakeHistoricalProvider({
+            "SPY": [
+                HistoricalBar(symbol="SPY", bar_date=date(2026, 1, 1) + timedelta(days=i), open=float(i + 1), high=float(i + 1), low=float(i + 1), close=float(i + 1), volume=1, source="test")
+                for i in range(25)
+            ],
+            "QQQ": [
+                HistoricalBar(symbol="QQQ", bar_date=date(2026, 1, 20) + timedelta(days=i), open=float(i + 1), high=float(i + 1), low=float(i + 1), close=float(i + 1), volume=1, source="test")
+                for i in range(25)  # overlaps SPY on only 2026-01-20..24 (5 dates)
+            ],
+        })
+        now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await resolve_price_history_for_correlation(
+            frozenset({"SPY", "QQQ"}), historical_provider=provider, now=now,
+            lookback_days=90, min_observations=20,
+        )
+        assert result == {}  # only 5 shared dates -- below min_observations=20, fails closed
+
+    @pytest.mark.asyncio
+    async def test_no_padding_or_fill_ever_introduced(self):
+        """A ticker's gap date must never appear in the OTHER ticker's
+        aligned series either, with any substituted/padded/filled value
+        -- the aligned series length must exactly equal the intersection
+        size, never the max or min raw length."""
+        end = date(2026, 2, 28)
+        full_dates = [date(2026, 2, 1) + timedelta(days=i) for i in range(28)]
+        gap_dates = [d for d in full_dates if d != date(2026, 2, 15)]
+        provider = _FakeHistoricalProvider({
+            "SPY": [HistoricalBar(symbol="SPY", bar_date=d, open=1.0, high=1.0, low=1.0, close=1.0, volume=1, source="test") for d in full_dates],
+            "QQQ": [HistoricalBar(symbol="QQQ", bar_date=d, open=2.0, high=2.0, low=2.0, close=2.0, volume=1, source="test") for d in gap_dates],
+        })
+        now = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        result = await resolve_price_history_for_correlation(
+            frozenset({"SPY", "QQQ"}), historical_provider=provider, now=now,
+            lookback_days=60, min_observations=5,
+        )
+        assert len(result["SPY"]) == len(gap_dates) == 27
+        assert len(result["QQQ"]) == 27
 
 
 class TestApplyCorrelationWiring:

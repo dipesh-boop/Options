@@ -66,8 +66,14 @@ class TestNoTradierOrderCapabilityAnywhere:
         }
         # Tradier-specific batch/priority extras beyond the base
         # MarketDataProvider contract, all read-only market data.
+        # `get_bars` (Step 3B, PAPER_TRADING_V1.5.4) satisfies the
+        # separate `src.data.historical.HistoricalDataProvider`
+        # abstraction via the exact same read-only `/markets/history` GET
+        # endpoint and the exact same `_request` choke point every other
+        # method here already uses -- see that module's own docstring.
         allowed_extras = {
             "get_underlying_quotes", "get_expirations", "get_option_chain_for_expiration", "rate_limit_state",
+            "get_bars",
         }
         unexpected = public - base_contract - allowed_extras
         assert unexpected == set(), f"unexpected extra public method(s) on TradierMarketDataProvider: {unexpected}"

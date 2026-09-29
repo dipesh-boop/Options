@@ -1,4 +1,5 @@
-"""PAPER_TRADING_V1.5.3, Step 3: wires deterministic sector classification
+"""PAPER_TRADING_V1.5.3, Step 3 (historical-data sourcing extended in
+Step 3B, PAPER_TRADING_V1.5.4): wires deterministic sector classification
 and (when a trustworthy source is available) historical price data into
 the canonical `Portfolio` object *before* it reaches the Risk Engine, so
 `src.risk.concentration.check_sector_concentration`/`src.risk.correlation
@@ -27,8 +28,16 @@ for a brand-new candidate's own `Candidate.sector`. No LLM, no guessing,
 no new provider: SPY/QQQ are already declared `sector: ETF` there today.
 Historical price data for correlation is sourced from an injected
 `src.data.historical.HistoricalDataProvider` (the existing abstract
-interface for underlying OHLCV bars) -- see `resolve_price_history_for_correlation`'s
-own docstring for why the production callers in this step pass `None`.
+interface for underlying OHLCV bars). As of Step 3B, production callers
+(`scripts/run_validation_cycle.py`/`scripts/confirm_candidate.py`) pass
+a real `src.data.tradier_provider.TradierMarketDataProvider` instance --
+the same already-approved, already-credentialed production Tradier
+connection every other market-data call in this codebase already uses,
+now also satisfying `HistoricalDataProvider` via its `get_bars` method.
+`resolve_price_history_for_correlation` still accepts (and still fails
+closed on) `historical_provider=None`, since that remains the correct
+contract for any caller -- a test, a future provider swap -- that
+genuinely has no provider to offer.
 
 **Deterministic ETF policy.** A ticker whose `config/universe.yaml`
 `sector` value is exactly `"ETF"` (case-insensitive) is treated as a
@@ -153,8 +162,24 @@ def apply_sector_wiring(portfolio: Portfolio, universe: tuple[UniverseEntry, ...
 # ---------------------------------------------------------- correlation
 
 
-def _prices_from_bars(bars: list[HistoricalBar]) -> list[float]:
-    return [b.close for b in sorted(bars, key=lambda b: b.bar_date)]
+def _date_price_map_from_bars(bars: list[HistoricalBar]) -> dict[date, float]:
+    """Builds a `{bar_date: close}` map for one ticker's fetched bars --
+    the carrier for true date-based alignment (see
+    `resolve_price_history_for_correlation`'s docstring for why this
+    replaced a plain `list[float]`). A `bar_date` that repeats within
+    this same series is defensive-programmed against here too (not just
+    at the provider layer -- this function must be correct for ANY
+    `HistoricalDataProvider`, not only the one concrete Tradier
+    implementation that already de-duplicates its own responses): the
+    first-seen close for that date is kept, the repeat is dropped,
+    never averaged or overwritten -- ambiguous data is data this module
+    declines to use, not data it guesses about."""
+    result: dict[date, float] = {}
+    for bar in sorted(bars, key=lambda b: b.bar_date):
+        if bar.bar_date in result:
+            continue
+        result[bar.bar_date] = bar.close
+    return result
 
 
 async def resolve_price_history_for_correlation(
@@ -170,49 +195,65 @@ async def resolve_price_history_for_correlation(
     existing `src.data.historical.HistoricalDataProvider` abstraction,
     never a second, parallel historical-data fetch mechanism.
 
-    **Why `historical_provider` is `None` in every production call site
-    as of V1.5.3.** No concrete `HistoricalDataProvider` is currently
-    wired into the official validation path: `src.data.tradier_provider
+    **Why `historical_provider` could be `None`.** No concrete
+    `HistoricalDataProvider` was wired into the official validation path
+    as of PAPER_TRADING_V1.5.3 -- `src.data.tradier_provider
     .TradierMarketDataProvider` (the ONLY market-data provider official
-    validation may use) implements no historical-bars endpoint today.
-    Per this step's own explicit instruction, adding one -- even as a
-    read-only extension of the already-approved, already-credentialed
-    Tradier connection -- is flagged for explicit operator approval
-    rather than silently added; see STEP_23_3_FREEZE_REPORT.md's
-    "External Dependency Discovered" section for the full report. Until
-    that approval lands and a concrete provider is passed here, this
-    function raises `CorrelationDataUnavailableError` immediately --
-    which is the CORRECT fail-closed signal for
-    `src.risk.correlation.check_correlation` to act on whenever
-    correlation evaluation is actually required (i.e. the portfolio
-    already holds a position), and a complete no-op for an empty
-    portfolio, which never calls this function at all (see
+    validation may use) implemented no historical-bars endpoint at that
+    time; see STEP_23_3_FREEZE_REPORT.md's "External Dependency
+    Discovered" section. `TradierMarketDataProvider.get_bars` now exists
+    (PAPER_TRADING_V1.5.4, Step 3B, an explicitly-approved follow-up) and
+    every production call site passes it, but this function still
+    accepts `None` and still fails closed the identical way for any
+    caller (a test, a future provider swap) that genuinely has none to
+    offer -- `CorrelationDataUnavailableError` is the CORRECT fail-closed
+    signal for `src.risk.correlation.check_correlation` to act on
+    whenever correlation evaluation is actually required (i.e. the
+    portfolio already holds a position), and a complete no-op for an
+    empty portfolio, which never calls this function at all (see
     `src.risk.correlation.check_correlation`'s own "nothing to
     correlate against" early return).
 
-    **When a real provider IS supplied** (future step, once approved):
-    fetches `lookback_days` of daily bars per ticker ending strictly
+    **Date-INTERSECTION alignment (Step 3B correction).** Prior to this
+    step, alignment was positional: the most recent `N` closes were kept
+    per ticker, where `N` was simply the shortest series' LENGTH. That is
+    wrong whenever two tickers' fetched bars don't share the same
+    trading-calendar coverage for reasons OTHER than "one has fewer
+    total observations" -- e.g. one ticker's provider response is
+    missing a single mid-range day a listing/halt/data-vendor gap
+    dropped, while the other's is complete: positional trimming would
+    silently pair each ticker's Nth-from-the-end price against a
+    DIFFERENT actual calendar date for the other ticker, correlating two
+    misaligned series without any way to detect it. This function now
+    computes the actual SET INTERSECTION of `bar_date`s present in every
+    ticker's (post-no-lookahead, post-min-observations) series, uses
+    ONLY those shared dates -- in ascending date order, identical order
+    for every ticker -- and never pads, forward-fills, back-fills, or
+    substitutes a value for a date one ticker lacks. Fewer than
+    `min_observations` dates surviving the intersection fails closed
+    (returns `{}`) exactly like too few raw observations does.
+
+    Fetches `lookback_days` of daily bars per ticker ending strictly
     before `now.date()` (never including `now`'s own not-yet-closed
     session), rejects a bar dated after `now.date()` via
     `assert_no_lookahead` (point-in-time discipline, ARCHITECTURE.md
-    §9/§11 -- ANY future-dated bar is treated as a malformed response
-    for the WHOLE ticker, not silently dropped), aligns every ticker to
-    the same observation COUNT by keeping only the most recent `N`
-    closes where `N = min(len(series) for series in fetched)`, and
-    omits (never fabricates) a ticker whose aligned series has fewer
-    than `min_observations` points or whose fetch raised. A ticker
-    omitted here is exactly the "insufficient/unavailable" signal
-    `check_correlation` fails closed on when required."""
+    §9/§11 -- ANY future-dated bar taints the WHOLE series for that
+    ticker, never silently dropped only for that one bar), and omits
+    (never fabricates) a ticker whose fetch failed, returned no bars, or
+    whose own series (before intersection) has fewer than
+    `min_observations` points. A ticker omitted here, or a date absent
+    from the final intersection, is exactly the "insufficient/
+    unavailable" signal `check_correlation` fails closed on when
+    required."""
     if historical_provider is None:
         raise CorrelationDataUnavailableError(
-            "no historical-data provider is wired into official validation yet (Tradier market data "
-            "has no historical-bars endpoint implemented as of PAPER_TRADING_V1.5.3) -- see "
-            "STEP_23_3_FREEZE_REPORT.md's external-dependency report"
+            "no historical-data provider was supplied for correlation evaluation -- missing price "
+            "history is never treated as zero correlation"
         )
 
     as_of_date = now.date()
     start = as_of_date - timedelta(days=lookback_days)
-    per_ticker_prices: dict[str, list[float]] = {}
+    per_ticker_dates: dict[str, dict[date, float]] = {}
     for ticker in sorted(tickers):
         try:
             bars = await historical_provider.get_bars(ticker, start, as_of_date - timedelta(days=1))
@@ -224,18 +265,23 @@ async def resolve_price_history_for_correlation(
             assert_no_lookahead(bars, as_of_date - timedelta(days=1))
         except ValueError:
             continue  # a future-dated bar taints the whole series for this ticker -- omitted, never trimmed
-        prices = _prices_from_bars(bars)
-        if len(prices) < min_observations:
+        date_prices = _date_price_map_from_bars(bars)
+        if len(date_prices) < min_observations:
             continue
-        per_ticker_prices[ticker] = prices
+        per_ticker_dates[ticker] = date_prices
 
-    if len(per_ticker_prices) < 2:
+    if len(per_ticker_dates) < 2:
         return {}
 
-    aligned_length = min(len(series) for series in per_ticker_prices.values())
-    if aligned_length < min_observations:
+    common_dates = set.intersection(*(set(dp.keys()) for dp in per_ticker_dates.values()))
+    if len(common_dates) < min_observations:
         return {}
-    return {ticker: series[-aligned_length:] for ticker, series in per_ticker_prices.items()}
+
+    ordered_dates = sorted(common_dates)
+    return {
+        ticker: [date_prices[d] for d in ordered_dates]
+        for ticker, date_prices in per_ticker_dates.items()
+    }
 
 
 async def apply_correlation_wiring(

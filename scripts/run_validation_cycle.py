@@ -103,6 +103,7 @@ from src.data.factory import (  # noqa: E402
     get_configured_market_data_provider,
     verify_official_provider_is_tradier_production,
 )
+from src.data.historical import HistoricalDataProvider  # noqa: E402
 from src.data.market_calendar import is_market_open, is_trading_day  # noqa: E402
 from src.data.option_chain import OptionChain  # noqa: E402
 from src.data.universe import load_universe, load_universe_strategies  # noqa: E402
@@ -268,22 +269,6 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         )
         portfolio_store.save(ops.account_id, portfolio)
 
-    # PAPER_TRADING_V1.5.3, Step 3: sector/correlation risk-data wiring.
-    # A no-op (returns `portfolio` completely unchanged) unless the
-    # operator's own config/operations.yaml sets
-    # `risk_data_wiring.enabled: true` -- the active cohort's own config
-    # leaves this at its default `false`, so its candidate eligibility
-    # is unaffected. `historical_provider=None`: no historical-bars data
-    # source is currently wired into official validation (see
-    # STEP_23_3_FREEZE_REPORT.md's external-dependency report) -- once
-    # wiring is active, this makes correlation evaluation fail closed
-    # for any candidate whenever the portfolio already holds a position,
-    # rather than silently skipping it, until that provider is added.
-    portfolio = await apply_risk_data_wiring(
-        portfolio, universe=universe, enabled=ops.risk_data_wiring_enabled, historical_provider=None,
-        now=now, lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
-    )
-
     idempotency_store = SqliteIdempotencyStore(ops.account_state_db_path)
     broker = PaperBroker(initial_cash=val_config.default_starting_nav, account_id=ops.account_id, idempotency_store=idempotency_store, now=now)
     account_state = account_state_store.get(ops.account_id)
@@ -294,10 +279,45 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
 
     broker_capabilities = load_broker_capabilities("internal_paper")
 
+    # PAPER_TRADING_V1.5.4, Step 3B: the market-data provider is now
+    # constructed here -- BEFORE the risk-data wiring call below, unlike
+    # V1.5.3, where it was constructed later and wiring always ran with
+    # `historical_provider=None`. This lets the SAME already-open
+    # connection (already verified Tradier production by the preflight
+    # above) also serve as risk-data wiring's `historical_provider`,
+    # rather than opening a second, redundant one.
+    # `isinstance(..., HistoricalDataProvider)` -- never a hardcoded
+    # provider-name check -- decides whether this provider can supply
+    # historical bars at all: `TradierMarketDataProvider` is the only
+    # provider in this codebase that satisfies both `MarketDataProvider`
+    # and `HistoricalDataProvider` today, but this line never assumes
+    # that. A provider that only implements `MarketDataProvider` falls
+    # through to `historical_provider=None` -- exactly the input
+    # `apply_risk_data_wiring`/`resolve_price_history_for_correlation`
+    # already fail closed on; this script never decides what "missing"
+    # means for the Risk Engine, only whether a provider is available.
     provider = get_configured_market_data_provider()
-    tickers = sorted({p.ticker for p in portfolio.positions} | {e.ticker for e in universe})
-    fetch_results: dict[str, OptionChain | Exception] = {}
+    historical_provider: HistoricalDataProvider | None = (
+        provider if isinstance(provider, HistoricalDataProvider) else None
+    )
     try:
+        # PAPER_TRADING_V1.5.3, Step 3 (historical-data sourcing wired in
+        # Step 3B, PAPER_TRADING_V1.5.4): sector/correlation risk-data
+        # wiring. A no-op (returns `portfolio` completely unchanged)
+        # unless the operator's own config/operations.yaml sets
+        # `risk_data_wiring.enabled: true` -- the active cohort's own
+        # config leaves this at its default `false`, so its candidate
+        # eligibility is unaffected AND `historical_provider.get_bars` is
+        # never called for that cohort either (`apply_risk_data_wiring`
+        # returns immediately on `enabled=False`, before touching
+        # `historical_provider` at all).
+        portfolio = await apply_risk_data_wiring(
+            portfolio, universe=universe, enabled=ops.risk_data_wiring_enabled, historical_provider=historical_provider,
+            now=now, lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
+        )
+
+        tickers = sorted({p.ticker for p in portfolio.positions} | {e.ticker for e in universe})
+        fetch_results: dict[str, OptionChain | Exception] = {}
         for ticker in tickers:
             try:
                 fetch_results[ticker] = await provider.get_option_chain(ticker)

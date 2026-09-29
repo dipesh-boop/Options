@@ -56,13 +56,35 @@ def _reset_cached_runner_module():
     validation_ops._runner_module = None
 
 
+@pytest.fixture
+def _isolated_operational_db(tmp_path, monkeypatch):
+    """A handful of tests below exercise `build_operator_status`/the
+    dashboard's real routes with no seeded `environment` fixture (that
+    fixture's own elaborate seeded-cohort setup is unnecessary for an
+    "unconfigured"/"mock provider" scenario). Without this, `load_operations_config()`/
+    `load_validation_config()` fall through to `config/operations.yaml`'s/
+    `config/validation.yaml`'s own real default (`data/options_agent.db`),
+    and every `SqliteXStore(...)` construction downstream would silently
+    create/touch that literal repository-root path the moment it connects
+    -- CLAUDE.md and every prior freeze step are explicit that no test may
+    ever touch the real operational database. Every DB-path env override
+    this codebase already defines is pointed at this test's own `tmp_path`
+    instead, the same isolation `tests/acceptance/test_review_only_daily_cycle
+    .py`'s `environment` fixture already establishes for the tests that use it."""
+    monkeypatch.setenv("OPTIONS_AGENT_VALIDATION_DB_PATH", str(tmp_path / "validation.db"))
+    monkeypatch.setenv("OPTIONS_AGENT_ACCOUNT_STATE_DB_PATH", str(tmp_path / "ops.db"))
+    monkeypatch.setenv("OPTIONS_AGENT_CONTROL_LOOP_DB_PATH", str(tmp_path / "ops.db"))
+    monkeypatch.setenv("OPTIONS_AGENT_LIFECYCLE_DB_PATH", str(tmp_path / "ops.db"))
+    monkeypatch.setenv("OPTIONS_AGENT_CANDIDATE_REVIEW_DB_PATH", str(tmp_path / "ops.db"))
+
+
 class TestOperatorStatusRoute:
-    def test_returns_200_and_never_raises_when_unconfigured(self):
+    def test_returns_200_and_never_raises_when_unconfigured(self, _isolated_operational_db):
         client = TestClient(app)
         resp = client.get("/api/operator-status")
         assert resp.status_code == 200
 
-    def test_response_never_contains_a_configured_secret(self, monkeypatch):
+    def test_response_never_contains_a_configured_secret(self, _isolated_operational_db, monkeypatch):
         """Item 13: secrets are not returned by dashboard/API/status
         output. Sets a real-looking Tradier token in the environment,
         then asserts it never appears anywhere in the JSON response --
@@ -79,7 +101,7 @@ class TestOperatorStatusRoute:
         assert secret_token not in body_text
         assert "sk-ant-also-must-never-leak" not in body_text
 
-    def test_reports_provider_readiness_without_crashing_on_mock(self, monkeypatch):
+    def test_reports_provider_readiness_without_crashing_on_mock(self, _isolated_operational_db, monkeypatch):
         monkeypatch.delenv("OPTIONS_AGENT_DATA_PROVIDER", raising=False)
         client = TestClient(app)
         resp = client.get("/api/operator-status")
@@ -90,7 +112,7 @@ class TestOperatorStatusRoute:
 
 
 class TestValidationCycleRunRoute:
-    def test_accepts_no_body_and_never_places_an_order_when_provider_is_mock(self, monkeypatch):
+    def test_accepts_no_body_and_never_places_an_order_when_provider_is_mock(self, _isolated_operational_db, monkeypatch):
         """A click against a misconfigured (mock) environment must fail
         the exact same provider preflight the CLI already enforces --
         never silently substitute a provider, never mutate anything."""
@@ -265,7 +287,7 @@ class TestRiskDataWiringObservability:
         status = validation_ops.build_operator_status(now=datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc))
         assert status.risk_data_wiring_status == "INSTALLED_ACTIVE"
 
-    def test_unconfigured_degraded_status_never_fabricates_a_wiring_status(self):
+    def test_unconfigured_degraded_status_never_fabricates_a_wiring_status(self, _isolated_operational_db):
         status = validation_ops.build_operator_status()
         if not status.configured:
             assert status.risk_data_wiring_status is None

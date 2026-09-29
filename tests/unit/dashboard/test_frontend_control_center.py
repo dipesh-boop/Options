@@ -43,6 +43,9 @@ from tests.acceptance.test_review_only_daily_cycle import (
 from tests.acceptance.test_review_only_daily_cycle import (
     operations_config_module as _ops_config_module,
 )
+from tests.unit.dashboard.test_operator_status import (
+    _isolated_operational_db,  # noqa: F401 -- pytest fixture, imported for reuse
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _STATIC_DIR = REPO_ROOT / "src" / "dashboard" / "static"
@@ -134,7 +137,7 @@ class TestFrontendWiredToOperatorStatus:
 
 
 class TestNoSecretRendersInFrontend:
-    def test_operator_status_route_still_never_leaks_a_configured_secret(self, monkeypatch):
+    def test_operator_status_route_still_never_leaks_a_configured_secret(self, _isolated_operational_db, monkeypatch):
         monkeypatch.setenv("OPTIONS_AGENT_DATA_PROVIDER", "tradier")
         secret_token = "sk-live-super-secret-tradier-token-should-never-leak"  # noqa: S105
         monkeypatch.setenv("OPTIONS_AGENT_TRADIER_TOKEN", secret_token)

@@ -1,9 +1,11 @@
 """Tradier real-time market-data-only provider (Step 22.4; timestamp
-semantics corrected in Step 22.7, PAPER_TRADING_V1.4.6).
+semantics corrected in Step 22.7, PAPER_TRADING_V1.4.6; historical daily
+bars added in Step 3B, PAPER_TRADING_V1.5.4).
 
 **MARKET DATA ONLY — never execution.** This module calls exclusively
 Tradier's read-only `/v1/markets/*` GET endpoints (quotes, option
-chains, option expirations). It makes no request to any
+chains, option expirations, and — as of Step 3B — daily historical
+bars via `/v1/markets/history`). It makes no request to any
 `/v1/accounts/*/orders` endpoint, defines no `place_order`/
 `submit_order`/`cancel_order`/`preview_order`/`replace_order` method of
 any kind, and issues no HTTP method other than GET anywhere —
@@ -13,6 +15,16 @@ accepts no `method` parameter at all, only ever performing a GET. See
 proof (a repo-wide grep for a Tradier order/trading-shaped identifier)
 and `make verify-freeze`'s `tradier_market_data_only` check for the
 same proof re-run on every freeze.
+
+**Historical bars are a capability, not an activation** (Step 3B,
+PAPER_TRADING_V1.5.4). `get_bars` below satisfies `src.data.historical
+.HistoricalDataProvider` using the exact same production Tradier
+credential and the exact same `_request` choke point as every other
+method here — no new provider, no new credential, no sandbox fallback.
+Whether anything actually CALLS `get_bars` in production is controlled
+entirely by `config/operations.yaml`'s `risk_data_wiring.enabled` flag
+(see `src.portfolio.risk_data`'s module docstring) — this module simply
+makes the capability exist; it does not decide when it is used.
 
 **Provider Greeks are reference data, never authoritative** (Part 29):
 `iv`/`delta`/`gamma`/`theta`/`vega` on the `OptionContract`s this module
@@ -60,6 +72,7 @@ from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.data.historical import HistoricalBar, HistoricalDataProvider
 from src.data.option_chain import OptionChain, OptionContract, OptionRight
 from src.data.provider import MarketDataProvider, ProviderError
 from src.data.quotes import UnderlyingQuote
@@ -332,6 +345,60 @@ def _parse_option_json(raw: dict, *, underlying_price: float, now: datetime) -> 
         return None  # canonical-schema rejection -- skipped, never coerced into validity
 
 
+def _parse_history_json(raw: dict, *, symbol: str) -> list[HistoricalBar]:
+    """Maps `/markets/history`'s response to canonical `HistoricalBar`s
+    (Step 3B, PAPER_TRADING_V1.5.4). Tradier's single-item
+    list-collapses-to-bare-object quirk -- already handled identically
+    for `quotes`/`options`/`expirations` above -- applies the same way
+    to `history.day`. Every entry is validated independently: an
+    unparseable date, a non-finite/non-positive price, `high < low`, or
+    `open`/`close` outside `[low, high]` (all enforced by `HistoricalBar`
+    itself) causes that ONE entry to be skipped, never fabricated or
+    coerced into validity, and never allowed to abort the rest of the
+    series. A date already seen earlier in this same response is also
+    skipped -- Tradier's contract is one daily bar per calendar day per
+    symbol, so a repeat means the response itself is suspect for that
+    date, not a second observation to merge, average, or overwrite
+    with."""
+    history_obj = raw.get("history")
+    if not history_obj:
+        return []
+    days_raw = history_obj.get("day")
+    if days_raw is None:
+        return []
+    entries = days_raw if isinstance(days_raw, list) else [days_raw]
+    bars: list[HistoricalBar] = []
+    seen_dates: set[date] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        date_raw = entry.get("date")
+        if not date_raw:
+            continue
+        try:
+            bar_date = date.fromisoformat(str(date_raw))
+        except (ValueError, TypeError):
+            continue
+        if bar_date in seen_dates:
+            continue
+        try:
+            bar = HistoricalBar(
+                symbol=symbol,
+                bar_date=bar_date,
+                open=float(entry["open"]),
+                high=float(entry["high"]),
+                low=float(entry["low"]),
+                close=float(entry["close"]),
+                volume=int(entry.get("volume") or 0),
+                source=SOURCE_TRADIER,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue  # missing/non-numeric/inconsistent OHLC -- skipped, never fabricated
+        seen_dates.add(bar_date)
+        bars.append(bar)
+    return sorted(bars, key=lambda b: b.bar_date)
+
+
 def _parse_expirations_json(raw: dict) -> list[date]:
     """Maps `/markets/options/expirations`'s response to a sorted list
     of `date`s. Tradier returns `{"expirations": null}` (not an empty
@@ -357,7 +424,7 @@ def _parse_expirations_json(raw: dict) -> list[date]:
 # ------------------------------------------------------------ provider
 
 
-class TradierMarketDataProvider(MarketDataProvider):
+class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider):
     """Real-market-data-only Tradier adapter. `http_client` is accepted
     as a constructor override purely so tests can inject a fake
     implementing one async `get(path, params=None)` method (returning
@@ -515,6 +582,35 @@ class TradierMarketDataProvider(MarketDataProvider):
         for expiration in expirations[: self._config.max_expirations]:
             contracts.extend(await self.get_option_chain_for_expiration(symbol, expiration, priority=priority))
         return OptionChain(underlying=underlying, contracts=contracts, timestamp=now, source=SOURCE_TRADIER)
+
+    # ---------------------------------------------------- historical bars
+
+    async def get_bars(
+        self, symbol: str, start: date, end: date, *, priority: RateLimitPriority = RateLimitPriority.P5_BACKGROUND_RESEARCH
+    ) -> list[HistoricalBar]:
+        """Satisfies `src.data.historical.HistoricalDataProvider` (Step
+        3B, PAPER_TRADING_V1.5.4) -- the one new capability this module
+        adds. Calls exclusively the read-only `GET /v1/markets/history`
+        endpoint through the same `_request` choke point (same
+        production credential, same retry/redaction/rate-limit
+        accounting) every other method here already uses -- no new
+        networking code, no new credential, no sandbox fallback.
+
+        `priority` defaults to the lowest tier, `P5_BACKGROUND_RESEARCH`
+        -- correlation/history enrichment is explicitly subordinate to
+        position-risk (P0), lifecycle (P1), portfolio valuation (P2),
+        pending-ticket repricing (P3), and opportunity scanning (P4)
+        requests sharing this same rate-limit budget
+        (`src.data.rate_limiter`), matching Part 9's "never sacrifice
+        risk monitoring merely to scan more symbols" precedence,
+        extended here to "merely to backfill correlation history.\""""
+        symbol = symbol.upper()
+        data = await self._request(
+            "/markets/history",
+            {"symbol": symbol, "interval": "daily", "start": start.isoformat(), "end": end.isoformat()},
+            priority=priority,
+        )
+        return _parse_history_json(data, symbol=symbol)
 
     async def close(self) -> None:
         aclose = getattr(self._http_client, "aclose", None)
