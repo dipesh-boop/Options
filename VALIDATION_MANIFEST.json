@@ -1,10 +1,10 @@
 {
-  "manifest_version": "1.5.1",
-  "freeze_name": "PAPER_TRADING_V1.5.1",
-  "freeze_timestamp": "2026-09-29T16:23:15.335014Z",
-  "git_commit": "cfab43d0611eca360fbe1f95c749bf2bfad4a6d1",
+  "manifest_version": "1.5.2",
+  "freeze_name": "PAPER_TRADING_V1.5.2",
+  "freeze_timestamp": "2026-09-29T18:58:59.686040Z",
+  "git_commit": "76f9391c6df6adef69dfdecc1c7de54e5077d635",
   "git_branch": "claude/options-trading-agent-2b4yi8",
-  "repository_state": "dirty (1 uncommitted change(s))",
+  "repository_state": "dirty (6 uncommitted change(s))",
   "python_version": "3.11.15 (CPython)",
   "dependency_requirements_hash": "1065c8854d1b7464e7c09a94990b555cbaeaada575f7e101f6da762dab78cf78",
   "strategy_library_version": "481376ddbac87cbfad83b0b351b3f12d34a98072b67214835ac4c3bac287bc78",
@@ -88,7 +88,7 @@
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
   "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
-  "freeze_version": "1.5.1",
+  "freeze_version": "1.5.2",
   "alpaca_provider_module_hash": "4c54584fb0452020918ec89bc690e6350745156428d5569f1ad39f4bea5a7610",
   "data_provider_at_freeze_time": "mock",
   "required_options_feed_for_validation": "opra",
@@ -167,5 +167,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "7b7acdee375f696a86c18258c75a9c9b16f2fdba40ce00ee870f8f8b1defd1c0"
+  "manifest_hash": "d84bf3975fde4d044d06a9d673718209b6f8b93909d88e0405c8c2ce6c245f3b"
 }

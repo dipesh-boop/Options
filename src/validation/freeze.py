@@ -179,19 +179,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
 # STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
 # STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md /
-# STEP_23_2_FREEZE_REPORT.md.
+# STEP_23_2_FREEZE_REPORT.md / STEP_23_2A_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0
-# manifests/reports remain recoverable from git history at the
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0/
+# V1.5.1 manifests/reports remain recoverable from git history at the
 # `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
 # `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1` /
 # `paper-trading-v1.4.2` / `paper-trading-v1.4.3` / `paper-trading-v1.4.4`
 # / `paper-trading-v1.4.5` / `paper-trading-v1.4.6` / `paper-trading-v1.4.7`
-# / `paper-trading-v1.4.8` / `paper-trading-v1.5.0` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.1"
+# / `paper-trading-v1.4.8` / `paper-trading-v1.5.0` / `paper-trading-v1.5.1`
+# tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.2"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.1"
+MANIFEST_VERSION = "1.5.2"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -660,7 +661,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.1",
+        freeze_version="1.5.2",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,

@@ -5684,3 +5684,110 @@ REGULAR_MARKET_SESSION_ONLY (buffer-adjusted).** No official mutating
 validation cycle and no `confirm_candidate` call against the official
 cohort were executed anywhere in this step. This step deliberately
 stops here -- no V1.5 Step 3 or any other later feature was started.
+
+## 2026-09-29 -- Step 23-2A (PAPER_TRADING_V1.5.2)
+
+Narrow frontend-only hotfix, triggered by a real-browser (Safari)
+acceptance failure the operator reported against V1.5.1's new "Market
+Session" control-center card: the card rendered completely blank, and
+Safari's console showed `typeof marketSessionLabel === "undefined"`
+inside `dashboard.js`'s execution context, despite `operator_control.js`
+(which defines `marketSessionLabel`) loading first via a plain
+`<script>` tag in `index.html`, exactly as that file's own top comment
+claimed was sufficient.
+
+**Source-first investigation, before any edit.** Confirmed directly
+from source (not assumption): `index.html`'s two `<script>` tags are
+plain classic scripts, correctly ordered, with no `type="module"`,
+`defer`, or `async`, and no inline script that could collide with
+either file's names; `operator_control.js` has no IIFE or module
+wrapper anywhere -- every export is a plain top-level `const`/`function`
+statement; the existing Node test suite
+(`tests/frontend/operator_control.test.js`) uses `require()`, which
+gives the file its own isolated module scope and reads only its
+`module.exports` object -- a CommonJS-specific contract that is inert
+in a browser and has nothing to do with how `dashboard.js` actually
+resolves these names at runtime. A rigorous re-creation of real
+classic-script global scope (Node's `vm.createContext` plus sequential
+`vm.Script.runInContext()` calls against the same context object,
+verified directly against ECMA-262 Script/global semantics) confirmed
+that most of `operator_control.js`'s original scope-sharing claim was
+in fact spec-compliant; it is not possible, from inside this sandbox,
+to fully attribute which specific mechanism produced the real-Safari
+result, and the task's instruction to accept that observation as
+ground truth rather than re-diagnose it was followed. What the
+investigation *did* establish concretely, independent of mechanism, is
+that `operator_control.js` had no explicit, verified contract for the
+browser path at all -- only an implicit one nothing in the test suite
+ever checked -- and, specifically, that its four `const`-declared
+exports (unlike its six `function`-declared ones) never became
+`window` properties before this fix.
+
+**Fix implemented: explicit `window.<name> = <name>` export.**
+`operator_control.js` now assigns all nine of its exports explicitly
+onto `window`, in a clearly marked block mirroring the `module.exports`
+guard the file already had for Node -- giving the browser path the
+same explicit, defensive guarantee the Node path always had, and
+removing any dependence on an implicit, previously unverified
+assumption about cross-script scoping. No call site in `dashboard.js`
+needed to change (bare-identifier resolution already reaches a
+`window` property). This was chosen over a namespace-object export
+(would have touched ~9 call sites in `dashboard.js`) or a
+dashboard-local re-implementation (would have duplicated logic) as the
+smallest of the offered fix shapes. `dashboard.js`'s stale
+`SOFTWARE_VERSION` badge (`"PAPER_TRADING_V1.4.8"`, unbumped since Step
+22.9) is now `"PAPER_TRADING_V1.5.2"`.
+
+**New regression: a real browser-scope integration test.**
+`tests/frontend/operator_control_browser_scope.test.js` (11 tests,
+Node's built-in `node --test`) loads `operator_control.js` then
+`dashboard.js`, in that order, into one shared `vm` context -- the
+same load order `index.html` uses and, unlike `require()`, a model
+that genuinely shares one global lexical environment across the two
+script executions. It proves: every helper is available both as a
+`window` property and as a bare identifier after loading both files in
+browser order; the explicit `window.<const>` contract is a real,
+new guarantee absent from a programmatically-reconstructed pre-fix
+source (a true, reproducible red-before/green-after proof, scoped
+honestly to the one part of the contract that provably did not exist
+before); `renderCcMarketSession` executes without a `ReferenceError`;
+a `REGULAR_MARKET`/`validation_cycle_allowed: true` status renders the
+state badge, the backend's own Eastern-time session window, and "New-
+position scan window is open."; a `PRE_MARKET`/`validation_cycle_allowed:
+false` status renders the backend's own block reason verbatim; the Run
+button stays disabled (with that same reason) when blocked and is
+enabled once every prerequisite passes; and `renderControlCenter` runs
+end-to-end without throwing for both cases. `tests/unit/dashboard
+/test_frontend_control_center.py`'s Node-suite wrapper now runs both
+Node test files explicitly (a bare directory argument does not resolve
+under `node --test` on this Node version).
+
+**Tests:** 41/41 Node tests (31 pre-existing + 10 new), 43 focused
+dashboard/operator-status Python tests, 118 focused market-hours/
+review-cycle/CLI/freeze Python tests, and the **full suite: 3583
+passed, 6 skipped, 0 failed** -- an identical pass count to the
+pre-fix V1.5.1 baseline (no net change to the Python test count; the
+new Node file is invoked through the same one subprocess-shelling
+wrapper test as before).
+
+**Re-frozen as PAPER_TRADING_V1.5.2.** All **64 of 64 checks pass**.
+No new hashed module or safety-flag field this step -- nothing under a
+hashed directory or Python safety check changed; only `freeze.py`'s
+own version constants were bumped. Protected-config SHA-256 hashes
+(`universe.yaml`, `risk_limits.yaml`, `validation.yaml`, `brokers.yaml`,
+`operations.yaml` -- explicitly untouched this step) and the
+operational database (absent, before and after) were confirmed
+byte-for-byte/exactly unchanged. See `STEP_23_2A_FREEZE_REPORT.md` for
+the full breakdown.
+
+**PAPER_TRADING_V1.5.2: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine -- never started, reset, or
+touched from this sandbox). **LIVE_TRADING: DISABLED.
+FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
+NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY. NEW_POSITION_SCAN:
+REGULAR_MARKET_SESSION_ONLY (buffer-adjusted, unchanged from V1.5.1).**
+No official mutating validation cycle and no `confirm_candidate` call
+against the official cohort were executed anywhere in this step. This
+step deliberately stops here -- no V1.5 Step 3 or any other later
+feature was started.

@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.5.1"
-        assert manifest.freeze_version == "1.5.1"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.5.2"
+        assert manifest.freeze_version == "1.5.2"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -67,6 +67,10 @@ class TestBuildFreezeManifest:
         assert len(manifest.validation_session_module_hash) == 64
         # PAPER_TRADING_V1.5.1, Step 2
         assert manifest.market_hours_gate_precedes_mutation is True
+        # PAPER_TRADING_V1.5.2, Step 2A: narrow frontend-only hotfix (explicit
+        # window export for operator_control.js's helpers + software-version
+        # badge bump) -- no new hashed module or safety-flag field, since
+        # nothing under a hashed directory or Python safety check changed.
         assert len(manifest.manifest_hash) == 64  # sha256 hex digest
 
     def test_naive_generated_at_rejected(self):
