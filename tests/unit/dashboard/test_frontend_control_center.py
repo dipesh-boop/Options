@@ -420,13 +420,25 @@ class TestValidationEndpointIdempotencyUnaffected:
 
 
 class TestNodeFrontendSuitePasses:
-    """Runs `node --test tests/frontend/` as part of the ordinary
-    Python suite, so the pure cycle-state/button-state/run-guard logic
+    """Runs the Node frontend test files as part of the ordinary Python
+    suite, so the pure cycle-state/button-state/run-guard logic
     (items 1, 3 partial, 8, 9, 10, 16 partial from the task's list) is
     verified on every `pytest` run without requiring a second, separate
     invocation. Skips (never fails) if Node isn't available in this
     environment -- the source-level tests above still cover the same
-    contracts structurally either way."""
+    contracts structurally either way.
+
+    PAPER_TRADING_V1.5.2, Step 2A: also runs
+    `operator_control_browser_scope.test.js` -- the new regression that
+    loads operator_control.js then dashboard.js into one shared,
+    browser-accurate global scope (unlike this file's own require()-based
+    neighbor, which never could have caught the real-Safari
+    `marketSessionLabel` gap this step fixes, since require() gives each
+    file its own isolated module scope rather than sharing one global
+    scope the way sequential classic <script> tags do). Each file is
+    named explicitly rather than passing the bare directory to
+    `node --test`, which fails to resolve a directory argument on this
+    Node version."""
 
     def test_node_test_runner_passes(self):
         import shutil
@@ -435,7 +447,11 @@ class TestNodeFrontendSuitePasses:
         if node is None:
             pytest.skip("node is not available in this environment")
         result = subprocess.run(
-            [node, "--test", "tests/frontend/operator_control.test.js"],
+            [
+                node, "--test",
+                "tests/frontend/operator_control.test.js",
+                "tests/frontend/operator_control_browser_scope.test.js",
+            ],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"node --test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"

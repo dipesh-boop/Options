@@ -12,14 +12,20 @@
  * whether it should be clickable, in a way that fails closed whenever
  * the backend's own state doesn't clearly allow a run.
  *
- * Loaded via a plain <script> tag in index.html BEFORE dashboard.js, so
- * every function/const here becomes an ordinary global in the browser
- * (no bundler, no module system, matching this dashboard's existing
- * architecture). The `module.exports` guard at the bottom is inert in a
- * browser (`module` is undefined there) and lets
- * `tests/frontend/operator_control.test.mjs` `require()` this exact
- * file under Node with zero DOM/browser shims -- the same file, the
- * same logic, tested directly rather than re-implemented for the test.
+ * Loaded via a plain <script> tag in index.html BEFORE dashboard.js (no
+ * bundler, no module system, matching this dashboard's existing
+ * architecture). Every helper dashboard.js needs is ALSO assigned
+ * explicitly onto `window` near the bottom of this file -- PAPER_TRADING
+ * V1.5.2, Step 2A, added that after a real-browser acceptance run showed
+ * dashboard.js could not resolve `marketSessionLabel` even though this
+ * file loads first; see that block's own comment and
+ * `tests/frontend/operator_control_browser_scope.test.js` for why an
+ * explicit export is now the browser path's contract rather than an
+ * implicit one. The separate `module.exports` guard at the bottom is
+ * inert in a browser (`module` is undefined there) and lets
+ * `tests/frontend/operator_control.test.js` `require()` this exact file
+ * under Node with zero DOM/browser shims -- the same file, the same
+ * logic, tested directly rather than re-implemented for the test.
  */
 
 const CYCLE_STATE = Object.freeze({
@@ -177,6 +183,43 @@ const CONFIRM_RUN_MESSAGE =
   "PaperBroker positions/opportunities.\n\n" +
   "It cannot automatically open a new position.\n\n" +
   "Any new-position candidate requires separate human review.";
+
+// PAPER_TRADING_V1.5.2, Step 2A: explicit browser-global export.
+//
+// The comment above claimed classic-script global-scope sharing alone
+// makes every const/function here an ordinary global dashboard.js can
+// reference -- a real-browser (Safari) acceptance run showed
+// `marketSessionLabel` undefined in dashboard.js's execution context
+// despite that, and `tests/frontend/operator_control.test.js`'s
+// require()-based tests could not have caught it: require() exercises
+// only the module.exports object below, a completely separate,
+// CommonJS-specific contract that has nothing to do with how a real
+// `<script>`-loaded dashboard.js actually resolves these names. There
+// was no explicit, verified contract for the browser path at all --
+// only an implicit one.
+//
+// This block gives the browser path the same explicit guarantee the
+// module.exports guard already gives Node: every helper dashboard.js
+// depends on becomes a literal property of the global object, so
+// resolving it never depends on an unverified assumption about
+// cross-script lexical scoping in any particular engine or version.
+// See tests/frontend/operator_control_browser_scope.test.js for the
+// regression proof (loads this file then dashboard.js into one shared
+// browser-like global scope, the same order index.html uses).
+// --- BEGIN EXPLICIT BROWSER EXPORT ---
+if (typeof window !== "undefined") {
+  window.CYCLE_STATE = CYCLE_STATE;
+  window.CYCLE_STATE_LABEL = CYCLE_STATE_LABEL;
+  window.deriveCycleState = deriveCycleState;
+  window.runButtonState = runButtonState;
+  window.MARKET_SESSION_LABEL = MARKET_SESSION_LABEL;
+  window.marketSessionLabel = marketSessionLabel;
+  window.systemHealthLabel = systemHealthLabel;
+  window.validationProgress = validationProgress;
+  window.createRunGuard = createRunGuard;
+  window.CONFIRM_RUN_MESSAGE = CONFIRM_RUN_MESSAGE;
+}
+// --- END EXPLICIT BROWSER EXPORT ---
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {

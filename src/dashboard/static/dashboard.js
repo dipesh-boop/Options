@@ -15,7 +15,7 @@
  */
 
 const API = "";
-const SOFTWARE_VERSION = "PAPER_TRADING_V1.4.8";
+const SOFTWARE_VERSION = "PAPER_TRADING_V1.5.2";
 const runGuard = createRunGuard();
 let lastOperatorStatus = null;
 
