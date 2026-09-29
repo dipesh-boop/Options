@@ -238,3 +238,34 @@ class TestMacLauncherNeverAutomatesUnsafeActions:
         assert "BASH_SOURCE" in launcher_text
         assert "/home/" not in launcher_text
         assert "/Users/" not in launcher_text
+
+
+class TestRiskDataWiringObservability:
+    """PAPER_TRADING_V1.5.3, Step 3: the operator-status route must
+    report whether sector/correlation risk-data wiring is active for
+    the current cohort's own config -- never silently omit it."""
+
+    def test_reports_installed_inactive_by_default(self, environment):
+        from datetime import datetime, timezone
+
+        status = validation_ops.build_operator_status(now=datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc))
+        assert status.configured is True
+        assert status.risk_data_wiring_status == "INSTALLED_INACTIVE"
+
+    def test_reports_installed_active_once_the_operator_config_enables_it(self, environment, monkeypatch):
+        import yaml
+
+        ops_yaml = environment / "operations.yaml"
+        data = yaml.safe_load(ops_yaml.read_text())
+        data["risk_data_wiring"]["enabled"] = True
+        ops_yaml.write_text(yaml.safe_dump(data))
+
+        from datetime import datetime, timezone
+
+        status = validation_ops.build_operator_status(now=datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc))
+        assert status.risk_data_wiring_status == "INSTALLED_ACTIVE"
+
+    def test_unconfigured_degraded_status_never_fabricates_a_wiring_status(self):
+        status = validation_ops.build_operator_status()
+        if not status.configured:
+            assert status.risk_data_wiring_status is None

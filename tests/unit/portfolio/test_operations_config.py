@@ -18,6 +18,9 @@ def _valid_data(**overrides) -> dict:
         },
         "review": {"confirmation_ttl_seconds": 900, "max_price_drift_pct": 0.05, "max_capital_required_drift_pct": 0.05},
         "market_hours": {"scan_open_buffer_minutes": 5, "scan_close_buffer_minutes": 15},
+        "risk_data_wiring": {
+            "enabled": False, "min_correlation_observations": 20, "correlation_lookback_days": 60,
+        },
     }
     base.update(overrides)
     return base
@@ -88,6 +91,51 @@ def test_valid_config_round_trips_every_field(tmp_path):
     assert cfg.max_capital_required_drift_pct == 0.05
     assert cfg.scan_open_buffer_minutes == 5
     assert cfg.scan_close_buffer_minutes == 15
+    assert cfg.risk_data_wiring_enabled is False
+    assert cfg.min_correlation_observations == 20
+    assert cfg.correlation_lookback_days == 60
+
+
+def test_missing_risk_data_wiring_section_raises(tmp_path):
+    """PAPER_TRADING_V1.5.3, Step 3: required exactly like market_hours
+    was in Step 2 -- an old-shaped operations.yaml missing it fails
+    closed rather than silently defaulting risk-data wiring on or off."""
+    data = _valid_data()
+    del data["risk_data_wiring"]
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    with pytest.raises(OperationsConfigError):
+        load_operations_config(p)
+
+
+def test_risk_data_wiring_enabled_env_override(tmp_path, monkeypatch):
+    data = _valid_data()
+    data["risk_data_wiring"]["enabled_env"] = "OPTIONS_AGENT_TEST_RISK_DATA_WIRING"
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_RISK_DATA_WIRING", "true")
+    cfg = load_operations_config(p)
+    assert cfg.risk_data_wiring_enabled is True
+
+
+def test_risk_data_wiring_enabled_defaults_false_matching_the_real_config():
+    """The active cohort's real config/operations.yaml must default this
+    off -- installation, not activation (see that file's own comment)."""
+    cfg = load_operations_config()
+    assert cfg.risk_data_wiring_enabled is False
+
+
+def test_correlation_observation_env_overrides(tmp_path, monkeypatch):
+    data = _valid_data()
+    data["risk_data_wiring"]["min_correlation_observations_env"] = "OPTIONS_AGENT_TEST_MIN_OBS"
+    data["risk_data_wiring"]["correlation_lookback_days_env"] = "OPTIONS_AGENT_TEST_LOOKBACK"
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_MIN_OBS", "30")
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_LOOKBACK", "90")
+    cfg = load_operations_config(p)
+    assert cfg.min_correlation_observations == 30
+    assert cfg.correlation_lookback_days == 90
 
 
 def test_missing_market_hours_section_raises(tmp_path):

@@ -44,7 +44,7 @@ from src.risk.concentration import (
     check_sector_concentration,
     check_underlying_concentration,
 )
-from src.risk.correlation import CorrelationError, check_correlation
+from src.risk.correlation import CorrelationDataUnavailableError, CorrelationError, check_correlation
 from src.risk.drawdown import DrawdownZone, current_drawdown_pct, drawdown_zone, sizing_multiplier_for_zone
 from src.risk.kill_switch import check_kill_switch
 from src.risk.limits import RiskLimitsConfig, get_default_limits
@@ -334,9 +334,29 @@ def _evaluate(
         )
 
     # 13. Concentration.
+    # PAPER_TRADING_V1.5.3, Step 3: `portfolio.sector_by_ticker` is only
+    # ever populated by `src.portfolio.risk_data.apply_sector_wiring`
+    # (see that module's docstring for the config/universe.yaml source).
+    # When risk-data wiring is inactive for this portfolio
+    # (`risk_data_required=False`, the default -- including the
+    # currently active validation cohort unless its own operator config
+    # explicitly turns this on), an unclassified ticker falls back to
+    # the pre-V1.5.3 "UNKNOWN" bucket exactly as before, preserving that
+    # cohort's candidate eligibility unchanged. Once wiring is active,
+    # an unclassified ticker instead fails closed here, before ever
+    # reaching `check_sector_concentration` — "cannot be established
+    # reliably" must never silently become "safe."
+    sector = portfolio.sector_by_ticker.get(proposal.ticker)
+    if sector is None:
+        if portfolio.risk_data_required:
+            return _reject(
+                ReasonCode.REJECT_SECTOR_DATA_UNAVAILABLE,
+                f"no trustworthy sector classification is available for {proposal.ticker!r}; risk-data "
+                "wiring is active for this portfolio and an unclassified ticker cannot be treated as safe",
+            )
+        sector = "UNKNOWN"  # legacy fallback, preserved exactly when wiring is inactive
     try:
         check_underlying_concentration(portfolio, proposal.ticker, final_economics.capital_required, limits)
-        sector = portfolio.sector_by_ticker.get(proposal.ticker, "UNKNOWN")
         check_sector_concentration(portfolio, sector, final_economics.capital_required, limits)
     except UnderlyingConcentrationError as exc:
         return _reject(ReasonCode.REJECT_UNDERLYING_CONCENTRATION, str(exc))
@@ -346,6 +366,8 @@ def _evaluate(
     # 14. Correlation.
     try:
         check_correlation(portfolio, proposal.ticker, limits)
+    except CorrelationDataUnavailableError as exc:
+        return _reject(ReasonCode.REJECT_CORRELATION_DATA_UNAVAILABLE, str(exc))
     except CorrelationError as exc:
         return _reject(ReasonCode.REJECT_CORRELATION, str(exc))
 

@@ -121,6 +121,16 @@ class OperatorStatusView(BaseModel):
     validation_cycle_allowed: bool = False
     validation_cycle_block_reason: str | None = None
 
+    # PAPER_TRADING_V1.5.3, Step 3: read-only observability for the
+    # sector/correlation risk-data wiring capability
+    # (src.portfolio.risk_data) -- "INSTALLED_ACTIVE" once a cohort's
+    # own operator config has explicitly turned it on, "INSTALLED_INACTIVE"
+    # otherwise (the active cohort's own default). `None` only in the
+    # `configured=False` degraded branch, matching every other field
+    # here. This is observability only -- there is no control here to
+    # change it; that stays a config-file edit, never a dashboard action.
+    risk_data_wiring_status: str | None = None
+
 
 def _provider_readiness() -> ProviderReadinessView:
     selection = DataProviderSelection()
@@ -205,6 +215,7 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
         regular_session_close=eligibility.regular_session_close,
         validation_cycle_allowed=eligibility.validation_cycle_allowed,
         validation_cycle_block_reason=eligibility.block_reason,
+        risk_data_wiring_status="INSTALLED_ACTIVE" if ops.risk_data_wiring_enabled else "INSTALLED_INACTIVE",
     )
 
 

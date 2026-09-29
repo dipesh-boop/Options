@@ -170,6 +170,9 @@ def environment(tmp_path, monkeypatch):
                 },
                 "review": {"confirmation_ttl_seconds": 900, "max_price_drift_pct": 0.05, "max_capital_required_drift_pct": 0.05},
                 "market_hours": {"scan_open_buffer_minutes": 5, "scan_close_buffer_minutes": 15},
+                "risk_data_wiring": {
+                    "enabled": False, "min_correlation_observations": 20, "correlation_lookback_days": 60,
+                },
             }
         )
     )

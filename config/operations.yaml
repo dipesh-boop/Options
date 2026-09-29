@@ -92,3 +92,36 @@ review:
   # Same idea, applied to QuantitativeAnalysis.capital_required.
   max_capital_required_drift_pct: 0.05
   max_capital_required_drift_pct_env: OPTIONS_AGENT_REVIEW_MAX_CAPITAL_DRIFT_PCT
+
+risk_data_wiring:
+  # PAPER_TRADING_V1.5.3, Step 3: whether `Portfolio.sector_by_ticker`/
+  # `price_history` are actively populated (src.portfolio.risk_data)
+  # before a new-position candidate reaches the Risk Engine, and whether
+  # `Portfolio.risk_data_required` is set so missing sector/correlation
+  # data FAILS CLOSED (REJECT) rather than the pre-V1.5.3 documented gap
+  # (an unclassified ticker silently bucketed as "UNKNOWN" sector; a
+  # missing price history silently skipping the correlation check).
+  #
+  # Defaults to `false` -- INSTALLATION, not ACTIVATION. The active
+  # cohort (paper-trading-v1.4.3-validation-2026-09-22, started
+  # 2026-09-22, under V1.4.3) must remain reproducible: turning this on
+  # for that cohort mid-flight would silently change candidate
+  # eligibility for the same account under the same name. This flag
+  # exists so a FUTURE successor cohort can activate the capability
+  # deliberately and observably -- see src.portfolio.risk_data's module
+  # docstring and STEP_23_3_FREEZE_REPORT.md.
+  enabled: false
+  enabled_env: OPTIONS_AGENT_RISK_DATA_WIRING_ENABLED
+  # Minimum aligned daily observations required across every ticker
+  # being correlated before the correlation check may run at all --
+  # below this, evaluation fails closed rather than computing a
+  # correlation off too few points to mean anything. A policy choice,
+  # not a derived number; conservative default pending operator review.
+  min_correlation_observations: 20
+  min_correlation_observations_env: OPTIONS_AGENT_MIN_CORRELATION_OBSERVATIONS
+  # How many calendar days of history a correlation-data fetch requests
+  # per ticker -- deliberately larger than min_correlation_observations
+  # to tolerate weekends/holidays while still yielding enough trading-day
+  # observations.
+  correlation_lookback_days: 60
+  correlation_lookback_days_env: OPTIONS_AGENT_CORRELATION_LOOKBACK_DAYS

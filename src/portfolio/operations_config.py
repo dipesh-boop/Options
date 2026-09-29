@@ -52,6 +52,13 @@ class OperationsConfig(BaseModel):
     # buffer parameters.
     scan_open_buffer_minutes: int = Field(ge=0)
     scan_close_buffer_minutes: int = Field(ge=0)
+    # PAPER_TRADING_V1.5.3, Step 3: see config/operations.yaml's own
+    # `risk_data_wiring` section comment -- `risk_data_wiring_enabled`
+    # defaults to False (installed, not activated) so the active cohort's
+    # candidate eligibility stays byte-for-byte reproducible.
+    risk_data_wiring_enabled: bool
+    min_correlation_observations: int = Field(gt=0)
+    correlation_lookback_days: int = Field(gt=0)
 
 
 def _resolved(section: dict[str, Any], key: str) -> Any:
@@ -67,6 +74,23 @@ def _resolved(section: dict[str, Any], key: str) -> Any:
     return section[key]
 
 
+def _resolved_bool(section: dict[str, Any], key: str) -> bool:
+    """Same `_resolved` idiom, coerced to bool -- the YAML value is
+    already a real bool (`enabled: false`), but an env-var override is
+    always a string, so this accepts the same case-insensitive
+    true/false/1/0/yes/no vocabulary every other boolean-flag env
+    override in this codebase's deployment docs uses."""
+    value = _resolved(section, key)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    raise OperationsConfigError(f"{key!r} must be a boolean-shaped value, got {value!r}")
+
+
 def load_operations_config(config_path: Path | str | None = None) -> OperationsConfig:
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
     if not path.is_file():
@@ -80,6 +104,7 @@ def load_operations_config(config_path: Path | str | None = None) -> OperationsC
         storage = data["storage"]
         review = data["review"]
         market_hours = data["market_hours"]
+        risk_data_wiring = data["risk_data_wiring"]
 
         regime = str(_resolved(market_regime, "default_regime"))
         if regime not in _VALID_REGIMES:
@@ -100,6 +125,9 @@ def load_operations_config(config_path: Path | str | None = None) -> OperationsC
             max_capital_required_drift_pct=float(_resolved(review, "max_capital_required_drift_pct")),
             scan_open_buffer_minutes=int(_resolved(market_hours, "scan_open_buffer_minutes")),
             scan_close_buffer_minutes=int(_resolved(market_hours, "scan_close_buffer_minutes")),
+            risk_data_wiring_enabled=_resolved_bool(risk_data_wiring, "enabled"),
+            min_correlation_observations=int(_resolved(risk_data_wiring, "min_correlation_observations")),
+            correlation_lookback_days=int(_resolved(risk_data_wiring, "correlation_lookback_days")),
         )
     except KeyError as exc:
         raise OperationsConfigError(f"{path} is missing required section {exc}") from exc

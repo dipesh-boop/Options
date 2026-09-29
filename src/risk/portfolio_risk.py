@@ -117,6 +117,18 @@ class Portfolio(BaseModel):
     underlying_holdings: dict[str, UnderlyingHolding] = Field(default_factory=dict)
     sector_by_ticker: dict[str, str] = Field(default_factory=dict)
     price_history: dict[str, list[float]] = Field(default_factory=dict)
+    # PAPER_TRADING_V1.5.3, Step 3: when True, `src.risk.engine`/
+    # `src.risk.correlation` treat missing `sector_by_ticker`/
+    # `price_history` coverage as FAIL-CLOSED (reject the candidate)
+    # rather than the pre-V1.5.3 documented gap (an unclassified ticker
+    # silently bucketed as "UNKNOWN"; a missing price history silently
+    # skipping correlation). Defaults to False so every existing caller/
+    # test that constructs a `Portfolio` without this field -- including
+    # the currently active validation cohort, unless its own operator
+    # config explicitly turns risk-data wiring on -- keeps today's exact
+    # behavior. Set only by `src.portfolio.risk_data.apply_risk_data_wiring`,
+    # never hand-set by application code that isn't that wiring layer.
+    risk_data_required: bool = False
     halted: bool = False
     halt_reason: str | None = None
 

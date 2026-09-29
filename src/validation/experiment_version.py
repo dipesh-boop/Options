@@ -80,6 +80,14 @@ class ExperimentVersion:
     validation_config_hash: str
     market_data_config_hash: str
     recorded_at: datetime
+    # PAPER_TRADING_V1.5.3, Step 3: whether sector/correlation risk-data
+    # wiring (src.portfolio.risk_data) was active for this experiment --
+    # participates in `version_id` so a risk-data-wiring-active
+    # experiment is never silently indistinguishable from an inactive
+    # one. Defaults to False so every pre-V1.5.3 caller (including
+    # `tests/unit/validation/test_experiment_version.py`'s existing
+    # suite) keeps producing the exact same `version_id` it always did.
+    risk_data_wiring_enabled: bool = False
 
 
 def compute_market_data_config_hash(*, provider: str, is_production: bool) -> str:
@@ -101,6 +109,7 @@ def compute_experiment_version_id(
     risk_config_hash: str,
     validation_config_hash: str,
     market_data_config_hash: str,
+    risk_data_wiring_enabled: bool = False,
 ) -> str:
     """Deterministic, content-addressed identity for one experiment
     configuration. `recorded_at` is deliberately not a parameter here --
@@ -115,6 +124,7 @@ def compute_experiment_version_id(
         "risk_config_hash": risk_config_hash,
         "validation_config_hash": validation_config_hash,
         "market_data_config_hash": market_data_config_hash,
+        "risk_data_wiring_enabled": bool(risk_data_wiring_enabled),
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -130,6 +140,7 @@ def build_experiment_version(
     universe_config_path: Path | str = DEFAULT_UNIVERSE_CONFIG_PATH,
     risk_config_path: Path | str = DEFAULT_RISK_CONFIG_PATH,
     validation_config_path: Path | str = DEFAULT_VALIDATION_CONFIG_PATH,
+    risk_data_wiring_enabled: bool = False,
 ) -> ExperimentVersion:
     """Builds one `ExperimentVersion` by hashing the three named config
     files (via the existing, unmodified `compute_file_hash`) plus the
@@ -159,6 +170,7 @@ def build_experiment_version(
         risk_config_hash=risk_config_hash,
         validation_config_hash=validation_config_hash,
         market_data_config_hash=market_data_config_hash,
+        risk_data_wiring_enabled=risk_data_wiring_enabled,
     )
     return ExperimentVersion(
         version_id=version_id,
@@ -169,4 +181,5 @@ def build_experiment_version(
         validation_config_hash=validation_config_hash,
         market_data_config_hash=market_data_config_hash,
         recorded_at=recorded_at,
+        risk_data_wiring_enabled=risk_data_wiring_enabled,
     )

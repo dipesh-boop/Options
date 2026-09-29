@@ -56,6 +56,13 @@ class ReasonCode(str, Enum):
     REJECT_DUPLICATE_POSITION = "reject_duplicate_position"
     REJECT_STRESS_TEST_FAILURE = "reject_stress_test_failure"
 
+    # PAPER_TRADING_V1.5.3, Step 3: risk-data wiring fail-closed outcomes,
+    # distinct from an actual concentration/correlation LIMIT breach --
+    # these mean the required sector/historical-price data could not be
+    # established at all, never that a computed exposure was too high.
+    REJECT_SECTOR_DATA_UNAVAILABLE = "reject_sector_data_unavailable"
+    REJECT_CORRELATION_DATA_UNAVAILABLE = "reject_correlation_data_unavailable"
+
     # Broker capability.
     REJECT_ACCOUNT_CAPABILITY = "reject_account_capability"
     REJECT_BROKER_ACCOUNT_MISMATCH = "reject_broker_account_mismatch"

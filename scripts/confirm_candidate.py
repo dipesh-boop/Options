@@ -46,8 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.brokers.base import SqliteIdempotencyStore  # noqa: E402
 from src.brokers.paper import PaperBroker  # noqa: E402
 from src.data.factory import get_configured_market_data_provider  # noqa: E402
+from src.data.universe import load_universe  # noqa: E402
 from src.portfolio.account_state import SqlitePaperAccountStateStore, SqlitePortfolioStore  # noqa: E402
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
+from src.portfolio.risk_data import apply_risk_data_wiring  # noqa: E402
 from src.review.candidates import SqliteCandidateReviewStore  # noqa: E402
 from src.review.confirmation import ConfirmationOutcome, ConfirmCandidateInputs, confirm_candidate  # noqa: E402
 from src.risk.broker_constraints import load_broker_capabilities  # noqa: E402
@@ -87,6 +89,23 @@ async def _run(candidate_id: str) -> int:
         print(f"FAIL: no PaperBroker account state found for {ops.account_id!r} -- run scripts/run_validation_cycle.py at least once first.")
         return 1
     broker.restore_state(account_state)
+
+    # PAPER_TRADING_V1.5.3, Step 3: same risk-data wiring
+    # scripts/run_validation_cycle.py applies, run here too since this
+    # is the ONLY path that can actually open a position -- re-saved to
+    # the store so `confirm_candidate()`'s own internal
+    # `portfolio_store.get(...)` (src.review.confirmation) picks up the
+    # wired version. A no-op unless the operator's config explicitly
+    # enables it; see that script's own comment for the full reasoning.
+    existing_portfolio = portfolio_store.get(ops.account_id)
+    if existing_portfolio is not None:
+        universe = load_universe()
+        wired_portfolio = await apply_risk_data_wiring(
+            existing_portfolio, universe=universe, enabled=ops.risk_data_wiring_enabled, historical_provider=None,
+            now=now, lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
+        )
+        if wired_portfolio is not existing_portfolio:
+            portfolio_store.save(ops.account_id, wired_portfolio)
 
     provider = get_configured_market_data_provider()
     try:

@@ -115,6 +115,7 @@ from src.portfolio.account_state import SqlitePaperAccountStateStore, SqlitePort
 from src.portfolio.market_session import evaluate_validation_cycle_eligibility  # noqa: E402
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
 from src.portfolio.orchestrator import OpportunityScanConfig, OuterCycleInputs, run_outer_cycle  # noqa: E402
+from src.portfolio.risk_data import apply_risk_data_wiring  # noqa: E402
 from src.portfolio.persistence import SqliteControlLoopStore  # noqa: E402
 from src.review.candidates import CandidateStatus, ReviewedCandidate, SqliteCandidateReviewStore  # noqa: E402
 from src.risk.broker_constraints import load_broker_capabilities  # noqa: E402
@@ -266,6 +267,22 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             peak_equity=val_config.default_starting_nav,
         )
         portfolio_store.save(ops.account_id, portfolio)
+
+    # PAPER_TRADING_V1.5.3, Step 3: sector/correlation risk-data wiring.
+    # A no-op (returns `portfolio` completely unchanged) unless the
+    # operator's own config/operations.yaml sets
+    # `risk_data_wiring.enabled: true` -- the active cohort's own config
+    # leaves this at its default `false`, so its candidate eligibility
+    # is unaffected. `historical_provider=None`: no historical-bars data
+    # source is currently wired into official validation (see
+    # STEP_23_3_FREEZE_REPORT.md's external-dependency report) -- once
+    # wiring is active, this makes correlation evaluation fail closed
+    # for any candidate whenever the portfolio already holds a position,
+    # rather than silently skipping it, until that provider is added.
+    portfolio = await apply_risk_data_wiring(
+        portfolio, universe=universe, enabled=ops.risk_data_wiring_enabled, historical_provider=None,
+        now=now, lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
+    )
 
     idempotency_store = SqliteIdempotencyStore(ops.account_state_db_path)
     broker = PaperBroker(initial_cash=val_config.default_starting_nav, account_id=ops.account_id, idempotency_store=idempotency_store, now=now)
