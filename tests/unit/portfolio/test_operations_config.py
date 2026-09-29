@@ -17,6 +17,7 @@ def _valid_data(**overrides) -> dict:
             "lifecycle_db_path": "data/test.db", "candidate_review_db_path": "data/test.db",
         },
         "review": {"confirmation_ttl_seconds": 900, "max_price_drift_pct": 0.05, "max_capital_required_drift_pct": 0.05},
+        "market_hours": {"scan_open_buffer_minutes": 5, "scan_close_buffer_minutes": 15},
     }
     base.update(overrides)
     return base
@@ -85,3 +86,31 @@ def test_valid_config_round_trips_every_field(tmp_path):
     assert cfg.confirmation_ttl_seconds == 900
     assert cfg.max_price_drift_pct == 0.05
     assert cfg.max_capital_required_drift_pct == 0.05
+    assert cfg.scan_open_buffer_minutes == 5
+    assert cfg.scan_close_buffer_minutes == 15
+
+
+def test_missing_market_hours_section_raises(tmp_path):
+    """PAPER_TRADING_V1.5.1, Step 2: market_hours is a required section,
+    exactly like review/storage/market_regime -- an old-shaped
+    operations.yaml missing it fails closed rather than silently
+    defaulting to an un-configured buffer."""
+    data = _valid_data()
+    del data["market_hours"]
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    with pytest.raises(OperationsConfigError):
+        load_operations_config(p)
+
+
+def test_scan_buffer_env_overrides(tmp_path, monkeypatch):
+    data = _valid_data()
+    data["market_hours"]["scan_open_buffer_minutes_env"] = "OPTIONS_AGENT_TEST_OPEN_BUFFER"
+    data["market_hours"]["scan_close_buffer_minutes_env"] = "OPTIONS_AGENT_TEST_CLOSE_BUFFER"
+    p = tmp_path / "operations.yaml"
+    p.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_OPEN_BUFFER", "10")
+    monkeypatch.setenv("OPTIONS_AGENT_TEST_CLOSE_BUFFER", "20")
+    cfg = load_operations_config(p)
+    assert cfg.scan_open_buffer_minutes == 10
+    assert cfg.scan_close_buffer_minutes == 20

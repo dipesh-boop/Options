@@ -54,6 +54,7 @@ import yaml
 import src.data.universe as universe_module
 import src.portfolio.operations_config as operations_config_module
 import src.validation.protocol as validation_protocol_module
+from src.portfolio.market_session import MarketSessionState, ValidationCycleEligibility
 from src.validation.cohort import start_new_cohort
 from src.validation.records import CohortRecord
 from src.validation.session import DailySnapshot, SqliteValidationStore
@@ -77,14 +78,18 @@ class FakeMarketDataProvider:
     chain regardless of symbol -- never a network call.
 
     The runner scripts stamp `inputs.as_of`/`now` from the real wall clock
-    (`datetime.now(timezone.utc)`) -- this is genuine operational code, not
-    something that takes an injectable clock -- so every chain returned
-    here must be stamped with the *actual* current time too, not the
-    fixture's frozen `NOW`. Otherwise the Portfolio Control Loop's own
-    quote-freshness quality gate (`src.data.provider.DEFAULT_MAX_QUOTE_AGE`,
-    15 minutes) would reject it as stale the instant real time drifts more
-    than 15 minutes past `NOW`, which is exactly what was happening before
-    this fix (degraded_mode=True, zero candidates, both assertions failing).
+    (`datetime.now(timezone.utc)`) by default -- this is genuine
+    operational code; `run_validation_cycle` (Step 2) gained an
+    injectable `now` solely for `src.portfolio.market_session`'s own
+    dedicated tests (see `tests/unit/portfolio/test_market_session.py`
+    and its own acceptance-level counterpart), never used here -- so
+    every chain returned here must be stamped with the *actual* current
+    time too, not the fixture's frozen `NOW`. Otherwise the Portfolio
+    Control Loop's own quote-freshness quality gate
+    (`src.data.provider.DEFAULT_MAX_QUOTE_AGE`, 15 minutes) would reject
+    it as stale the instant real time drifts more than 15 minutes past
+    `NOW`, which is exactly what was happening before this fix
+    (degraded_mode=True, zero candidates, both assertions failing).
 
     A small fixed buffer is subtracted rather than using the exact current
     instant: `TradeProposal` itself rejects a `data_timestamp` after its
@@ -164,6 +169,7 @@ def environment(tmp_path, monkeypatch):
                     "lifecycle_db_path": str(ops_db), "candidate_review_db_path": str(ops_db),
                 },
                 "review": {"confirmation_ttl_seconds": 900, "max_price_drift_pct": 0.05, "max_capital_required_drift_pct": 0.05},
+                "market_hours": {"scan_open_buffer_minutes": 5, "scan_close_buffer_minutes": 15},
             }
         )
     )
@@ -193,6 +199,23 @@ def scripts(environment, monkeypatch):
     confirm = _load_script_module("_acceptance_confirm_candidate", REPO_ROOT / "scripts" / "confirm_candidate.py")
     monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
     monkeypatch.setattr(confirm, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
+    # Step 2: this file exercises the Review-Only new-position workflow
+    # (candidate creation -> confirm), never the market-hours gate itself
+    # (dedicated, deterministic gate tests live in
+    # tests/unit/portfolio/test_market_session.py and
+    # tests/acceptance/test_market_hours_gate.py) -- bypassed here so this
+    # file's pass/fail never depends on the real wall-clock time the
+    # suite happens to run at, exactly like every other test in this
+    # codebase must never depend on the actual current clock.
+    monkeypatch.setattr(
+        cycle,
+        "evaluate_validation_cycle_eligibility",
+        lambda now, **kw: ValidationCycleEligibility(
+            as_of=now, market_session_state=MarketSessionState.REGULAR_MARKET, is_trading_day=True,
+            regular_session_open=None, regular_session_close=None,
+            validation_cycle_allowed=True, block_reason=None,
+        ),
+    )
     return cycle, confirm
 
 

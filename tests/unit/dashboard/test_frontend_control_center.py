@@ -33,6 +33,7 @@ import src.dashboard.validation_ops as validation_ops
 from src.dashboard.app import app
 from src.dashboard.validation_ops import OperatorStatusView, build_operator_status
 from src.portfolio.alerts import AlertSeverity, ControlLoopAlert, ControlLoopAlertType
+from src.portfolio.market_session import MarketSessionState, ValidationCycleEligibility
 from src.portfolio.persistence import SqliteControlLoopStore
 from tests.acceptance.test_review_only_daily_cycle import (
     COHORT_ID,
@@ -383,6 +384,18 @@ class TestValidationEndpointIdempotencyUnaffected:
 
         runner_module = validation_ops._load_runner_module()
         monkeypatch.setattr(runner_module, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
+        # Step 2: this test exercises route-level idempotency, never the
+        # market-hours gate itself -- bypassed so it never depends on the
+        # real wall-clock time the suite happens to run at.
+        monkeypatch.setattr(
+            runner_module,
+            "evaluate_validation_cycle_eligibility",
+            lambda now, **kw: ValidationCycleEligibility(
+                as_of=now, market_session_state=MarketSessionState.REGULAR_MARKET, is_trading_day=True,
+                regular_session_open=None, regular_session_close=None,
+                validation_cycle_allowed=True, block_reason=None,
+            ),
+        )
 
         client = TestClient(app)
         first = client.post("/api/validation-cycle/run")

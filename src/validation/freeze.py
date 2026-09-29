@@ -135,7 +135,42 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # logic, Tradier/PaperBroker/Fidelity behavior, human confirmation,
 # dashboard execution behavior, market-hours behavior, or the active
 # validation cohort's state changed in any way -- see
-# STEP_23_1_FREEZE_REPORT.md) each bumped the freeze
+# STEP_23_1_FREEZE_REPORT.md), and Step 23-2/V1.5 Step 2
+# (PAPER_TRADING_V1.5.1: the new-position daily validation cycle's
+# market-hours safety gate, fixing the 2026-09-25 incident where the
+# daily cycle could start scanning for new-position candidates before
+# the regular market session even opened. Adds
+# `src.portfolio.market_session.evaluate_validation_cycle_eligibility`
+# -- a deterministic decision built ONLY on the existing, unmodified
+# `src.data.market_calendar` calendar primitive plus a new,
+# operator-configurable open/close buffer
+# (`config/operations.yaml`'s `market_hours` section) -- and wires it
+# into `scripts/run_validation_cycle.py`'s `run_validation_cycle()` (the
+# single production entry point both the CLI and the dashboard's
+# `POST /api/validation-cycle/run` route call) as the first check after
+# the existing Tradier-production preflight, strictly before any
+# provider call, candidate generation, Quant/Risk evaluation of a new
+# candidate, or persistence of a cycle/candidate/snapshot record. Adds
+# additive, read-only `market_session_state`/`is_trading_day`/
+# `regular_session_open`/`regular_session_close`/
+# `validation_cycle_allowed`/`validation_cycle_block_reason` fields to
+# `OperatorStatusView`, and updates the dashboard's Run button
+# (`runButtonState` in `operator_control.js`) to require the backend's
+# `validation_cycle_allowed` alongside every pre-existing prerequisite
+# -- the frontend never computes market hours itself. The gate lives
+# ONLY in the daily-cycle script/dashboard-route layer -- it is never
+# added inside `src.portfolio.control_loop.run_control_cycle`,
+# `src.lifecycle.engine.evaluate_position`, or
+# `src.risk.kill_switch.check_kill_switch`, all three of which remain
+# completely unmodified and fully callable regardless of market hours,
+# so existing-position Lifecycle Engine/Risk kill-switch monitoring is
+# never suppressed by this step. Does NOT change candidate generation,
+# ticker universe, active strategies, Quant logic/thresholds, Risk
+# logic/thresholds, position sizing, lifecycle logic, PaperBroker fills,
+# collateral rules, Tradier market-data normalization, freshness/
+# quality-gate thresholds, transaction-cost/slippage assumptions,
+# human-confirmation semantics, or the active validation cohort's
+# state -- see STEP_23_2_FREEZE_REPORT.md) each bumped the freeze
 # name/version in place without touching the prior versions' own
 # artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
 # STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
@@ -143,19 +178,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_4B_FREEZE_REPORT.md / STEP_22_4C_FREEZE_REPORT.md /
 # STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
 # STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
-# STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md.
+# STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md /
+# STEP_23_2_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
-# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8
+# V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0
 # manifests/reports remain recoverable from git history at the
 # `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
 # `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1` /
 # `paper-trading-v1.4.2` / `paper-trading-v1.4.3` / `paper-trading-v1.4.4`
 # / `paper-trading-v1.4.5` / `paper-trading-v1.4.6` / `paper-trading-v1.4.7`
-# / `paper-trading-v1.4.8` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.0"
+# / `paper-trading-v1.4.8` / `paper-trading-v1.5.0` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.1"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.0"
+MANIFEST_VERSION = "1.5.1"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -428,6 +464,13 @@ class FreezeManifest(BaseModel):
     experiment_version_module_hash: str
     validation_protocol_module_hash: str
     validation_session_module_hash: str
+    # PAPER_TRADING_V1.5.1, Step 2: the new-position daily validation
+    # cycle's market-hours safety gate. `src.portfolio.market_session`
+    # itself needs no separate hash entry here -- it lives inside
+    # `src/portfolio/`, already covered by `portfolio_module_hash`'s
+    # whole-directory hash above, exactly like `src.portfolio.orchestrator`
+    # needed none in Step 22.4A.
+    market_hours_gate_precedes_mutation: bool  # must always be True -- run_validation_cycle() calls evaluate_validation_cycle_eligibility before its first mutation
 
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
@@ -617,7 +660,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.0",
+        freeze_version="1.5.1",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -651,6 +694,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         experiment_version_module_hash=compute_file_hash(_CODE_MODULE_FILES["experiment_version_module"]),
         validation_protocol_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_protocol_module"]),
         validation_session_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_session_module"]),
+        market_hours_gate_precedes_mutation=_verify_market_hours_gate_precedes_mutation(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -988,6 +1032,18 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "a src.dashboard file now imports src.review.confirmation/confirm_candidate, or the manifest "
         "wrongly claims otherwise -- confirming a Review-Only candidate must always stay a separate, explicit "
         "scripts/confirm_candidate.py command, never a dashboard action",
+    ))
+
+    market_hours_gate_ok = (
+        _verify_market_hours_gate_precedes_mutation() and manifest.market_hours_gate_precedes_mutation
+    )
+    checks.append(FreezeCheck(
+        name="market_hours_gate_precedes_mutation", passed=market_hours_gate_ok,
+        detail="scripts/run_validation_cycle.py calls evaluate_validation_cycle_eligibility before every one of "
+        "its known mutating calls, and manifest records True" if market_hours_gate_ok
+        else "scripts/run_validation_cycle.py no longer demonstrably checks the market-hours gate before a "
+        "mutating call, or the manifest wrongly claims otherwise -- the new-position daily opportunity scan must "
+        "never start outside the approved regular market session",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1345,7 +1401,7 @@ def _verify_official_cycle_requires_tradier_preflight() -> bool:
     if not path.is_file():
         return False
     text = path.read_text(errors="ignore")
-    body = _extract_function_body(text, "\nasync def run_validation_cycle() -> bool:\n")
+    body = _extract_function_body(text, "\nasync def run_validation_cycle(*, now: datetime | None = None) -> bool:\n")
     if body is None:
         return False
     preflight_index = body.find("verify_official_provider_is_tradier_production(")
@@ -1363,6 +1419,41 @@ def _verify_official_cycle_requires_tradier_preflight() -> bool:
         if call_index == -1:
             return False
         if preflight_index > call_index:
+            return False
+    return True
+
+
+def _verify_market_hours_gate_precedes_mutation() -> bool:
+    """PAPER_TRADING_V1.5.1, Step 2: a direct, executable proof that
+    `scripts/run_validation_cycle.py` calls
+    `evaluate_validation_cycle_eligibility` strictly before every one of
+    its own known mutating calls -- the identical technique, same
+    known-mutating-call list, and same scoping-to-the-function-body
+    precaution `_verify_official_cycle_requires_tradier_preflight`
+    already established (see that function's own docstring for why a
+    naive whole-file search would be unreliable here)."""
+    path = REPO_ROOT / "scripts" / "run_validation_cycle.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    body = _extract_function_body(text, "\nasync def run_validation_cycle(*, now: datetime | None = None) -> bool:\n")
+    if body is None:
+        return False
+    gate_index = body.find("evaluate_validation_cycle_eligibility(")
+    if gate_index == -1:
+        return False
+    known_mutating_calls = (
+        "_expire_stale_candidates(",
+        "portfolio_store.save(",
+        "account_state_store.save(",
+        "review_store.save_candidate(",
+        "validation_store.record_snapshot(",
+    )
+    for call in known_mutating_calls:
+        call_index = body.find(call)
+        if call_index == -1:
+            return False
+        if gate_index > call_index:
             return False
     return True
 

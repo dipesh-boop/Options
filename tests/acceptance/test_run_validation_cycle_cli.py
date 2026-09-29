@@ -38,6 +38,7 @@ import pytest
 
 import src.portfolio.operations_config as operations_config_module
 from src.data.factory import OfficialProviderPreflightError, verify_official_provider_is_tradier_production
+from src.portfolio.market_session import MarketSessionState, ValidationCycleEligibility
 from tests.acceptance.test_review_only_daily_cycle import (
     COHORT_ID,
     FakeMarketDataProvider,
@@ -239,6 +240,20 @@ class TestTradierProductionProviderPasses:
         monkeypatch.delenv("OPTIONS_AGENT_TRADIER_BASE_URL", raising=False)
         cycle = _load_script_module("_cli_test_tradier_accepted_module", SCRIPT_PATH)
         monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
+        # Step 2: this file proves provider-preflight/CLI-argument
+        # safety, never the market-hours gate itself -- bypassed so it
+        # never depends on the real wall-clock time the suite happens to
+        # run at (dedicated gate tests live in
+        # tests/acceptance/test_market_hours_gate.py).
+        monkeypatch.setattr(
+            cycle,
+            "evaluate_validation_cycle_eligibility",
+            lambda now, **kw: ValidationCycleEligibility(
+                as_of=now, market_session_state=MarketSessionState.REGULAR_MARKET, is_trading_day=True,
+                regular_session_open=None, regular_session_close=None,
+                validation_cycle_allowed=True, block_reason=None,
+            ),
+        )
         return cycle
 
     async def test_tradier_production_reaches_the_mutating_cycle(self, tradier_configured_cycle):

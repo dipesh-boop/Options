@@ -41,6 +41,7 @@ from src.data.factory import (
     OfficialProviderPreflightError,
     verify_official_provider_is_tradier_production,
 )
+from src.portfolio.market_session import evaluate_validation_cycle_eligibility
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config
 from src.portfolio.persistence import SqliteControlLoopStore
 from src.review.candidates import SqliteCandidateReviewStore
@@ -106,6 +107,20 @@ class OperatorStatusView(BaseModel):
 
     alerts: tuple[schemas.ControlLoopAlertView, ...] = ()
 
+    # PAPER_TRADING_V1.5.1, Step 2: the new-position daily opportunity
+    # scan's market-hours safety gate, surfaced read-only so the
+    # dashboard can render backend-authoritative session state and
+    # disable the Run button without ever calculating market hours
+    # itself. `None`/`False`-defaulted (never a fabricated "open") in
+    # the `configured=False` degraded branch below, matching every
+    # other field in this view.
+    market_session_state: str | None = None
+    is_trading_day: bool | None = None
+    regular_session_open: datetime | None = None
+    regular_session_close: datetime | None = None
+    validation_cycle_allowed: bool = False
+    validation_cycle_block_reason: str | None = None
+
 
 def _provider_readiness() -> ProviderReadinessView:
     selection = DataProviderSelection()
@@ -156,6 +171,10 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
     cohort_start = _cohort_start_date(cohort_record, snapshots)
     planned_end = cohort_start + timedelta(days=val_config.duration_days) if cohort_start is not None else None
 
+    eligibility = evaluate_validation_cycle_eligibility(
+        now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
+    )
+
     return OperatorStatusView(
         configured=True,
         cohort_id=ops.cohort_id,
@@ -180,6 +199,12 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
         validation_preferred_completed_trades=val_config.preferred_completed_trades,
         validation_completed_trades=len(trades),
         alerts=alerts,
+        market_session_state=eligibility.market_session_state.value,
+        is_trading_day=eligibility.is_trading_day,
+        regular_session_open=eligibility.regular_session_open,
+        regular_session_close=eligibility.regular_session_close,
+        validation_cycle_allowed=eligibility.validation_cycle_allowed,
+        validation_cycle_block_reason=eligibility.block_reason,
     )
 
 

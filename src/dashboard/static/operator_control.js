@@ -64,10 +64,19 @@ function deriveCycleState(status, clientRunning) {
 
 /**
  * Fail-closed run-button state: disabled unless the backend's own
- * status says configured, not-yet-run-today, AND provider-ready.
- * Any missing/unexpected shape in `status` disables the button rather
- * than guessing -- there is no path here that can produce
- * `disabled: false` from incomplete information.
+ * status says configured, not-yet-run-today, market-session-allowed,
+ * AND provider-ready. Any missing/unexpected shape in `status` disables
+ * the button rather than guessing -- there is no path here that can
+ * produce `disabled: false` from incomplete information.
+ *
+ * The market-session check (Step 2, PAPER_TRADING_V1.5.1) reads only
+ * `status.validation_cycle_allowed`/`status.validation_cycle_block_reason`
+ * -- both already decided by the backend's own
+ * `src.portfolio.market_session.evaluate_validation_cycle_eligibility`.
+ * This function never computes today's date, the current time, or
+ * whether the market is open on its own -- the backend remains the
+ * sole authority on market hours, exactly like it already is for the
+ * provider/cycle-idempotency checks below.
  */
 function runButtonState(status, clientRunning) {
   const cycleState = deriveCycleState(status, clientRunning);
@@ -80,11 +89,30 @@ function runButtonState(status, clientRunning) {
   if (status.today_cycle_ran) {
     return { disabled: true, reason: "Today's validation cycle has already completed.", cycleState };
   }
+  if (!status.validation_cycle_allowed) {
+    const reason = status.validation_cycle_block_reason || "Market is not in the regular validation window.";
+    return { disabled: true, reason, cycleState };
+  }
   if (!status.provider || !status.provider.ready) {
     const detail = status.provider && status.provider.detail ? status.provider.detail : "Market data provider is not ready.";
     return { disabled: true, reason: detail, cycleState };
   }
   return { disabled: false, reason: "", cycleState };
+}
+
+// A nontechnical-friendly label for each backend-reported
+// `market_session_state` value (Step 2). Reads only the backend's own
+// string -- never independently computed.
+const MARKET_SESSION_LABEL = Object.freeze({
+  MARKET_CLOSED: "MARKET CLOSED",
+  PRE_MARKET: "PRE-MARKET",
+  REGULAR_MARKET: "REGULAR SESSION",
+  POST_MARKET: "POST-MARKET",
+});
+
+function marketSessionLabel(status) {
+  if (!status || !status.market_session_state) return "UNKNOWN";
+  return MARKET_SESSION_LABEL[status.market_session_state] || status.market_session_state;
 }
 
 function systemHealthLabel(status) {
@@ -156,6 +184,7 @@ if (typeof module !== "undefined" && module.exports) {
     CYCLE_STATE_LABEL,
     deriveCycleState,
     runButtonState,
+    marketSessionLabel,
     systemHealthLabel,
     validationProgress,
     createRunGuard,

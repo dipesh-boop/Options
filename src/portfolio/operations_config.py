@@ -46,6 +46,12 @@ class OperationsConfig(BaseModel):
     confirmation_ttl_seconds: int = Field(gt=0)
     max_price_drift_pct: float = Field(gt=0, le=1)
     max_capital_required_drift_pct: float = Field(gt=0, le=1)
+    # PAPER_TRADING_V1.5.1, Step 2: see config/operations.yaml's own
+    # `market_hours` section comment for what these govern (and do not
+    # govern) -- src.portfolio.market_session.evaluate_validation_cycle_eligibility's
+    # buffer parameters.
+    scan_open_buffer_minutes: int = Field(ge=0)
+    scan_close_buffer_minutes: int = Field(ge=0)
 
 
 def _resolved(section: dict[str, Any], key: str) -> Any:
@@ -73,6 +79,7 @@ def load_operations_config(config_path: Path | str | None = None) -> OperationsC
         market_regime = data["market_regime"]
         storage = data["storage"]
         review = data["review"]
+        market_hours = data["market_hours"]
 
         regime = str(_resolved(market_regime, "default_regime"))
         if regime not in _VALID_REGIMES:
@@ -91,6 +98,8 @@ def load_operations_config(config_path: Path | str | None = None) -> OperationsC
             confirmation_ttl_seconds=int(_resolved(review, "confirmation_ttl_seconds")),
             max_price_drift_pct=float(_resolved(review, "max_price_drift_pct")),
             max_capital_required_drift_pct=float(_resolved(review, "max_capital_required_drift_pct")),
+            scan_open_buffer_minutes=int(_resolved(market_hours, "scan_open_buffer_minutes")),
+            scan_close_buffer_minutes=int(_resolved(market_hours, "scan_close_buffer_minutes")),
         )
     except KeyError as exc:
         raise OperationsConfigError(f"{path} is missing required section {exc}") from exc

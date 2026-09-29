@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Operator-run daily validation-cycle runner (Step 22.6; operator
 usability/startup fixes in Step 22.8; dashboard UI completion in
-Step 22.9, PAPER_TRADING_V1.4.8).
+Step 22.9; market-hours safety gate in Step 2, PAPER_TRADING_V1.5.1).
 
 **Explicit CLI, parsed before anything else runs.** `main()`'s very first
 statement is `parser.parse_args()`. `--help`/`-h` prints usage and exits 0;
@@ -56,6 +56,22 @@ Existing positions are still evaluated every cycle through the unmodified
 switch), exactly as designed -- only new-position execution is gated behind
 human confirmation.
 
+**Step 2: the new-position daily opportunity scan may only START during
+the approved regular market session.** Immediately after the provider
+preflight above (still before `_expire_stale_candidates`, before the
+market-data provider is constructed, before any cycle/candidate/snapshot
+record is persisted), `src.portfolio.market_session
+.evaluate_validation_cycle_eligibility` decides whether today's session
+is open, in a trading day, and past the configured post-open/pre-close
+buffer (`config/operations.yaml`'s `market_hours` section) -- if not,
+this function fails closed with a plain reason and nothing below this
+point ever runs. This gate lives ONLY here, in this one script's daily-
+invocation entry point; it never touches `run_control_cycle`/
+`evaluate_position`/`check_kill_switch`, so existing-position Lifecycle/
+Risk monitoring remains fully intact and callable regardless of this
+gate. Fails closed if the market calendar itself cannot be evaluated --
+see that module's own docstring for the full reasoning.
+
 Cycle-level idempotent: if today's cycle already completed
 (`SqliteControlLoopStore.get_cycle_record`), this script logs and exits 0
 without re-running anything.
@@ -96,6 +112,7 @@ from src.llm.schemas import StrategyType  # noqa: E402
 from src.brokers.base import SqliteIdempotencyStore  # noqa: E402
 from src.brokers.paper import PaperBroker  # noqa: E402
 from src.portfolio.account_state import SqlitePaperAccountStateStore, SqlitePortfolioStore  # noqa: E402
+from src.portfolio.market_session import evaluate_validation_cycle_eligibility  # noqa: E402
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
 from src.portfolio.orchestrator import OpportunityScanConfig, OuterCycleInputs, run_outer_cycle  # noqa: E402
 from src.portfolio.persistence import SqliteControlLoopStore  # noqa: E402
@@ -140,8 +157,15 @@ def _expire_stale_candidates(review_store, cohort_id: str, validation_store, now
     return expired_count
 
 
-async def run_validation_cycle() -> bool:
-    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.4.8)")
+async def run_validation_cycle(*, now: datetime | None = None) -> bool:
+    """`now` is `None` in every real invocation (CLI, dashboard POST) --
+    the real wall clock (`datetime.now(timezone.utc)`) is used, exactly
+    as before Step 2. The parameter exists solely so
+    `evaluate_validation_cycle_eligibility`'s market-hours gate (below)
+    can be exercised deterministically by tests without depending on
+    the actual current clock -- see `src.portfolio.market_session`'s
+    module docstring for why this is the one function that needs it."""
+    print("Validation-cycle runner -- Review-Only new-position execution (PAPER_TRADING_V1.5.1)")
     print("This path never calls PaperBroker.place_order for a new position.\n")
 
     try:
@@ -190,13 +214,38 @@ async def run_validation_cycle() -> bool:
         return False
     _line("provider preflight", "Tradier production market data configured")
 
+    # PAPER_TRADING_V1.5.1, Step 2: the new-position daily opportunity
+    # scan's market-hours safety gate -- checked BEFORE any store beyond
+    # `validation_store` (already open for the cohort-started check
+    # above) is constructed, before `cycle_id` is computed, before the
+    # market-data provider is touched, before `_expire_stale_candidates`
+    # (this script's first real mutation), and therefore before any
+    # candidate/cycle/snapshot record could be persisted. See
+    # `src.portfolio.market_session`'s module docstring for why gating
+    # the WHOLE daily invocation here (rather than only the opportunity-
+    # scan sub-stage inside `run_outer_cycle`) is the safe choice: it
+    # never adds a market-hours check inside `run_control_cycle`/
+    # `evaluate_position`/`check_kill_switch` themselves, so existing-
+    # position Lifecycle Engine/Risk kill-switch monitoring remains
+    # fully intact, unmodified, and independently callable -- this gate
+    # only ever decides whether THIS script's one daily automated
+    # invocation may start, exactly like the provider preflight above
+    # already does for a different reason.
+    now = now or datetime.now(timezone.utc)
+    eligibility = evaluate_validation_cycle_eligibility(
+        now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
+    )
+    if not eligibility.validation_cycle_allowed:
+        print(f"FAIL: market-hours gate -- {eligibility.block_reason}")
+        return False
+    _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
+
     control_loop_store = SqliteControlLoopStore(ops.control_loop_db_path)
     lifecycle_store = SqliteLifecycleStore(ops.lifecycle_db_path)
     review_store = SqliteCandidateReviewStore(ops.candidate_review_db_path)
     account_state_store = SqlitePaperAccountStateStore(ops.account_state_db_path)
     portfolio_store = SqlitePortfolioStore(ops.account_state_db_path)
 
-    now = datetime.now(timezone.utc)
     cycle_id = f"validation-{now.date().isoformat()}"
     _line("cycle_id", cycle_id)
 

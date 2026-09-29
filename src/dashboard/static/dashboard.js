@@ -116,6 +116,7 @@ function renderControlCenter(status, opts = {}) {
 
   renderCcCohort(status);
   renderCcMarketData(status);
+  renderCcMarketSession(status);
   renderCcTodayCycle(status, clientRunning);
   renderCcPortfolio(status);
   renderCcProgress(status);
@@ -151,6 +152,39 @@ function renderCcMarketData(status) {
       statTile("Tradier Production", provider.is_tradier_production ? "YES" : "NO", provider.is_tradier_production ? "pos" : "neg"),
       statTile("Readiness", provider.ready ? "READY" : "NOT READY", provider.ready ? "pos" : "neg"),
     ].join("") + `<div class="muted">${esc(provider.detail || "")}</div>`;
+}
+
+// Step 2 (PAPER_TRADING_V1.5.1): formats an already-backend-decided ISO
+// timestamp into an Eastern-time HH:MM AM/PM string for display only --
+// this never decides whether the market is open; it only renders the
+// `regular_session_open`/`regular_session_close` instants the backend
+// already computed via `src.data.market_calendar`.
+function fmtEasternTime(isoString) {
+  if (!isoString) return "—";
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+    }).format(new Date(isoString)) + " ET";
+  } catch {
+    return "—";
+  }
+}
+
+function renderCcMarketSession(status) {
+  const el = document.getElementById("cc-market-session");
+  if (!status || !status.configured || !status.market_session_state) {
+    el.innerHTML = `<div class="empty">Market session status is not available.</div>`;
+    return;
+  }
+  const label = marketSessionLabel(status);
+  const sessionText = status.is_trading_day
+    ? `Regular session: ${fmtEasternTime(status.regular_session_open)} – ${fmtEasternTime(status.regular_session_close)}`
+    : "Not a trading day (weekend or market holiday).";
+  el.innerHTML = `
+    <div class="cc-state-badge cc-state-${esc(status.market_session_state)}">${esc(label)}</div>
+    <div class="muted">${esc(sessionText)}</div>
+    <div class="muted">${status.validation_cycle_allowed ? "New-position scan window is open." : esc(status.validation_cycle_block_reason || "New-position scan is not currently allowed.")}</div>
+  `;
 }
 
 function renderCcTodayCycle(status, clientRunning) {

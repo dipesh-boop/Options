@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.5.0"
-        assert manifest.freeze_version == "1.5.0"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.5.1"
+        assert manifest.freeze_version == "1.5.1"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -65,6 +65,8 @@ class TestBuildFreezeManifest:
         assert len(manifest.experiment_version_module_hash) == 64
         assert len(manifest.validation_protocol_module_hash) == 64
         assert len(manifest.validation_session_module_hash) == 64
+        # PAPER_TRADING_V1.5.1, Step 2
+        assert manifest.market_hours_gate_precedes_mutation is True
         assert len(manifest.manifest_hash) == 64  # sha256 hex digest
 
     def test_naive_generated_at_rejected(self):
@@ -874,6 +876,59 @@ class TestOfficialCycleRequiresTradierPreflightCheck:
         assert result.passed is False
         assert any(
             c.name == "official_cycle_requires_tradier_preflight" and not c.passed for c in result.checks
+        )
+
+
+class TestMarketHoursGatePrecedesMutationCheck:
+    """PAPER_TRADING_V1.5.1, Step 2: the new-position daily opportunity
+    scan must never start outside the approved regular market session
+    -- `scripts/run_validation_cycle.py` must call
+    `evaluate_validation_cycle_eligibility` before every one of its own
+    known mutating calls, exactly mirroring
+    `TestOfficialCycleRequiresTradierPreflightCheck`'s own precedent."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "market_hours_gate_precedes_mutation" and c.passed for c in result.checks)
+
+    def test_removing_the_gate_call_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        script = Path("scripts/run_validation_cycle.py")
+        original = script.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace(
+                "evaluate_validation_cycle_eligibility(",
+                "_evaluate_validation_cycle_eligibility_RENAMED(",
+            )
+            assert poisoned != original
+            script.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "market_hours_gate_precedes_mutation" and not c.passed for c in result.checks
+            )
+        finally:
+            script.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_market_hours_gate_precedes_mutation_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["market_hours_gate_precedes_mutation"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "market_hours_gate_precedes_mutation" and not c.passed for c in result.checks
         )
 
 

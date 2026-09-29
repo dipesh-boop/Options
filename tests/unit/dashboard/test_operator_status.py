@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 import src.dashboard.validation_ops as validation_ops
 from src.dashboard.app import app
+from src.portfolio.market_session import MarketSessionState, ValidationCycleEligibility
 from tests.acceptance.test_review_only_daily_cycle import (
     COHORT_ID,
     FakeMarketDataProvider,
@@ -120,6 +121,19 @@ class TestValidationCycleRunRoute:
         # does for the script module directly.
         runner_module = validation_ops._load_runner_module()
         monkeypatch.setattr(runner_module, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
+        # Step 2: this test proves dashboard-vs-CLI parity for the
+        # Review-Only workflow, never the market-hours gate itself --
+        # bypassed so it never depends on the real wall-clock time the
+        # suite happens to run at.
+        monkeypatch.setattr(
+            runner_module,
+            "evaluate_validation_cycle_eligibility",
+            lambda now, **kw: ValidationCycleEligibility(
+                as_of=now, market_session_state=MarketSessionState.REGULAR_MARKET, is_trading_day=True,
+                regular_session_open=None, regular_session_close=None,
+                validation_cycle_allowed=True, block_reason=None,
+            ),
+        )
 
         client = TestClient(app)
         resp = client.post("/api/validation-cycle/run")

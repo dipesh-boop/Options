@@ -16,6 +16,7 @@ const {
   CYCLE_STATE,
   deriveCycleState,
   runButtonState,
+  marketSessionLabel,
   systemHealthLabel,
   validationProgress,
   createRunGuard,
@@ -43,6 +44,17 @@ function baseStatus(overrides = {}) {
     validation_preferred_completed_trades: 100,
     validation_completed_trades: 0,
     alerts: [],
+    // Step 2 (PAPER_TRADING_V1.5.1): defaults to an allowed regular
+    // session so every pre-existing test in this file (written before
+    // the market-hours gate existed) keeps exercising exactly the
+    // condition it always meant to -- market-hours-specific tests below
+    // override these explicitly.
+    market_session_state: "REGULAR_MARKET",
+    is_trading_day: true,
+    regular_session_open: "2026-09-24T13:30:00Z",
+    regular_session_close: "2026-09-24T20:00:00Z",
+    validation_cycle_allowed: true,
+    validation_cycle_block_reason: null,
     ...overrides,
   };
 }
@@ -128,6 +140,64 @@ test("runButtonState: disabled when provider object itself is missing", () => {
   const status = baseStatus({ provider: undefined });
   const state = runButtonState(status, false);
   assert.equal(state.disabled, true);
+});
+
+// -------------------------------------- runButtonState: market-hours gate
+// Step 2 (PAPER_TRADING_V1.5.1): the button must render backend
+// authority, never compute market hours itself.
+
+test("runButtonState: disabled when backend reports validation_cycle_allowed=false (PRE_MARKET)", () => {
+  const status = baseStatus({
+    market_session_state: "PRE_MARKET", validation_cycle_allowed: false,
+    validation_cycle_block_reason: "pre-market -- regular session opens at 2026-09-24T13:30:00Z",
+  });
+  const state = runButtonState(status, false);
+  assert.equal(state.disabled, true);
+  assert.match(state.reason, /pre-market/i);
+});
+
+test("runButtonState: enabled when backend reports REGULAR_MARKET and validation_cycle_allowed=true, other prerequisites pass", () => {
+  const status = baseStatus({ market_session_state: "REGULAR_MARKET", validation_cycle_allowed: true });
+  const state = runButtonState(status, false);
+  assert.equal(state.disabled, false);
+});
+
+test("runButtonState: disabled when backend reports POST_MARKET", () => {
+  const status = baseStatus({
+    market_session_state: "POST_MARKET", validation_cycle_allowed: false,
+    validation_cycle_block_reason: "post-market -- regular session closed at 2026-09-24T20:00:00Z",
+  });
+  const state = runButtonState(status, false);
+  assert.equal(state.disabled, true);
+  assert.match(state.reason, /post-market/i);
+});
+
+test("runButtonState: already-completed-today remains disabled even when the market is open", () => {
+  const status = baseStatus({ today_cycle_ran: true, market_session_state: "REGULAR_MARKET", validation_cycle_allowed: true });
+  const state = runButtonState(status, false);
+  assert.equal(state.disabled, true);
+  assert.match(state.reason, /already completed/i);
+});
+
+test("runButtonState: falls back to a generic reason when the backend omits validation_cycle_block_reason", () => {
+  const status = baseStatus({ validation_cycle_allowed: false, validation_cycle_block_reason: null });
+  const state = runButtonState(status, false);
+  assert.equal(state.disabled, true);
+  assert.match(state.reason, /regular validation window/i);
+});
+
+// ---------------------------------------------------------- marketSessionLabel
+
+test("marketSessionLabel: UNKNOWN when unavailable", () => {
+  assert.equal(marketSessionLabel(null), "UNKNOWN");
+  assert.equal(marketSessionLabel({}), "UNKNOWN");
+});
+
+test("marketSessionLabel: renders each backend-reported state", () => {
+  assert.equal(marketSessionLabel(baseStatus({ market_session_state: "MARKET_CLOSED" })), "MARKET CLOSED");
+  assert.equal(marketSessionLabel(baseStatus({ market_session_state: "PRE_MARKET" })), "PRE-MARKET");
+  assert.equal(marketSessionLabel(baseStatus({ market_session_state: "REGULAR_MARKET" })), "REGULAR SESSION");
+  assert.equal(marketSessionLabel(baseStatus({ market_session_state: "POST_MARKET" })), "POST-MARKET");
 });
 
 // ---------------------------------------------------------- systemHealthLabel

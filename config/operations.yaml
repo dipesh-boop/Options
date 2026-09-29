@@ -51,6 +51,25 @@ storage:
   candidate_review_db_path: data/options_agent.db
   candidate_review_db_path_env: OPTIONS_AGENT_CANDIDATE_REVIEW_DB_PATH
 
+market_hours:
+  # PAPER_TRADING_V1.5.1, Step 2: how long AFTER the regular session
+  # opens / BEFORE it closes the new-position daily opportunity scan
+  # must wait before it is allowed to start -- distinct from this
+  # platform's existing 15-minute QUOTE-STALENESS tolerance
+  # (`src.data.provider.DEFAULT_MAX_QUOTE_AGE`), which is about how old
+  # a quote may be, not about when a brand-new scan may begin. No such
+  # policy existed anywhere in this repository before this step; these
+  # are a documented, minimal, conservative default -- see
+  # `src.portfolio.market_session`'s own module docstring for the full
+  # reasoning -- not a value derived from anything else already here.
+  # Existing-position lifecycle/risk monitoring (Lifecycle Engine, Risk
+  # kill-switch) is NEVER gated by these values -- they govern only
+  # whether today's automated NEW-POSITION scan may start.
+  scan_open_buffer_minutes: 5
+  scan_open_buffer_minutes_env: OPTIONS_AGENT_SCAN_OPEN_BUFFER_MINUTES
+  scan_close_buffer_minutes: 15
+  scan_close_buffer_minutes_env: OPTIONS_AGENT_SCAN_CLOSE_BUFFER_MINUTES
+
 review:
   # How long a Risk-approved candidate stays AWAITING_HUMAN before the
   # next daily cycle expires it. 900s is a placeholder matching this
