@@ -5909,3 +5909,72 @@ validation cycle, no `confirm_candidate` call, and no PaperBroker fill
 were executed anywhere in this step. This step deliberately stops here
 -- no universe expansion, additional strategy activation, or V1.5 Step
 4 work of any kind was started.
+
+## 2026-09-29 -- V1.5 Step 3B (PAPER_TRADING_V1.5.4): Tradier historical
+## daily-bars adapter + correlation date-intersection correction
+
+**What was built.** The explicitly-approved follow-up to V1.5.3's own
+"external dependency discovered" disclosure. `TradierMarketDataProvider`
+now also satisfies `src.data.historical.HistoricalDataProvider` via a
+new `get_bars` method, calling only Tradier's read-only `GET
+/markets/history` endpoint through the same production-only,
+already-credentialed connection and the same GET-only `_request` choke
+point every other method already uses -- no new provider, no new
+credential, no sandbox fallback. Defaults to `RateLimitPriority
+.P5_BACKGROUND_RESEARCH`, the lowest tier, subordinate to
+position-risk/lifecycle/repricing requests sharing the same budget.
+
+**Critical correction to this repo's own V1.5.3 code.**
+`src.portfolio.risk_data.resolve_price_history_for_correlation`'s
+alignment logic previously trimmed every ticker's series to the same
+LENGTH (`series[-aligned_length:]`) -- a positional trim that could
+silently pair one ticker's price from one calendar date against
+another ticker's price from a DIFFERENT date whenever their fetched
+calendars diverged for a reason other than differing total length (a
+single mid-range gap in one series). It now aligns by the true set
+intersection of `HistoricalBar.bar_date`s actually shared by every
+ticker, in ascending date order, with no padding/fill, and fails closed
+if fewer than `min_observations` dates survive that intersection.
+
+**Installation, not activation.** `scripts/run_validation_cycle.py`/
+`scripts/confirm_candidate.py` now construct the market-data provider
+before the risk-data wiring call (previously after) and pass it as
+`historical_provider` whenever it satisfies `HistoricalDataProvider`,
+reusing the same connection rather than opening a second one.
+`config/operations.yaml`'s `risk_data_wiring.enabled` remains `false`,
+byte-for-byte unchanged -- `apply_risk_data_wiring` still returns the
+active cohort's portfolio completely untouched and never calls
+`get_bars` for it. Two new freeze checks
+(`historical_data_capability_installed`,
+`correlation_alignment_uses_date_intersection`) prove both the
+capability's presence and the correction's presence structurally.
+
+**Pre-existing defect found and fixed.** While confirming this step
+never touches the operational database, a full-suite run was found to
+create `data/options_agent.db` at the repo root -- a defect unrelated
+to this step's own changes (bisected to 6 tests in
+`tests/unit/dashboard/test_operator_status.py`/
+`test_frontend_control_center.py` that exercised the dashboard's real
+routes with no path isolation, letting the config loaders fall through
+to their real default paths). The V1.5.3 freeze report had already
+flagged this in passing without tracking it down. Fixed via a new
+`_isolated_operational_db` fixture pointing every `*_DB_PATH` env
+override at `tmp_path`. `data/` is now confirmed absent before and
+after every full-suite run in this step.
+
+**Testing.** 30 new tests for `get_bars`/`_parse_history_json`
+(`tests/unit/data/test_tradier_provider.py`, now 101 total), 12 new for
+date-intersection alignment (`tests/unit/portfolio/test_risk_data.py`,
+now 26 total), 7 new freeze checks
+(`tests/unit/validation/test_freeze.py`, now 86 total). Full suite:
+3670 passed, 6 skipped, 0 failed (up from 3627). `make verify-freeze`:
+all 68 checks pass against the regenerated `PAPER_TRADING_V1.5.4`
+manifest. Zero real network calls anywhere in this step's tests (every
+Tradier call uses the existing fake-HTTP-client injection pattern).
+
+**What remains open.** Whether/when to activate `risk_data_wiring` for
+a future successor cohort is the operator's own decision, not made or
+recommended by this step. Universe expansion, additional strategy
+activation, successor-cohort creation, and candidate confirmation
+remain explicitly out of scope. See `STEP_23_4_FREEZE_REPORT.md` for
+the full 15-item architecture trace and freeze detail.

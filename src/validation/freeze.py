@@ -170,7 +170,42 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # collateral rules, Tradier market-data normalization, freshness/
 # quality-gate thresholds, transaction-cost/slippage assumptions,
 # human-confirmation semantics, or the active validation cohort's
-# state -- see STEP_23_2_FREEZE_REPORT.md) each bumped the freeze
+# state -- see STEP_23_2_FREEZE_REPORT.md), Step 3 (PAPER_TRADING_V1.5.3:
+# sector/correlation risk-data wiring -- see STEP_23_3_FREEZE_REPORT.md),
+# and Step 3B (PAPER_TRADING_V1.5.4: the Tradier historical daily-bars
+# adapter, an explicitly-approved follow-up to V1.5.3's own "external
+# dependency discovered" disclosure. Adds `TradierMarketDataProvider
+# .get_bars` -- the ONLY new capability this step adds -- satisfying
+# `src.data.historical.HistoricalDataProvider` via the exact same
+# production-only, already-credentialed Tradier connection and the exact
+# same `_request` GET-only choke point every other method in that module
+# already uses (no new provider, no new credential, no sandbox fallback,
+# no order/trading/account endpoint of any kind). Also contains this
+# step's own explicitly-flagged CRITICAL CORRECTION to its own V1.5.3
+# code: `src.portfolio.risk_data.resolve_price_history_for_correlation`
+# previously aligned correlation histories by positional/length-based
+# trimming (`series[-aligned_length:]`) -- silently pairing one ticker's
+# price from one calendar date against another ticker's price from a
+# DIFFERENT date whenever their fetched calendars didn't align for a
+# reason other than differing total length. It now aligns by the true
+# SET INTERSECTION of `HistoricalBar.bar_date`s actually shared by every
+# ticker being correlated, with no padding/forward-fill/back-fill, and
+# fails closed (returns `{}`) if fewer than `min_observations` dates
+# survive that intersection. `scripts/run_validation_cycle.py`/
+# `scripts/confirm_candidate.py` now pass a real `TradierMarketDataProvider`
+# instance (reused via an `isinstance(provider, HistoricalDataProvider)`
+# check against the SAME already-constructed, already-preflighted market-
+# data provider -- never a second connection) as `historical_provider`,
+# in place of V1.5.3's hardcoded `None`. Installation, not activation:
+# `config/operations.yaml`'s `risk_data_wiring.enabled` remains `false`
+# for the active cohort, unchanged by this step -- `apply_risk_data_wiring`
+# still returns the portfolio completely untouched, and never calls
+# `historical_provider.get_bars` at all, whenever `enabled` is `False`.
+# Does NOT modify frozen strategy, Quant, deterministic Risk, lifecycle
+# policy, PaperBroker fill model, Fidelity behavior, trade-selection
+# behavior, the `min_correlation_observations`/`correlation_lookback_days`
+# values, or the active validation cohort's state in any way -- see
+# STEP_23_4_FREEZE_REPORT.md) each bumped the freeze
 # name/version in place without touching the prior versions' own
 # artifacts -- see progress.md and STEP_22_1_FREEZE_REPORT.md /
 # STEP_22_2_FREEZE_REPORT.md / STEP_22_3_FREEZE_REPORT.md /
@@ -180,20 +215,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
 # STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md /
 # STEP_23_2_FREEZE_REPORT.md / STEP_23_2A_FREEZE_REPORT.md /
-# STEP_23_3_FREEZE_REPORT.md.
+# STEP_23_3_FREEZE_REPORT.md / STEP_23_4_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
 # V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0/
-# V1.5.1/V1.5.2 manifests/reports remain recoverable from git history at
-# the `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
-# `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1` /
-# `paper-trading-v1.4.2` / `paper-trading-v1.4.3` / `paper-trading-v1.4.4`
-# / `paper-trading-v1.4.5` / `paper-trading-v1.4.6` / `paper-trading-v1.4.7`
-# / `paper-trading-v1.4.8` / `paper-trading-v1.5.0` / `paper-trading-v1.5.1`
-# / `paper-trading-v1.5.2` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.3"
+# V1.5.1/V1.5.2/V1.5.3 manifests/reports remain recoverable from git
+# history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
+# `paper-trading-v1.2` / `paper-trading-v1.3` / `paper-trading-v1.4` /
+# `paper-trading-v1.4.1` / `paper-trading-v1.4.2` / `paper-trading-v1.4.3`
+# / `paper-trading-v1.4.4` / `paper-trading-v1.4.5` / `paper-trading-v1.4.6`
+# / `paper-trading-v1.4.7` / `paper-trading-v1.4.8` / `paper-trading-v1.5.0`
+# / `paper-trading-v1.5.1` / `paper-trading-v1.5.2` / `paper-trading-v1.5.3`
+# tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.4"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.3"
+MANIFEST_VERSION = "1.5.4"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -481,6 +517,17 @@ class FreezeManifest(BaseModel):
     risk_data_wiring_fail_closed_verified: bool  # must always be True -- src.risk.correlation/src.risk.engine implement the fail-closed sector/correlation-data-unavailable path
     risk_data_wiring_inactive_for_active_cohort: bool  # must always be True at freeze time -- config/operations.yaml's risk_data_wiring.enabled is false, so the active cohort's candidate eligibility is unchanged by this step
 
+    # PAPER_TRADING_V1.5.4, Step 3B: the Tradier historical daily-bars
+    # adapter and its own critical correction to V1.5.3's correlation-
+    # alignment code. `src.data.tradier_provider` needs no separate hash
+    # entry here -- it already has one (`tradier_provider_module_hash`
+    # above), which legitimately changes this step since `get_bars` was
+    # added to that exact file. `src.portfolio.risk_data` needs none
+    # either -- it lives inside `src/portfolio/`, already covered by
+    # `portfolio_module_hash`'s whole-directory hash above.
+    historical_data_capability_installed: bool  # must always be True -- TradierMarketDataProvider satisfies HistoricalDataProvider via get_bars, calling only the read-only /markets/history GET endpoint
+    correlation_alignment_uses_date_intersection: bool  # must always be True -- src.portfolio.risk_data aligns correlation histories by true date intersection, never by positional/length-based trimming
+
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
     commission_assumptions: dict[str, Any]
@@ -669,7 +716,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.3",
+        freeze_version="1.5.4",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -706,6 +753,8 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         market_hours_gate_precedes_mutation=_verify_market_hours_gate_precedes_mutation(),
         risk_data_wiring_fail_closed_verified=_verify_risk_data_wiring_fail_closed(),
         risk_data_wiring_inactive_for_active_cohort=_verify_risk_data_wiring_inactive_for_active_cohort(),
+        historical_data_capability_installed=_verify_historical_data_capability_installed(),
+        correlation_alignment_uses_date_intersection=_verify_correlation_alignment_uses_date_intersection(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -1078,6 +1127,29 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         "True" if risk_data_inactive_ok
         else "config/operations.yaml's risk_data_wiring.enabled is not false, or the manifest wrongly claims "
         "otherwise -- installing this capability must never silently activate it for the already-running cohort",
+    ))
+
+    historical_capability_ok = (
+        _verify_historical_data_capability_installed() and manifest.historical_data_capability_installed
+    )
+    checks.append(FreezeCheck(
+        name="historical_data_capability_installed", passed=historical_capability_ok,
+        detail="TradierMarketDataProvider satisfies HistoricalDataProvider via get_bars, calling only "
+        "/markets/history, and manifest records True" if historical_capability_ok
+        else "TradierMarketDataProvider no longer demonstrably satisfies HistoricalDataProvider via "
+        "get_bars/'/markets/history', or the manifest wrongly claims otherwise",
+    ))
+
+    correlation_alignment_ok = (
+        _verify_correlation_alignment_uses_date_intersection() and manifest.correlation_alignment_uses_date_intersection
+    )
+    checks.append(FreezeCheck(
+        name="correlation_alignment_uses_date_intersection", passed=correlation_alignment_ok,
+        detail="src.portfolio.risk_data aligns correlation histories by date intersection, never positional "
+        "trimming, and manifest records True" if correlation_alignment_ok
+        else "the old positional-trim alignment bug (series[-aligned_length:]) has reappeared in "
+        "src/portfolio/risk_data.py, or a true date-intersection computation is no longer present, or the "
+        "manifest wrongly claims otherwise",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1541,6 +1613,53 @@ def _verify_risk_data_wiring_inactive_for_active_cohort() -> bool:
     except (KeyError, TypeError):
         return False
     return enabled is False
+
+
+def _verify_historical_data_capability_installed() -> bool:
+    """PAPER_TRADING_V1.5.4, Step 3B: a direct, executable proof that
+    `TradierMarketDataProvider` now satisfies `HistoricalDataProvider`
+    via a `get_bars` method that calls only the approved, read-only
+    `/markets/history` GET endpoint -- the same textual-presence style
+    `_verify_risk_data_wiring_fail_closed` already establishes. Whether
+    this capability is ever actually USED in official validation is a
+    completely separate question, governed entirely by
+    `config/operations.yaml`'s `risk_data_wiring.enabled` flag and
+    verified by `_verify_risk_data_wiring_inactive_for_active_cohort` --
+    this check only proves the capability exists in source, never that
+    it is active."""
+    path = REPO_ROOT / "src" / "data" / "tradier_provider.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    if "class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider):" not in text:
+        return False
+    if "async def get_bars(" not in text:
+        return False
+    if "/markets/history" not in text:
+        return False
+    return True
+
+
+def _verify_correlation_alignment_uses_date_intersection() -> bool:
+    """PAPER_TRADING_V1.5.4, Step 3B: a direct, executable proof of this
+    step's own explicitly-flagged critical correction to its own V1.5.3
+    code -- `src/portfolio/risk_data.py` must align correlation
+    histories by true DATE INTERSECTION, never by positional/length-
+    based trimming. Checks that the specific V1.5.3 bug pattern
+    (`series[-aligned_length:]`, which silently pairs each ticker's Nth-
+    from-the-end price against whatever calendar date happens to occupy
+    that same position in every OTHER ticker's series, regardless of
+    whether the dates actually match) is ABSENT, and that a genuine
+    set-intersection computation is present."""
+    path = REPO_ROOT / "src" / "portfolio" / "risk_data.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="ignore")
+    if "series[-aligned_length:]" in text:
+        return False  # the old positional-trim bug must never reappear
+    if "set.intersection(" not in text:
+        return False
+    return True
 
 
 def _verify_dashboard_cannot_confirm_candidates() -> bool:

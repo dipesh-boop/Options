@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.5.3"
-        assert manifest.freeze_version == "1.5.3"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.5.4"
+        assert manifest.freeze_version == "1.5.4"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -74,6 +74,10 @@ class TestBuildFreezeManifest:
         # PAPER_TRADING_V1.5.3, Step 3: sector/correlation risk-data wiring.
         assert manifest.risk_data_wiring_fail_closed_verified is True
         assert manifest.risk_data_wiring_inactive_for_active_cohort is True
+        # PAPER_TRADING_V1.5.4, Step 3B: Tradier historical daily-bars
+        # adapter + date-intersection correlation-alignment correction.
+        assert manifest.historical_data_capability_installed is True
+        assert manifest.correlation_alignment_uses_date_intersection is True
         assert len(manifest.manifest_hash) == 64  # sha256 hex digest
 
     def test_naive_generated_at_rejected(self):
@@ -1082,3 +1086,125 @@ class TestDashboardCannotConfirmCandidatesCheck:
         result = verify_freeze(path)
         assert result.passed is False
         assert any(c.name == "dashboard_cannot_confirm_candidates" and not c.passed for c in result.checks)
+
+
+class TestHistoricalDataCapabilityInstalledCheck:
+    """PAPER_TRADING_V1.5.4, Step 3B: TradierMarketDataProvider must
+    demonstrably satisfy HistoricalDataProvider via a real get_bars
+    method calling only /markets/history -- mirrors
+    TestRiskDataWiringFailClosedCheck's own precedent."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "historical_data_capability_installed" and c.passed for c in result.checks)
+
+    def test_removing_get_bars_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        provider_path = Path("src/data/tradier_provider.py")
+        original = provider_path.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace("async def get_bars(", "async def _renamed_get_bars(")
+            assert poisoned != original
+            provider_path.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "historical_data_capability_installed" and not c.passed for c in result.checks
+            )
+        finally:
+            provider_path.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_installed_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["historical_data_capability_installed"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "historical_data_capability_installed" and not c.passed for c in result.checks
+        )
+
+
+class TestCorrelationAlignmentUsesDateIntersectionCheck:
+    """PAPER_TRADING_V1.5.4, Step 3B: this step's own explicitly-flagged
+    critical correction to its own V1.5.3 code -- correlation histories
+    must be aligned by true date intersection, never positional
+    trimming. If the old `series[-aligned_length:]` pattern ever
+    reappears, this check must catch it."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(
+            c.name == "correlation_alignment_uses_date_intersection" and c.passed for c in result.checks
+        )
+
+    def test_reintroducing_the_old_positional_trim_bug_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        risk_data_path = Path("src/portfolio/risk_data.py")
+        original = risk_data_path.read_text(encoding="utf-8")
+        try:
+            # Simulate the exact V1.5.3 regression this step fixed: a
+            # positional-trim return statement reappearing in the module,
+            # without removing the genuine intersection logic already
+            # there -- the check must still fail on the mere PRESENCE of
+            # the forbidden pattern.
+            poisoned = original + "\n\n_REGRESSION_PROBE = lambda series, aligned_length: series[-aligned_length:]\n"
+            assert poisoned != original
+            risk_data_path.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "correlation_alignment_uses_date_intersection" and not c.passed for c in result.checks
+            )
+        finally:
+            risk_data_path.write_text(original, encoding="utf-8")
+
+    def test_removing_the_intersection_call_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        risk_data_path = Path("src/portfolio/risk_data.py")
+        original = risk_data_path.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace("set.intersection(", "_renamed_intersection(")
+            assert poisoned != original
+            risk_data_path.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "correlation_alignment_uses_date_intersection" and not c.passed for c in result.checks
+            )
+        finally:
+            risk_data_path.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_date_intersection_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["correlation_alignment_uses_date_intersection"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "correlation_alignment_uses_date_intersection" and not c.passed for c in result.checks
+        )
