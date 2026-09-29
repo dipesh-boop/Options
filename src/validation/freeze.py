@@ -179,20 +179,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_5_FREEZE_REPORT.md / STEP_22_6_FREEZE_REPORT.md /
 # STEP_22_7_FREEZE_REPORT.md / STEP_22_8_FREEZE_REPORT.md /
 # STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md /
-# STEP_23_2_FREEZE_REPORT.md / STEP_23_2A_FREEZE_REPORT.md.
+# STEP_23_2_FREEZE_REPORT.md / STEP_23_2A_FREEZE_REPORT.md /
+# STEP_23_3_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
 # V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0/
-# V1.5.1 manifests/reports remain recoverable from git history at the
-# `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
+# V1.5.1/V1.5.2 manifests/reports remain recoverable from git history at
+# the `paper-trading-v1.0` / `paper-trading-v1.1` / `paper-trading-v1.2` /
 # `paper-trading-v1.3` / `paper-trading-v1.4` / `paper-trading-v1.4.1` /
 # `paper-trading-v1.4.2` / `paper-trading-v1.4.3` / `paper-trading-v1.4.4`
 # / `paper-trading-v1.4.5` / `paper-trading-v1.4.6` / `paper-trading-v1.4.7`
 # / `paper-trading-v1.4.8` / `paper-trading-v1.5.0` / `paper-trading-v1.5.1`
-# tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.2"
+# / `paper-trading-v1.5.2` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.3"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.2"
+MANIFEST_VERSION = "1.5.3"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -473,6 +474,13 @@ class FreezeManifest(BaseModel):
     # needed none in Step 22.4A.
     market_hours_gate_precedes_mutation: bool  # must always be True -- run_validation_cycle() calls evaluate_validation_cycle_eligibility before its first mutation
 
+    # PAPER_TRADING_V1.5.3, Step 3: sector/correlation risk-data wiring.
+    # `src.portfolio.risk_data` itself needs no separate hash entry --
+    # it lives inside `src/portfolio/`, already covered by
+    # `portfolio_module_hash`'s whole-directory hash above.
+    risk_data_wiring_fail_closed_verified: bool  # must always be True -- src.risk.correlation/src.risk.engine implement the fail-closed sector/correlation-data-unavailable path
+    risk_data_wiring_inactive_for_active_cohort: bool  # must always be True at freeze time -- config/operations.yaml's risk_data_wiring.enabled is false, so the active cohort's candidate eligibility is unchanged by this step
+
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
     commission_assumptions: dict[str, Any]
@@ -661,7 +669,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.2",
+        freeze_version="1.5.3",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -696,6 +704,8 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         validation_protocol_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_protocol_module"]),
         validation_session_module_hash=compute_file_hash(_CODE_MODULE_FILES["validation_session_module"]),
         market_hours_gate_precedes_mutation=_verify_market_hours_gate_precedes_mutation(),
+        risk_data_wiring_fail_closed_verified=_verify_risk_data_wiring_fail_closed(),
+        risk_data_wiring_inactive_for_active_cohort=_verify_risk_data_wiring_inactive_for_active_cohort(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -1045,6 +1055,29 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "scripts/run_validation_cycle.py no longer demonstrably checks the market-hours gate before a "
         "mutating call, or the manifest wrongly claims otherwise -- the new-position daily opportunity scan must "
         "never start outside the approved regular market session",
+    ))
+
+    risk_data_fail_closed_ok = (
+        _verify_risk_data_wiring_fail_closed() and manifest.risk_data_wiring_fail_closed_verified
+    )
+    checks.append(FreezeCheck(
+        name="risk_data_wiring_fail_closed_verified", passed=risk_data_fail_closed_ok,
+        detail="src.risk.correlation/src.risk.engine implement the sector/correlation-data-unavailable "
+        "fail-closed path, and manifest records True" if risk_data_fail_closed_ok
+        else "the sector/correlation-data-unavailable fail-closed path is no longer demonstrably present, or the "
+        "manifest wrongly claims otherwise -- missing risk data must never silently mean 'no sector risk' or "
+        "'no correlation risk'",
+    ))
+
+    risk_data_inactive_ok = (
+        _verify_risk_data_wiring_inactive_for_active_cohort() and manifest.risk_data_wiring_inactive_for_active_cohort
+    )
+    checks.append(FreezeCheck(
+        name="risk_data_wiring_inactive_for_active_cohort", passed=risk_data_inactive_ok,
+        detail="config/operations.yaml's risk_data_wiring.enabled is false at freeze time, and manifest records "
+        "True" if risk_data_inactive_ok
+        else "config/operations.yaml's risk_data_wiring.enabled is not false, or the manifest wrongly claims "
+        "otherwise -- installing this capability must never silently activate it for the already-running cohort",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1459,6 +1492,57 @@ def _verify_market_hours_gate_precedes_mutation() -> bool:
     return True
 
 
+def _verify_risk_data_wiring_fail_closed() -> bool:
+    """PAPER_TRADING_V1.5.3, Step 3: a direct, executable proof that the
+    sector/correlation fail-closed path this step installed is actually
+    present in source -- not just claimed. Checks `src/risk/correlation.py`
+    defines `CorrelationDataUnavailableError` and reads
+    `portfolio.risk_data_required`, and `src/risk/engine.py` maps both
+    new fail-closed outcomes to their own `ReasonCode`. A textual
+    presence check (like `_verify_no_llm_import_anywhere`'s own
+    precedent elsewhere in this module) rather than an AST walk --
+    proportionate to what's actually being guarded against (someone
+    deleting the fail-closed branch entirely, not a subtle logic bug)."""
+    correlation_path = REPO_ROOT / "src" / "risk" / "correlation.py"
+    engine_path = REPO_ROOT / "src" / "risk" / "engine.py"
+    if not correlation_path.is_file() or not engine_path.is_file():
+        return False
+    correlation_text = correlation_path.read_text(errors="ignore")
+    engine_text = engine_path.read_text(errors="ignore")
+    if "class CorrelationDataUnavailableError" not in correlation_text:
+        return False
+    if "risk_data_required" not in correlation_text:
+        return False
+    if "ReasonCode.REJECT_SECTOR_DATA_UNAVAILABLE" not in engine_text:
+        return False
+    if "ReasonCode.REJECT_CORRELATION_DATA_UNAVAILABLE" not in engine_text:
+        return False
+    if "CorrelationDataUnavailableError" not in engine_text:
+        return False
+    return True
+
+
+def _verify_risk_data_wiring_inactive_for_active_cohort() -> bool:
+    """PAPER_TRADING_V1.5.3, Step 3: reads the REAL
+    `config/operations.yaml` (never a fixture) and confirms
+    `risk_data_wiring.enabled` is `false` at freeze time -- the direct,
+    executable form of this step's own "installation, not activation"
+    requirement: the currently active validation cohort's candidate
+    eligibility must be unaffected by this freeze. `False` here would
+    mean this software freeze is shipping with risk-data wiring already
+    turned on for the live cohort, which `make verify-freeze` must catch
+    exactly as it catches any other undocumented behavior change."""
+    path = REPO_ROOT / "config" / "operations.yaml"
+    if not path.is_file():
+        return False
+    try:
+        data = _load_yaml(path)
+        enabled = data["risk_data_wiring"]["enabled"]
+    except (KeyError, TypeError):
+        return False
+    return enabled is False
+
+
 def _verify_dashboard_cannot_confirm_candidates() -> bool:
     """Step 22.8: a direct, executable proof (not just a docstring
     claim) that no file under `src/dashboard/` imports
@@ -1503,7 +1587,28 @@ def _cli_verify() -> int:
         print(f"[{mark}] {check.name}: {check.detail}")
     print()
     if result.passed:
-        print(f"{FREEZE_NAME} / FREEZE VERIFIED / VALIDATION NOT STARTED / READY FOR FINAL PRE-VALIDATION ACCEPTANCE")
+        # PAPER_TRADING_V1.5.3, Step 3: the prior wording here ("VALIDATION
+        # NOT STARTED / READY FOR FINAL PRE-VALIDATION ACCEPTANCE") was
+        # accurate only for the very first freeze (V1.0), before any
+        # cohort existed -- it was never updated across V1.2 through
+        # V1.5.2, all of which froze while the real
+        # paper-trading-v1.4.3-validation-2026-09-22 cohort was already
+        # actively running on the operator's own machine, making that
+        # banner actively misleading if read on its own (every freeze
+        # report's own prose has always had to separately clarify this).
+        # `validation_cohort_started` below is, and has always been, a
+        # SOFTWARE-FREEZE-TIME flag only -- literally hardcoded False in
+        # build_freeze_manifest (this freeze *process* itself never
+        # starts a cohort) -- never a claim that no cohort exists
+        # anywhere. Corrected here, safely, since this is output
+        # wording only: it changes no check, no hash, no behavior.
+        print(f"{FREEZE_NAME} / SOFTWARE FREEZE VERIFIED")
+        print(
+            "This freeze process itself never starts, resets, or modifies a validation cohort "
+            "(validation_cohort_started is always False here, by construction). Whether a cohort is "
+            "actively running is tracked separately, in the operator's own validation database records "
+            "-- not by this command."
+        )
         return 0
     print(f"{FREEZE_NAME} / FREEZE VERIFICATION FAILED -- {len(result.failures)} check(s) failed -- see above")
     return 1

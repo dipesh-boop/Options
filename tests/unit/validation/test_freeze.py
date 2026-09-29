@@ -23,8 +23,8 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 class TestBuildFreezeManifest:
     def test_builds_successfully_against_the_real_repository(self):
         manifest = build_freeze_manifest(generated_at=NOW)
-        assert manifest.freeze_name == "PAPER_TRADING_V1.5.2"
-        assert manifest.freeze_version == "1.5.2"
+        assert manifest.freeze_name == "PAPER_TRADING_V1.5.3"
+        assert manifest.freeze_version == "1.5.3"
         assert manifest.required_options_feed_for_validation == "opra"
         assert len(manifest.alpaca_provider_module_hash) == 64
         assert len(manifest.wheel_module_hash) == 64
@@ -71,6 +71,9 @@ class TestBuildFreezeManifest:
         # window export for operator_control.js's helpers + software-version
         # badge bump) -- no new hashed module or safety-flag field, since
         # nothing under a hashed directory or Python safety check changed.
+        # PAPER_TRADING_V1.5.3, Step 3: sector/correlation risk-data wiring.
+        assert manifest.risk_data_wiring_fail_closed_verified is True
+        assert manifest.risk_data_wiring_inactive_for_active_cohort is True
         assert len(manifest.manifest_hash) == 64  # sha256 hex digest
 
     def test_naive_generated_at_rejected(self):
@@ -933,6 +936,110 @@ class TestMarketHoursGatePrecedesMutationCheck:
         assert result.passed is False
         assert any(
             c.name == "market_hours_gate_precedes_mutation" and not c.passed for c in result.checks
+        )
+
+
+class TestRiskDataWiringFailClosedCheck:
+    """PAPER_TRADING_V1.5.3, Step 3: the sector/correlation
+    fail-closed path must be demonstrably present, mirroring
+    TestMarketHoursGatePrecedesMutationCheck's own precedent."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "risk_data_wiring_fail_closed_verified" and c.passed for c in result.checks)
+
+    def test_removing_the_fail_closed_error_class_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        correlation_path = Path("src/risk/correlation.py")
+        original = correlation_path.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace(
+                "class CorrelationDataUnavailableError", "class _RenamedCorrelationDataUnavailableError"
+            )
+            assert poisoned != original
+            correlation_path.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "risk_data_wiring_fail_closed_verified" and not c.passed for c in result.checks
+            )
+        finally:
+            correlation_path.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_fail_closed_is_verified_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["risk_data_wiring_fail_closed_verified"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "risk_data_wiring_fail_closed_verified" and not c.passed for c in result.checks
+        )
+
+
+class TestRiskDataWiringInactiveForActiveCohortCheck:
+    """PAPER_TRADING_V1.5.3, Step 3: installing this capability must
+    never silently activate it for the currently active validation
+    cohort -- `config/operations.yaml`'s `risk_data_wiring.enabled`
+    must be `false` at freeze time."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(
+            c.name == "risk_data_wiring_inactive_for_active_cohort" and c.passed for c in result.checks
+        )
+
+    def test_turning_it_on_in_the_real_config_is_caught(self, tmp_path, monkeypatch):
+        """The dangerous scenario this check exists for: someone flips
+        config/operations.yaml's risk_data_wiring.enabled to true,
+        silently activating fail-closed behavior for the already-running
+        cohort. `verify_freeze` must catch it, not just a hand-crafted
+        JSON tamper."""
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        ops_yaml = Path("config/operations.yaml")
+        original = ops_yaml.read_text(encoding="utf-8")
+        try:
+            poisoned = original.replace("enabled: false", "enabled: true", 1)
+            assert poisoned != original
+            ops_yaml.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "risk_data_wiring_inactive_for_active_cohort" and not c.passed for c in result.checks
+            )
+        finally:
+            ops_yaml.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_inactive_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["risk_data_wiring_inactive_for_active_cohort"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "risk_data_wiring_inactive_for_active_cohort" and not c.passed for c in result.checks
         )
 
 

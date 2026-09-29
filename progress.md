@@ -5791,3 +5791,121 @@ No official mutating validation cycle and no `confirm_candidate` call
 against the official cohort were executed anywhere in this step. This
 step deliberately stops here -- no V1.5 Step 3 or any other later
 feature was started.
+
+## 2026-09-29 -- V1.5 Step 3 (PAPER_TRADING_V1.5.3)
+
+Wires sector-concentration and correlation risk controls into the
+production validation path so they are operationally effective rather
+than merely present in code. The audit finding: `Portfolio
+.sector_by_ticker`/`price_history` were always plain dict fields the
+Risk Engine's own `check_sector_concentration`/`check_correlation`
+already read -- but nothing in `scripts/run_validation_cycle.py`/
+`scripts/confirm_candidate.py` ever populated them before constructing
+or loading a `Portfolio`, so an unclassified ticker always fell into a
+single silent "UNKNOWN" sector bucket and a missing price history
+always silently skipped the correlation check.
+
+**Sector data: fully wired, no new dependency.** New
+`src/portfolio/risk_data.py` sources sector classification entirely
+from `config/universe.yaml`'s existing per-ticker `sector` field (the
+same source `src.workflows.candidate_generation.generate_candidates`
+already uses for a new candidate's own `Candidate.sector`) -- no LLM,
+no guessing, no new provider. A `sector: ETF` entry (SPY/QQQ today,
+already declared this way) is treated as an explicit diversified-ETF
+bucket, never mapped onto a single-name GICS sector.
+
+**Correlation data: wiring installed, live provider deliberately not
+added.** `src.data.tradier_provider.TradierMarketDataProvider` (the
+only market-data provider official validation may use) implements no
+historical-bars endpoint -- confirmed by a full read of that file.
+Rather than silently add a new external dependency (Alpaca's existing
+historical module, or any other vendor) into the official validation
+path, this step installs the fail-closed correlation-data wiring and
+ships with `historical_provider=None` in every production call site,
+so correlation evaluation correctly REJECTs any candidate whenever the
+portfolio already holds a position and no trustworthy history is
+available, rather than silently treating missing history as zero
+correlation. The proposed fix (extending `TradierMarketDataProvider`
+with a `GET /v1/markets/history` method, using the SAME already-
+configured Tradier token -- not a new provider or credential) is
+reported in full in `STEP_23_3_FREEZE_REPORT.md`'s external-dependency
+section for explicit operator approval before implementation.
+
+**Installation vs. activation, enforced three ways.** `Portfolio`
+gained an additive `risk_data_required: bool = False` field;
+`config/operations.yaml` gained a new `risk_data_wiring` section
+(`enabled: false` by default, plus `min_correlation_observations`/
+`correlation_lookback_days` -- new policy values, `config/risk_limits.yaml`'s
+own existing thresholds untouched); `src.risk.engine`/
+`src.risk.correlation` only enforce fail-closed
+(`REJECT_SECTOR_DATA_UNAVAILABLE`/`REJECT_CORRELATION_DATA_UNAVAILABLE`,
+two new `ReasonCode`s) when `risk_data_required=True` -- the pre-
+V1.5.3 "UNKNOWN"/silent-skip behavior is preserved byte-for-byte
+otherwise. A new freeze check, `risk_data_wiring_inactive_for_active_cohort`,
+reads the REAL `config/operations.yaml` at freeze time and fails the
+whole freeze if `enabled` is ever `true` for the currently active
+cohort -- proven directly by flipping the real config file inside a
+dedicated test and confirming `make verify-freeze` catches it, not
+just a manifest-JSON tamper. `ExperimentVersion` gained an additive
+`risk_data_wiring_enabled` field (default `False`, participates in
+`version_id`) so a future cohort that activates this capability gets a
+genuinely distinct, attributable experiment identity -- every existing
+`test_experiment_version.py` test still passes unmodified.
+
+**Tests:** `tests/unit/portfolio/test_risk_data.py` (20, the wiring
+module itself: ETF/single-name classification determinism, no-provider
+fail-closed, insufficient-observations/future-dated-bar/one-ticker-
+failure isolation, installation-vs-activation no-op, backward-compatible
+old-shaped `Portfolio` JSON), `tests/unit/risk/test_risk_data_fail_closed.py`
+(8, the Risk Engine's own enforcement: sector/correlation fail-closed
+when active, pre-V1.5.3 behavior preserved when inactive, empty-
+portfolio carve-out, correlation LIMIT still enforced once real data
+IS available), `tests/acceptance/test_risk_data_wiring_cycle.py` (3,
+end-to-end through the real `scripts/run_validation_cycle.py`: disabled-
+by-default leaves risk-data fields empty, config-only activation
+populates them, a pre-existing position with no provider makes the real
+script's own scan reject the new candidate rather than surface it).
+**Full suite: 3627 passed, 6 skipped, 0 failed** (up from V1.5.2's
+3583 -- net new: 44 tests).
+
+**Re-frozen as PAPER_TRADING_V1.5.3.** All checks pass, including the
+two new checks above. Protected-config SHA-256 hashes (`universe.yaml`,
+`risk_limits.yaml`, `validation.yaml`, `brokers.yaml` -- all four
+byte-for-byte unchanged) and the operational database (absent, before
+and after) were confirmed. `config/operations.yaml` (not one of the
+four fully-protected configs) was extended additively with the new
+`risk_data_wiring` section, matching the established precedent from
+Step 2's own `market_hours` section addition.
+
+**Known wording defect corrected.** `make verify-freeze`'s closing
+banner previously read "VALIDATION NOT STARTED / READY FOR FINAL
+PRE-VALIDATION ACCEPTANCE" unconditionally on success -- accurate only
+for the very first freeze (V1.0), before any cohort existed, but never
+updated across V1.2 through V1.5.2, all of which froze while the real
+`paper-trading-v1.4.3-validation-2026-09-22` cohort was already
+actively running. `validation_cohort_started` is, and always was, a
+software-freeze-time-only flag (hardcoded `False` in
+`build_freeze_manifest` -- this freeze *process* itself never starts a
+cohort), never a claim that no cohort exists anywhere. The banner now
+reads "SOFTWARE FREEZE VERIFIED" plus an explicit sentence
+distinguishing that from active-cohort state, which is tracked
+separately in the operator's own validation database records. This is
+output wording only -- no check, hash, or behavior changed.
+
+See `STEP_23_3_FREEZE_REPORT.md` for the full architecture trace,
+external-dependency report, and check-by-check breakdown.
+
+**PAPER_TRADING_V1.5.3: FROZEN. 90_DAY_VALIDATION: IN_PROGRESS**
+(cohort `paper-trading-v1.4.3-validation-2026-09-22`, started
+2026-09-22 on the operator's own machine -- never started, reset, or
+touched from this sandbox). **LIVE_TRADING: DISABLED.
+FIDELITY_EXECUTION: MANUAL_ONLY. TRADIER: MARKET_DATA_ONLY.
+NEW_POSITION_EXECUTION: HUMAN_CONFIRMED_REVIEW_ONLY. NEW_POSITION_SCAN:
+REGULAR_MARKET_SESSION_ONLY (buffer-adjusted, unchanged). RISK_DATA_WIRING:
+INSTALLED_INACTIVE for the active cohort (unchanged candidate
+eligibility); ready for a future cohort's explicit activation once a
+correlation-history data source is approved.** No official mutating
+validation cycle, no `confirm_candidate` call, and no PaperBroker fill
+were executed anywhere in this step. This step deliberately stops here
+-- no universe expansion, additional strategy activation, or V1.5 Step
+4 work of any kind was started.
