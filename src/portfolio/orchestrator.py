@@ -64,7 +64,9 @@ from src.risk.broker_constraints import BrokerCapabilities
 from src.risk.limits import RiskLimitsConfig
 from src.risk.portfolio_risk import Portfolio
 from src.wheel.models import WheelPosition
+from src.workflows.candidate_funnel import CandidateFunnel, build_candidate_funnel
 from src.workflows.candidate_generation import QuantFilterConfig, UniverseEntry
+from src.workflows.funnel_diagnostics import FunnelDiagnostics
 
 # Part 10's exact priority assignment for this module's two optional
 # stages -- see module docstring for why existing-position/risk
@@ -99,6 +101,15 @@ class OpportunityScanConfig:
     broker_capabilities: BrokerCapabilities | None
     no_trade_hurdle: float = 0.0
     proposal_id_prefix: str = "control-loop-scan"
+    # PAPER_TRADING_V1.5.5, Step 4: entirely optional, purely additive.
+    # `False` (every caller before this step, and any caller that
+    # doesn't opt in) means `_run_opportunity_scan_stage` calls
+    # `scan_and_rank_opportunities` exactly as before -- no
+    # `diagnostics_by_ticker` argument at all, byte-identical behavior.
+    # `True` additionally collects a `CandidateFunnel` (see
+    # `src.workflows.candidate_funnel`'s own docstring for why this can
+    # never change `scan_and_rank_opportunities`'s own decision).
+    collect_candidate_funnel: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +157,12 @@ class OuterCycleResult:
     opportunity_decision_snapshot: PortfolioControlDecisionSnapshot | None
     new_alerts: tuple[ControlLoopAlert, ...]
     degraded_priorities: tuple[RateLimitPriority, ...]
+    # PAPER_TRADING_V1.5.5, Step 4: `None` unless the caller opted in via
+    # `OpportunityScanConfig.collect_candidate_funnel=True` -- purely
+    # additive, read-only observability over the SAME
+    # `opportunity_scan_result` already computed above, never a second
+    # decision.
+    candidate_funnel: CandidateFunnel | None = None
 
 
 def _run_ticket_monitor_stage(
@@ -171,29 +188,65 @@ def _run_ticket_monitor_stage(
 
 def _run_opportunity_scan_stage(
     inputs: OuterCycleInputs,
-) -> tuple[OpportunityScanResult | None, str | None, int, int, int]:
+) -> tuple[OpportunityScanResult | None, str | None, int, int, int, CandidateFunnel | None]:
     """Returns `(result, skipped_reason, opportunities_scanned,
-    candidates_generated, candidates_rejected)` -- the three counts are
-    `0` whenever the stage didn't run, never fabricated (Part 2: "do not
-    fabricate counts")."""
+    candidates_generated, candidates_rejected, candidate_funnel)` -- the
+    three counts are `0` whenever the stage didn't run, never fabricated
+    (Part 2: "do not fabricate counts"). `candidate_funnel` is `None`
+    unless `cfg.collect_candidate_funnel` is `True` -- see
+    `OpportunityScanConfig.collect_candidate_funnel`'s own comment."""
     if inputs.skip_opportunity_scan:
-        return None, "new-opportunity scanning explicitly skipped by caller this cycle", 0, 0, 0
+        return None, "new-opportunity scanning explicitly skipped by caller this cycle", 0, 0, 0, None
     cfg = inputs.opportunity_scan
     if cfg is None or not cfg.universe:
-        return None, "no opportunity-scan universe configured for this cycle", 0, 0, 0
+        return None, "no opportunity-scan universe configured for this cycle", 0, 0, 0, None
     if not may_proceed(_OPPORTUNITY_SCAN_PRIORITY, inputs.rate_limit_state):
         return None, (
             f"rate-limit budget constrained at {_OPPORTUNITY_SCAN_PRIORITY.name} -- "
             "existing-position risk monitoring and pending-ticket safety monitoring take priority this cycle"
-        ), 0, 0, 0
+        ), 0, 0, 0, None
 
     opportunities_scanned = sum(1 for e in cfg.universe if e.ticker in cfg.chains_by_ticker)
+
+    # PAPER_TRADING_V1.5.5, Step 4: when collection is off (the default,
+    # and every pre-V1.5.5 caller), `diagnostics_by_ticker` stays `None`
+    # and `scan_and_rank_opportunities` runs exactly as it always has --
+    # see that function's own docstring for why passing a populated dict
+    # here changes nothing about ITS OWN decision either.
+    diagnostics_by_ticker: dict[str, FunnelDiagnostics] | None = None
+    if cfg.collect_candidate_funnel:
+        diagnostics_by_ticker = {e.ticker: FunnelDiagnostics(ticker=e.ticker) for e in cfg.universe}
+
     result = scan_and_rank_opportunities(
         list(cfg.universe), cfg.chains_by_ticker, list(cfg.strategies), cfg.quant_filter,
         inputs.limits, inputs.portfolio, cfg.market_regime, cfg.broker_capabilities,
         now=inputs.as_of, proposal_id_prefix=cfg.proposal_id_prefix, no_trade_hurdle=cfg.no_trade_hurdle,
+        diagnostics_by_ticker=diagnostics_by_ticker,
     )
-    return result, None, opportunities_scanned, result.candidates_generated, result.candidates_rejected
+
+    candidate_funnel: CandidateFunnel | None = None
+    if diagnostics_by_ticker is not None:
+        # `candidates_persisted_for_review` reflects whether this scan
+        # SELECTED a best candidate for `scripts/run_validation_cycle.py`
+        # to persist (`result.best is not None`) -- which is what that
+        # script then does in every real invocation, unless the exact
+        # same candidate id was already saved earlier this same cycle
+        # (an idempotent no-op on a retried call, never a genuine
+        # rejection). Built here, at scan time, rather than after that
+        # later persistence decision, since `ControlCycleRecord` (which
+        # carries this funnel) is saved before that decision is made.
+        candidate_funnel = build_candidate_funnel(
+            cycle_id=inputs.cycle_id, generated_at=inputs.as_of,
+            universe_tickers=tuple(e.ticker for e in cfg.universe),
+            chain_received_tickers=frozenset(cfg.chains_by_ticker.keys()),
+            diagnostics_by_ticker=diagnostics_by_ticker, scan_result=result,
+            candidates_persisted=1 if result.best is not None else 0,
+        )
+
+    return (
+        result, None, opportunities_scanned, result.candidates_generated, result.candidates_rejected,
+        candidate_funnel,
+    )
 
 
 def _build_opportunity_decision_snapshot(
@@ -252,9 +305,10 @@ def run_outer_cycle(inputs: OuterCycleInputs) -> OuterCycleResult:
     genuinely systemic failure (malformed `inputs.limits`/`inputs.portfolio`,
     exactly like `run_control_cycle` itself) propagates."""
     ticket_monitor_result, ticket_skip_reason = _run_ticket_monitor_stage(inputs)
-    opportunity_scan_result, opportunity_skip_reason, opportunities_scanned, candidates_generated, candidates_rejected = (
-        _run_opportunity_scan_stage(inputs)
-    )
+    (
+        opportunity_scan_result, opportunity_skip_reason, opportunities_scanned, candidates_generated,
+        candidates_rejected, candidate_funnel,
+    ) = _run_opportunity_scan_stage(inputs)
 
     control_inputs = ControlCycleInputs(
         cycle_id=inputs.cycle_id, as_of=inputs.as_of, portfolio=inputs.portfolio, limits=inputs.limits,
@@ -267,7 +321,7 @@ def run_outer_cycle(inputs: OuterCycleInputs) -> OuterCycleResult:
         current_underlying_prices_for_exposure=inputs.current_underlying_prices_for_exposure,
         max_quote_age=inputs.max_quote_age,
         opportunities_scanned=opportunities_scanned, candidates_generated=candidates_generated,
-        candidates_rejected=candidates_rejected,
+        candidates_rejected=candidates_rejected, candidate_funnel=candidate_funnel,
     )
     control_result = run_control_cycle(control_inputs)
 
@@ -303,4 +357,5 @@ def run_outer_cycle(inputs: OuterCycleInputs) -> OuterCycleResult:
         opportunity_scan_result=opportunity_scan_result, opportunity_scan_skipped_reason=opportunity_skip_reason,
         opportunity_decision_snapshot=opportunity_snapshot,
         new_alerts=tuple(new_alerts), degraded_priorities=degraded,
+        candidate_funnel=candidate_funnel,
     )

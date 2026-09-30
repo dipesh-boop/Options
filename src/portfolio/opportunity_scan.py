@@ -43,6 +43,7 @@ from src.risk.portfolio_risk import Portfolio, sector_exposure_pct, underlying_e
 from src.risk.reason_codes import RiskDecision
 from src.risk.trade_risk import QuantitativeAnalysis
 from src.workflows.candidate_generation import Candidate, QuantFilterConfig, UniverseEntry, generate_candidates
+from src.workflows.funnel_diagnostics import FunnelDiagnostics
 
 _ACCEPTABLE_RISK_DECISIONS = (RiskDecision.APPROVE, RiskDecision.RESIZE)
 
@@ -56,6 +57,16 @@ class ScannedCandidate:
     post_trade_underlying_exposure_pct: float
     post_trade_sector_exposure_pct: float
     risk_adjusted_return: float | None  # expected_value / capital_required; None when capital_required <= 0 or unpriced
+    # PAPER_TRADING_V1.5.5, Step 4: the Risk Engine's own structured
+    # `ReasonCode`s for this decision (`RiskDecisionResult.reason_codes`,
+    # already computed by `evaluate_trade_proposal` below -- reused
+    # verbatim, never a second rejection-reason vocabulary). Empty when
+    # quant/risk evaluation raised before a `RiskDecisionResult` was ever
+    # produced. Purely observational -- nothing reads this field to
+    # decide `risk_decision`/ranking/selection; it exists only so
+    # `src.workflows.candidate_funnel` can aggregate rejection reasons
+    # without inventing new codes.
+    risk_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,7 @@ def scan_and_rank_opportunities(
     now: datetime,
     proposal_id_prefix: str = "control-loop-scan",
     no_trade_hurdle: float = 0.0,
+    diagnostics_by_ticker: dict[str, FunnelDiagnostics] | None = None,
 ) -> OpportunityScanResult:
     """One control-loop cycle's opportunity-scan phase (Part 23),
     followed by portfolio-aware ranking (Part 24). A ticker missing from
@@ -101,6 +113,21 @@ def scan_and_rank_opportunities(
     evaluation raises is isolated to that one candidate/ticker (Part 7's
     isolation doctrine), recorded as a rejected candidate rather than
     aborting the whole scan.
+
+    `diagnostics_by_ticker` (PAPER_TRADING_V1.5.5, Step 4) is entirely
+    optional and purely additive -- `None` (every call site before this
+    step) leaves every line of this function's own decision logic
+    untouched. When supplied, this function does exactly two new
+    things, both read-only: (1) it passes
+    `diagnostics_by_ticker.get(entry.ticker)` through to
+    `generate_candidates` unchanged (which itself only ever records,
+    never decides, on a supplied `FunnelDiagnostics` -- see that
+    function's own docstring), and (2) `scanned`'s own already-computed
+    `risk_decision`/`quantitative_analysis` values are additionally
+    copied into the new `ScannedCandidate.risk_reason_codes` field
+    below. Neither addition changes `scanned`, `survivors`, `ranked`, or
+    `best` in any way -- see
+    `tests/unit/workflows/test_candidate_funnel_equivalence.py`.
     """
     scanned: list[ScannedCandidate] = []
 
@@ -108,10 +135,11 @@ def scan_and_rank_opportunities(
         chain = chains_by_ticker.get(entry.ticker)
         if chain is None:
             continue
+        ticker_diagnostics = diagnostics_by_ticker.get(entry.ticker) if diagnostics_by_ticker is not None else None
         try:
             candidates = generate_candidates(
                 entry, chain, strategies, quant_filter, limits, portfolio, market_regime,
-                now=now, proposal_id_prefix=proposal_id_prefix,
+                now=now, proposal_id_prefix=proposal_id_prefix, diagnostics=ticker_diagnostics,
             )
         except Exception:  # noqa: BLE001 -- one ticker's screening failure isolates, never aborts the scan
             continue
@@ -142,6 +170,7 @@ def scan_and_rank_opportunities(
                     post_trade_underlying_exposure_pct=underlying_exposure_pct(portfolio, entry.ticker, additional_capital),
                     post_trade_sector_exposure_pct=sector_exposure_pct(portfolio, entry.sector, additional_capital),
                     risk_adjusted_return=_risk_adjusted_return(qa),
+                    risk_reason_codes=tuple(code.value for code in decision.reason_codes),
                 )
             )
 

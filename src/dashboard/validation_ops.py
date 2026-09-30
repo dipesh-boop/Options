@@ -45,6 +45,7 @@ from src.portfolio.market_session import evaluate_validation_cycle_eligibility
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config
 from src.portfolio.persistence import SqliteControlLoopStore
 from src.review.candidates import SqliteCandidateReviewStore
+from src.validation.freeze import FREEZE_NAME
 from src.validation.protocol import ValidationConfigError, load_validation_config
 from src.validation.session import SqliteValidationStore
 
@@ -74,6 +75,16 @@ class OperatorStatusView(BaseModel):
     `src.data.factory`)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # PAPER_TRADING_V1.5.5, Step 4: backend-derived, so the dashboard
+    # never needs its own hard-coded version string again -- sourced
+    # directly from `src.validation.freeze.FREEZE_NAME` (the same
+    # constant `make verify-freeze`/the freeze report already treat as
+    # this codebase's single source of truth for "what version is
+    # this"), a fixed Python default so it is present even in the
+    # `configured=False` degraded branch below. Purely presentational:
+    # nothing reads this field to make a trading decision.
+    software_version: str = FREEZE_NAME
 
     configured: bool
     detail: str | None = None
@@ -131,6 +142,28 @@ class OperatorStatusView(BaseModel):
     # change it; that stays a config-file edit, never a dashboard action.
     risk_data_wiring_status: str | None = None
 
+    # PAPER_TRADING_V1.5.5, Step 4: read-only projection of today's
+    # `src.workflows.candidate_funnel.CandidateFunnel`, if today's cycle
+    # ran with collection enabled (see `scripts/run_validation_cycle.py`'s
+    # `collect_candidate_funnel=True`). `None`/`()` whenever no cycle has
+    # run yet today or that cycle predates this field -- never fabricated,
+    # matching every other `today_cycle_*` field above. Deliberately a
+    # SUBSET of `CandidateFunnel`'s fields (the ones a "what happened and
+    # why" glance needs), never the full per-symbol/per-strategy detail --
+    # this is presentational summary, not a raw-debugging dump, and (like
+    # every field in this view) purely observational: nothing here can be
+    # used to confirm a candidate, change a threshold, or trigger a trade.
+    candidate_funnel_symbols_scanned: int | None = None
+    candidate_funnel_chains_usable: int | None = None
+    candidate_funnel_contracts_seen: int | None = None
+    candidate_funnel_strategy_attempts: int | None = None
+    candidate_funnel_construction_successes: int | None = None
+    candidate_funnel_quant_rejected: int | None = None
+    candidate_funnel_risk_rejected: int | None = None
+    candidate_funnel_candidates_persisted: int | None = None
+    candidate_funnel_top_bottlenecks: tuple[str, ...] = ()
+    candidate_funnel_zero_candidate_summary: str | None = None
+
 
 def _provider_readiness() -> ProviderReadinessView:
     selection = DataProviderSelection()
@@ -185,6 +218,8 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
         now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
     )
 
+    funnel = cycle_record.candidate_funnel if cycle_record is not None else None
+
     return OperatorStatusView(
         configured=True,
         cohort_id=ops.cohort_id,
@@ -216,6 +251,16 @@ def build_operator_status(*, now: datetime | None = None) -> OperatorStatusView:
         validation_cycle_allowed=eligibility.validation_cycle_allowed,
         validation_cycle_block_reason=eligibility.block_reason,
         risk_data_wiring_status="INSTALLED_ACTIVE" if ops.risk_data_wiring_enabled else "INSTALLED_INACTIVE",
+        candidate_funnel_symbols_scanned=funnel.symbols_requested if funnel else None,
+        candidate_funnel_chains_usable=funnel.option_chains_quality_passed if funnel else None,
+        candidate_funnel_contracts_seen=funnel.contracts_seen if funnel else None,
+        candidate_funnel_strategy_attempts=funnel.strategy_attempts if funnel else None,
+        candidate_funnel_construction_successes=funnel.construction_successes if funnel else None,
+        candidate_funnel_quant_rejected=funnel.quant_rejected if funnel else None,
+        candidate_funnel_risk_rejected=funnel.risk_rejected if funnel else None,
+        candidate_funnel_candidates_persisted=funnel.candidates_persisted_for_review if funnel else None,
+        candidate_funnel_top_bottlenecks=funnel.top_bottlenecks if funnel else (),
+        candidate_funnel_zero_candidate_summary=funnel.zero_candidate_summary if funnel else None,
     )
 
 

@@ -179,6 +179,7 @@ function statusFixture(overrides = {}) {
     validation_preferred_completed_trades: 100,
     validation_completed_trades: 0,
     alerts: [],
+    software_version: "PAPER_TRADING_V1.5.5",
     ...overrides,
   };
 }
@@ -291,19 +292,62 @@ test("item E (contrast): Run Daily Validation is enabled once every prerequisite
   assert.equal(elementsById.get("run-validation-btn").disabled, false);
 });
 
+// ---------------------------------- candidate funnel (PAPER_TRADING_V1.5.5)
+
+test("candidate funnel card renders every diagnostic count from status when present", () => {
+  const { sandbox, elementsById } = loadDashboardInBrowserScope();
+  sandbox.renderControlCenter(
+    statusFixture({
+      candidate_funnel_symbols_scanned: 2,
+      candidate_funnel_chains_usable: 2,
+      candidate_funnel_contracts_seen: 340,
+      candidate_funnel_strategy_attempts: 6,
+      candidate_funnel_construction_successes: 0,
+      candidate_funnel_quant_rejected: 0,
+      candidate_funnel_risk_rejected: 0,
+      candidate_funnel_candidates_persisted: 0,
+      candidate_funnel_top_bottlenecks: ["DELTA_OUT_OF_RANGE (construction) -- 4"],
+      candidate_funnel_zero_candidate_summary: "symbols_scanned=2, chains_usable=2, contracts_examined=340",
+    }),
+    {},
+  );
+  const html = elementsById.get("cc-candidate-funnel").innerHTML;
+  assert.match(html, /340/);
+  assert.match(html, /DELTA_OUT_OF_RANGE/);
+  assert.match(html, /symbols_scanned=2/);
+});
+
+test("candidate funnel card renders an empty state when no cycle has produced diagnostics yet", () => {
+  const { sandbox, elementsById } = loadDashboardInBrowserScope();
+  sandbox.renderControlCenter(statusFixture({ candidate_funnel_symbols_scanned: null }), {});
+  const html = elementsById.get("cc-candidate-funnel").innerHTML;
+  assert.match(html, /No candidate-funnel diagnostics/i);
+});
+
+test("candidate funnel card degrades to the empty state, never throwing, when status itself is null", () => {
+  const { sandbox, elementsById } = loadDashboardInBrowserScope();
+  assert.doesNotThrow(() => sandbox.renderControlCenter(null, {}));
+  assert.match(elementsById.get("cc-candidate-funnel").innerHTML, /No candidate-funnel diagnostics/i);
+});
+
 // -------------------------------------------------- item F: software badge
 
-test("item F: the software version badge reads PAPER_TRADING_V1.5.2", () => {
+test("item F: the software version badge reads the backend's own status.software_version (PAPER_TRADING_V1.5.5, Step 4)", () => {
   const { sandbox, elementsById } = loadDashboardInBrowserScope();
-  // SOFTWARE_VERSION is a top-level `const` in dashboard.js -- resolvable
-  // as a bare identifier in this same shared scope, but (like any const)
-  // never a `sandbox`/`window` property, so it's read back the same way
-  // any later classic <script> tag would: by evaluating a bare reference
-  // in that same context.
-  const softwareVersion = new vm.Script("SOFTWARE_VERSION", { filename: "probe.js" }).runInContext(sandbox);
-  assert.equal(softwareVersion, "PAPER_TRADING_V1.5.2");
-  sandbox.renderControlCenter(statusFixture(), {});
-  assert.equal(elementsById.get("cc-software-badge").textContent, "PAPER_TRADING_V1.5.2");
+  sandbox.renderControlCenter(statusFixture({ software_version: "PAPER_TRADING_V1.5.5" }), {});
+  assert.equal(elementsById.get("cc-software-badge").textContent, "PAPER_TRADING_V1.5.5");
+});
+
+test("item F (contrast): the software badge falls back to FALLBACK_SOFTWARE_VERSION, never a stale hard-coded release, when status is null", () => {
+  const { sandbox, elementsById } = loadDashboardInBrowserScope();
+  // FALLBACK_SOFTWARE_VERSION is a top-level `const` in dashboard.js --
+  // resolvable as a bare identifier in this same shared scope, but (like
+  // any const) never a `sandbox`/`window` property, so it's read back the
+  // same way any later classic <script> tag would: by evaluating a bare
+  // reference in that same context.
+  const fallback = new vm.Script("FALLBACK_SOFTWARE_VERSION", { filename: "probe.js" }).runInContext(sandbox);
+  sandbox.renderControlCenter(null, {});
+  assert.equal(elementsById.get("cc-software-badge").textContent, fallback);
 });
 
 // --------------------------- whole-render smoke test (no ReferenceError

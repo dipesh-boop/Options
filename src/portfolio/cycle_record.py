@@ -14,6 +14,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from src.workflows.candidate_funnel import CandidateFunnel
+
 
 def _tz_aware(v: datetime) -> datetime:
     if v.tzinfo is None:
@@ -60,6 +62,18 @@ class ControlCycleRecord(BaseModel):
     # not MISSING ones -- an old JSON blob lacking this key still
     # deserializes cleanly, filling in this default.
     experiment_version_id: str | None = None
+
+    # PAPER_TRADING_V1.5.5, Step 4: optional, defaulted candidate-funnel
+    # observability record -- None for every cycle before this field
+    # existed (every V1.5.4-and-earlier cycle) and for any cycle whose
+    # caller didn't opt into collection (`OpportunityScanConfig
+    # .collect_candidate_funnel=False`, the default), honestly, never
+    # backfilled. Purely additive: nothing in `run_control_cycle`, Risk,
+    # Quant, or candidate generation reads this field back -- it is
+    # attached to the record strictly after `run_outer_cycle` already
+    # decided everything it describes. See `src.workflows.candidate_funnel`
+    # module docstring for the full decision-neutrality argument.
+    candidate_funnel: CandidateFunnel | None = None
 
     _validate_started = field_validator("started_at")(_tz_aware)
 

@@ -37,6 +37,7 @@ from src.llm.schemas import (
 )
 from src.risk.limits import RiskLimitsConfig
 from src.risk.portfolio_risk import Portfolio
+from src.workflows.funnel_diagnostics import FunnelDiagnostics
 
 _CONTRACT_MULTIPLIER = 100
 
@@ -82,27 +83,47 @@ class Candidate:
     sector: str
 
 
+def _liquidity_rejection_reason(contract: OptionContract, limits: RiskLimitsConfig) -> str | None:
+    """The single source of truth for why a contract fails the
+    liquidity screen -- `passes_liquidity_filter` below is defined
+    directly in terms of this function's result (`is None`), so the two
+    can never diverge. Exists as its own function (rather than inlined
+    in `passes_liquidity_filter`) purely so PAPER_TRADING_V1.5.5's
+    diagnostics can report WHICH specific condition rejected a contract,
+    without maintaining a second, parallel copy of these same four
+    conditions."""
+    if contract.open_interest < limits.min_open_interest:
+        return "LIQUIDITY_OPEN_INTEREST"
+    if contract.volume < limits.min_volume:
+        return "LIQUIDITY_VOLUME"
+    mid = contract.mid
+    if mid <= 0:
+        return "LIQUIDITY_ZERO_MID"
+    if (contract.ask - contract.bid) / mid > limits.max_bid_ask_spread_pct:
+        return "LIQUIDITY_SPREAD_TOO_WIDE"
+    return None
+
+
 def passes_liquidity_filter(contract: OptionContract, limits: RiskLimitsConfig) -> bool:
     """Stage 11. A pure, non-raising screen (unlike
     `src.risk.trade_risk.check_liquidity`, which raises for a proposal
     already under formal review) — a contract that fails this is simply
     not offered as a candidate, never an error."""
-    if contract.open_interest < limits.min_open_interest:
-        return False
-    if contract.volume < limits.min_volume:
-        return False
-    mid = contract.mid
-    if mid <= 0:
-        return False
-    return (contract.ask - contract.bid) / mid <= limits.max_bid_ask_spread_pct
+    return _liquidity_rejection_reason(contract, limits) is None
 
 
-def _eligible_expirations(chain: OptionChain, as_of: datetime, quant_filter: QuantFilterConfig) -> list[date]:
+def _eligible_expirations(
+    chain: OptionChain, as_of: datetime, quant_filter: QuantFilterConfig,
+    *, diagnostics: FunnelDiagnostics | None = None,
+) -> list[date]:
     today = as_of.date()
+    all_expirations = {c.expiration for c in chain.contracts}
     expirations = {
         c.expiration for c in chain.contracts
         if quant_filter.min_dte <= (c.expiration - today).days <= quant_filter.max_dte
     }
+    if diagnostics is not None:
+        diagnostics.record_expirations(seen=len(all_expirations), eligible=len(expirations))
     return sorted(expirations)
 
 
@@ -114,34 +135,62 @@ def _closest_by_target_delta(contracts: list[OptionContract], quant_filter: Quan
     return min(in_range, key=lambda c: abs(abs(c.delta) - mid_target))  # type: ignore[arg-type]
 
 
-def _short_put_candidate(chain: OptionChain, expiration: date, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig) -> OptionContract | None:
+def _short_put_candidate(
+    chain: OptionChain, expiration: date, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig,
+    *, diagnostics: FunnelDiagnostics | None = None, strategy_tag: str | None = None,
+) -> OptionContract | None:
     underlying_price = chain.underlying.mid
     puts = [c for c in chain.contracts if c.expiration == expiration and c.right == DataOptionRight.PUT and c.strike < underlying_price]
     best = _closest_by_target_delta(puts, quant_filter)
-    if best is None or not passes_liquidity_filter(best, limits):
+    if best is None:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason="DELTA_OUT_OF_RANGE")
+        return None
+    reason = _liquidity_rejection_reason(best, limits)
+    if reason is not None:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason=reason)
         return None
     return best
 
 
-def _short_call_candidate(chain: OptionChain, expiration: date, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig) -> OptionContract | None:
+def _short_call_candidate(
+    chain: OptionChain, expiration: date, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig,
+    *, diagnostics: FunnelDiagnostics | None = None, strategy_tag: str | None = None,
+) -> OptionContract | None:
     underlying_price = chain.underlying.mid
     calls = [c for c in chain.contracts if c.expiration == expiration and c.right == DataOptionRight.CALL and c.strike > underlying_price]
     best = _closest_by_target_delta(calls, quant_filter)
-    if best is None or not passes_liquidity_filter(best, limits):
+    if best is None:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason="DELTA_OUT_OF_RANGE")
+        return None
+    reason = _liquidity_rejection_reason(best, limits)
+    if reason is not None:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason=reason)
         return None
     return best
 
 
-def _long_put_for_spread(chain: OptionChain, short_put: OptionContract, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig) -> OptionContract | None:
+def _long_put_for_spread(
+    chain: OptionChain, short_put: OptionContract, quant_filter: QuantFilterConfig, limits: RiskLimitsConfig,
+    *, diagnostics: FunnelDiagnostics | None = None, strategy_tag: str | None = None,
+) -> OptionContract | None:
     target_strike = short_put.strike - quant_filter.pcs_spread_width
     candidates = [
         c for c in chain.contracts
         if c.expiration == short_put.expiration and c.right == DataOptionRight.PUT and c.strike < short_put.strike
     ]
     if not candidates:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason="PCS_NO_LONG_LEG_CANDIDATE")
         return None
     best = min(candidates, key=lambda c: abs(c.strike - target_strike))
-    if not passes_liquidity_filter(best, limits):
+    reason = _liquidity_rejection_reason(best, limits)
+    if reason is not None:
+        if diagnostics is not None and strategy_tag is not None:
+            diagnostics.record_construction(strategy_tag, success=False, reason=reason)
         return None
     return best
 
@@ -190,18 +239,34 @@ def generate_candidates(
     *,
     now: datetime,
     proposal_id_prefix: str = "scan",
+    diagnostics: FunnelDiagnostics | None = None,
 ) -> list[Candidate]:
     """One candidate at most per requested strategy for this ticker — the
     single best (closest-to-target-delta) eligible structure, not every
     expiration/strike combination that happens to clear the filters.
     Returns an empty list for a stale chain (stage 1-2 already reports
     that separately) rather than letting a stale `data_timestamp` fail
-    deep inside `TradeProposal` construction."""
+    deep inside `TradeProposal` construction.
+
+    `diagnostics` (PAPER_TRADING_V1.5.5, Step 4) is entirely optional and
+    purely additive -- when `None` (every call site before this step,
+    and every call site that doesn't opt in), this function's behavior
+    is byte-for-byte identical to before this step existed. When
+    supplied, every `diagnostics.record_*` call below is appended
+    strictly AFTER the real decision it describes has already been made,
+    using values that decision already computed -- nothing recorded here
+    is ever read back into this function's own control flow. See
+    `src.workflows.candidate_funnel`'s module docstring for the full
+    decision-neutrality argument."""
+    if diagnostics is not None:
+        diagnostics.record_chain(
+            contracts_seen=len(chain.contracts), stale=chain.freshness_status(now) == FreshnessStatus.STALE,
+        )
     if chain.freshness_status(now) == FreshnessStatus.STALE:
         return []
 
     ticker = universe_entry.ticker
-    expirations = _eligible_expirations(chain, now, quant_filter)
+    expirations = _eligible_expirations(chain, now, quant_filter, diagnostics=diagnostics)
     candidates: list[Candidate] = []
     counter = 0
 
@@ -221,10 +286,14 @@ def generate_candidates(
         return f"{proposal_id_prefix}-{ticker}-{now.date().isoformat()}-{strategy_tag}-{expiration.isoformat()}-{strike_part}-{counter}"
 
     if StrategyType.CASH_SECURED_PUT in strategies:
+        if diagnostics is not None:
+            diagnostics.record_strategy_attempt("CASH_SECURED_PUT")
         best: tuple[date, OptionContract] | None = None
         best_score = None
         for exp in expirations:
-            contract = _short_put_candidate(chain, exp, quant_filter, limits)
+            contract = _short_put_candidate(
+                chain, exp, quant_filter, limits, diagnostics=diagnostics, strategy_tag="CASH_SECURED_PUT",
+            )
             if contract is None:
                 continue
             score = abs(abs(contract.delta) - (quant_filter.short_delta_low + quant_filter.short_delta_high) / 2.0)  # type: ignore[arg-type]
@@ -232,6 +301,8 @@ def generate_candidates(
                 best, best_score = (exp, contract), score
         if best is not None:
             exp, contract = best
+            if diagnostics is not None:
+                diagnostics.record_construction("CASH_SECURED_PUT", success=True, reason=None)
             proposal = _build_proposal(
                 proposal_id=_next_id("csp", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.CASH_SECURED_PUT, expiration=exp,
                 legs=[OptionLeg(right=OptionRight.PUT, strike=contract.strike, side=LegSide.SELL)],
@@ -246,10 +317,14 @@ def generate_candidates(
     if StrategyType.COVERED_CALL in strategies:
         holding = portfolio.underlying_holdings.get(ticker)
         if holding is not None and holding.shares >= _CONTRACT_MULTIPLIER:
+            if diagnostics is not None:
+                diagnostics.record_strategy_attempt("COVERED_CALL")
             best = None
             best_score = None
             for exp in expirations:
-                contract = _short_call_candidate(chain, exp, quant_filter, limits)
+                contract = _short_call_candidate(
+                    chain, exp, quant_filter, limits, diagnostics=diagnostics, strategy_tag="COVERED_CALL",
+                )
                 if contract is None:
                     continue
                 score = abs(abs(contract.delta) - (quant_filter.short_delta_low + quant_filter.short_delta_high) / 2.0)  # type: ignore[arg-type]
@@ -257,6 +332,8 @@ def generate_candidates(
                     best, best_score = (exp, contract), score
             if best is not None:
                 exp, contract = best
+                if diagnostics is not None:
+                    diagnostics.record_construction("COVERED_CALL", success=True, reason=None)
                 proposal = _build_proposal(
                     proposal_id=_next_id("cc", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.COVERED_CALL, expiration=exp,
                     legs=[OptionLeg(right=OptionRight.CALL, strike=contract.strike, side=LegSide.SELL)],
@@ -267,25 +344,37 @@ def generate_candidates(
                     data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
                 )
                 candidates.append(Candidate(proposal=proposal, entry_delta=contract.delta, entry_iv=contract.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
+        elif diagnostics is not None:
+            diagnostics.record_strategy_ineligible("COVERED_CALL", "COVERED_CALL_NO_SHARES")
 
     if StrategyType.PUT_CREDIT_SPREAD in strategies:
+        if diagnostics is not None:
+            diagnostics.record_strategy_attempt("PUT_CREDIT_SPREAD")
         best = None
         best_score = None
         for exp in expirations:
-            short_put = _short_put_candidate(chain, exp, quant_filter, limits)
+            short_put = _short_put_candidate(
+                chain, exp, quant_filter, limits, diagnostics=diagnostics, strategy_tag="PUT_CREDIT_SPREAD",
+            )
             if short_put is None:
                 continue
-            long_put = _long_put_for_spread(chain, short_put, quant_filter, limits)
+            long_put = _long_put_for_spread(
+                chain, short_put, quant_filter, limits, diagnostics=diagnostics, strategy_tag="PUT_CREDIT_SPREAD",
+            )
             if long_put is None:
                 continue
             credit = short_put.mid - long_put.mid
             if credit <= 0:
+                if diagnostics is not None:
+                    diagnostics.record_construction("PUT_CREDIT_SPREAD", success=False, reason="PCS_NEGATIVE_CREDIT")
                 continue
             score = abs(abs(short_put.delta) - (quant_filter.short_delta_low + quant_filter.short_delta_high) / 2.0)  # type: ignore[arg-type]
             if best_score is None or score < best_score:
                 best, best_score = (exp, short_put, long_put, credit), score
         if best is not None:
             exp, short_put, long_put, credit = best
+            if diagnostics is not None:
+                diagnostics.record_construction("PUT_CREDIT_SPREAD", success=True, reason=None)
             proposal = _build_proposal(
                 proposal_id=_next_id("pcs", exp, (short_put.strike, long_put.strike)), ticker=ticker, strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=exp,
                 legs=[

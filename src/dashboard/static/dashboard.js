@@ -15,7 +15,13 @@
  */
 
 const API = "";
-const SOFTWARE_VERSION = "PAPER_TRADING_V1.5.2";
+// PAPER_TRADING_V1.5.5, Step 4: fallback only, shown before the first
+// /api/operator-status response ever lands (or if that request fails).
+// Once a response arrives, `status.software_version` (backend-derived
+// from `src.validation.freeze.FREEZE_NAME`, see
+// `src.dashboard.validation_ops.OperatorStatusView`) is what's actually
+// displayed -- this constant is never bumped again by hand.
+const FALLBACK_SOFTWARE_VERSION = "unknown (awaiting backend status)";
 const runGuard = createRunGuard();
 let lastOperatorStatus = null;
 
@@ -112,7 +118,8 @@ async function loadOperatorStatus() {
 function renderControlCenter(status, opts = {}) {
   const clientRunning = !!opts.clientRunning;
 
-  document.getElementById("cc-software-badge").textContent = SOFTWARE_VERSION;
+  document.getElementById("cc-software-badge").textContent =
+    (status && status.software_version) || FALLBACK_SOFTWARE_VERSION;
 
   renderCcCohort(status);
   renderCcMarketData(status);
@@ -121,6 +128,7 @@ function renderControlCenter(status, opts = {}) {
   renderCcPortfolio(status);
   renderCcProgress(status);
   renderCcReview(status);
+  renderCcCandidateFunnel(status);
   renderCcAlerts(status);
   renderCcRunButton(status, clientRunning);
 }
@@ -247,6 +255,41 @@ function renderCcReview(status) {
     <div class="muted">No position has been opened. Human confirmation required separately (Terminal).</div>
     <ul class="bar-list">${ids}</ul>
   `;
+}
+
+// PAPER_TRADING_V1.5.5, Step 4: read-only "what happened and why" glance
+// at today's candidate funnel (`status.candidate_funnel_*`, backend-built
+// by `src.workflows.candidate_funnel.build_candidate_funnel` and never
+// computed here). There is deliberately no control in this function --
+// no threshold input, no strategy toggle, no "trade anyway" button --
+// this card can only ever display what the backend already decided.
+function renderCcCandidateFunnel(status) {
+  const el = document.getElementById("cc-candidate-funnel");
+  if (!status || status.candidate_funnel_symbols_scanned === null || status.candidate_funnel_symbols_scanned === undefined) {
+    el.innerHTML = `<div class="empty">No candidate-funnel diagnostics for today's cycle yet.</div>`;
+    return;
+  }
+  const rows = [
+    ["Symbols scanned", status.candidate_funnel_symbols_scanned],
+    ["Usable option chains", status.candidate_funnel_chains_usable],
+    ["Contracts considered", status.candidate_funnel_contracts_seen],
+    ["Strategy construction attempts", status.candidate_funnel_strategy_attempts],
+    ["Construction successes", status.candidate_funnel_construction_successes],
+    ["Quant-rejected", status.candidate_funnel_quant_rejected],
+    ["Risk-rejected", status.candidate_funnel_risk_rejected],
+    ["Candidates awaiting review", status.candidate_funnel_candidates_persisted],
+  ];
+  const rowsHtml = rows
+    .map(([label, value]) => `<li><span>${esc(label)}</span><span>${value ?? "—"}</span></li>`)
+    .join("");
+  const bottlenecks = status.candidate_funnel_top_bottlenecks || [];
+  const bottlenecksHtml = bottlenecks.length
+    ? `<div class="muted">Top rejection reasons: ${bottlenecks.map(esc).join("; ")}</div>`
+    : "";
+  const zeroSummary = status.candidate_funnel_zero_candidate_summary
+    ? `<div class="muted">Zero-candidate summary: ${esc(status.candidate_funnel_zero_candidate_summary)}</div>`
+    : "";
+  el.innerHTML = `<ul class="bar-list">${rowsHtml}</ul>${bottlenecksHtml}${zeroSummary}`;
 }
 
 function renderCcAlerts(status) {

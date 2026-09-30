@@ -97,7 +97,10 @@ class TestFrontendWiredToOperatorStatus:
         assert 'id="control-center"' in html
         assert 'id="run-validation-btn"' in html
         assert "onclick=\"onRunDailyValidation()\"" in html
-        for field_id in ("cc-cohort", "cc-market-data", "cc-today-cycle", "cc-portfolio", "cc-progress", "cc-review", "cc-alerts"):
+        for field_id in (
+            "cc-cohort", "cc-market-data", "cc-today-cycle", "cc-portfolio", "cc-progress",
+            "cc-review", "cc-candidate-funnel", "cc-alerts",
+        ):
             assert f'id="{field_id}"' in html
 
     def test_dashboard_js_calls_operator_status_on_load(self):
@@ -118,6 +121,32 @@ class TestFrontendWiredToOperatorStatus:
             "awaiting_review_count", "awaiting_review_candidate_ids", "alerts",
         ):
             assert field in js, f"dashboard.js never references OperatorStatusView field {field!r}"
+
+    def test_render_candidate_funnel_reads_every_documented_status_field(self):
+        """PAPER_TRADING_V1.5.5, Step 4: the Candidate Funnel card only
+        ever displays what `build_operator_status` already computed --
+        checked structurally, the same way item 2's test above does for
+        the rest of the Control Center."""
+        js = _read("dashboard.js")
+        for field in (
+            "candidate_funnel_symbols_scanned", "candidate_funnel_chains_usable",
+            "candidate_funnel_contracts_seen", "candidate_funnel_strategy_attempts",
+            "candidate_funnel_construction_successes", "candidate_funnel_quant_rejected",
+            "candidate_funnel_risk_rejected", "candidate_funnel_candidates_persisted",
+            "candidate_funnel_top_bottlenecks", "candidate_funnel_zero_candidate_summary",
+        ):
+            assert field in js, f"dashboard.js never references OperatorStatusView field {field!r}"
+
+    def test_candidate_funnel_card_adds_no_confirmation_or_control_capability(self):
+        """The funnel card must stay read-only: no confirm/threshold/
+        strategy-toggle/universe-control/"trade anyway" affordance
+        anywhere in `renderCcCandidateFunnel`, mirroring the same
+        negative-capability discipline the rest of this dashboard
+        already enforces for candidate confirmation."""
+        js = _read("dashboard.js")
+        fn_source = _function_body(js, "renderCcCandidateFunnel")
+        for forbidden in ("confirm_candidate", "place_order", "onclick", "<button", "<input"):
+            assert forbidden not in fn_source, f"renderCcCandidateFunnel must not contain {forbidden!r}"
 
     def test_operator_status_view_is_backward_compatible_with_v1_4_7(self):
         """Item 18: existing dashboard APIs remain compatible -- every

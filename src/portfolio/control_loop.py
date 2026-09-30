@@ -48,6 +48,7 @@ from src.portfolio.cycle_record import ControlCycleRecord
 from src.portfolio.decision_snapshot import PortfolioControlDecisionSnapshot
 from src.portfolio.exposure import PortfolioExposureSnapshot, build_exposure_snapshot
 from src.portfolio.persistence import ControlLoopStore
+from src.workflows.candidate_funnel import CandidateFunnel
 from src.portfolio.revaluation import (
     PortfolioValuationResult,
     PositionValuationStatus,
@@ -113,6 +114,14 @@ class ControlCycleInputs:
     opportunities_scanned: int = 0
     candidates_generated: int = 0
     candidates_rejected: int = 0
+    # PAPER_TRADING_V1.5.5, Step 4: the candidate-funnel diagnostic record
+    # built by `src.portfolio.orchestrator._run_opportunity_scan_stage`
+    # (via `src.workflows.candidate_funnel.build_candidate_funnel`), if
+    # that stage's caller opted into collection -- `None` otherwise,
+    # exactly like `opportunities_scanned` etc. above. This function
+    # never computes or inspects it; it is copied onto the
+    # `ControlCycleRecord` unchanged.
+    candidate_funnel: CandidateFunnel | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +403,7 @@ def run_control_cycle(inputs: ControlCycleInputs) -> ControlCycleResult:
         opportunities_scanned=inputs.opportunities_scanned,
         candidates_generated=inputs.candidates_generated,
         candidates_rejected=inputs.candidates_rejected,
+        candidate_funnel=inputs.candidate_funnel,
         errors=tuple(errors), degraded_mode=len(symbols_failed) > 0, halt_state=kill_switch.halted,
     )
     inputs.control_loop_store.save_cycle_record(cycle_record)

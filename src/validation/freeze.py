@@ -528,6 +528,17 @@ class FreezeManifest(BaseModel):
     historical_data_capability_installed: bool  # must always be True -- TradierMarketDataProvider satisfies HistoricalDataProvider via get_bars, calling only the read-only /markets/history GET endpoint
     correlation_alignment_uses_date_intersection: bool  # must always be True -- src.portfolio.risk_data aligns correlation histories by true date intersection, never by positional/length-based trimming
 
+    # PAPER_TRADING_V1.5.5, Step 4: candidate-funnel observability.
+    # `src.workflows.candidate_funnel`/`src.workflows.funnel_diagnostics`
+    # need no separate hash entries here -- neither `src/workflows/` nor
+    # `src/risk/reason_codes.py` (reused, not modified) has ever had a
+    # dedicated hash target in this manifest; their behavior-preservation
+    # is instead proven by `tests/unit/workflows/test_candidate_funnel_equivalence.py`'s
+    # 10 named scenarios, re-run on every `python -m pytest`.
+    candidate_funnel_is_observability_only: bool  # must always be True -- every FunnelDiagnostics.record_* method returns None, and diagnostics/diagnostics_by_ticker default to None on every function that accepts them
+    candidate_funnel_field_is_optional_and_additive: bool  # must always be True -- ControlCycleRecord.candidate_funnel defaults to None, so a pre-V1.5.5 record deserializes without it, unmodified
+    dashboard_candidate_funnel_is_read_only: bool  # must always be True -- no dashboard route can write/confirm a candidate via candidate-funnel data; the funnel view stays GET-only, same as every other operator-status field
+
     fill_model_assumptions: dict[str, Any]
     slippage_assumptions: dict[str, Any]
     commission_assumptions: dict[str, Any]
@@ -755,6 +766,9 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
         risk_data_wiring_inactive_for_active_cohort=_verify_risk_data_wiring_inactive_for_active_cohort(),
         historical_data_capability_installed=_verify_historical_data_capability_installed(),
         correlation_alignment_uses_date_intersection=_verify_correlation_alignment_uses_date_intersection(),
+        candidate_funnel_is_observability_only=_verify_candidate_funnel_is_observability_only(),
+        candidate_funnel_field_is_optional_and_additive=_verify_candidate_funnel_field_is_optional_and_additive(),
+        dashboard_candidate_funnel_is_read_only=_verify_dashboard_candidate_funnel_is_read_only(),
         fill_model_assumptions=dict(
             fill_model=default_paper_cfg.fill_model.value,
             thin_volume_threshold=default_paper_cfg.thin_volume_threshold,
@@ -1150,6 +1164,38 @@ def verify_freeze(path: Path | str | None = None) -> FreezeVerificationResult:
         else "the old positional-trim alignment bug (series[-aligned_length:]) has reappeared in "
         "src/portfolio/risk_data.py, or a true date-intersection computation is no longer present, or the "
         "manifest wrongly claims otherwise",
+    ))
+
+    candidate_funnel_observability_ok = (
+        _verify_candidate_funnel_is_observability_only() and manifest.candidate_funnel_is_observability_only
+    )
+    checks.append(FreezeCheck(
+        name="candidate_funnel_is_observability_only", passed=candidate_funnel_observability_ok,
+        detail="every FunnelDiagnostics.record_* method returns None, and diagnostics/diagnostics_by_ticker "
+        "default to None, and manifest records True" if candidate_funnel_observability_ok
+        else "a FunnelDiagnostics.record_* method no longer returns None, or diagnostics/diagnostics_by_ticker "
+        "no longer default to None, or the manifest wrongly claims otherwise",
+    ))
+
+    candidate_funnel_additive_ok = (
+        _verify_candidate_funnel_field_is_optional_and_additive() and manifest.candidate_funnel_field_is_optional_and_additive
+    )
+    checks.append(FreezeCheck(
+        name="candidate_funnel_field_is_optional_and_additive", passed=candidate_funnel_additive_ok,
+        detail="ControlCycleRecord.candidate_funnel defaults to None, and manifest records True" if candidate_funnel_additive_ok
+        else "ControlCycleRecord.candidate_funnel no longer defaults to None (a pre-V1.5.5 record would no "
+        "longer deserialize cleanly), or the manifest wrongly claims otherwise",
+    ))
+
+    dashboard_funnel_read_only_ok = (
+        _verify_dashboard_candidate_funnel_is_read_only() and manifest.dashboard_candidate_funnel_is_read_only
+    )
+    checks.append(FreezeCheck(
+        name="dashboard_candidate_funnel_is_read_only", passed=dashboard_funnel_read_only_ok,
+        detail="no mutating dashboard route (POST/PUT/PATCH/DELETE) references candidate_funnel, and manifest "
+        "records True" if dashboard_funnel_read_only_ok
+        else "a mutating dashboard route now references candidate_funnel, or the manifest wrongly claims "
+        "otherwise -- the funnel view must stay read-only",
     ))
 
     passed = all(c.passed for c in checks)
@@ -1659,6 +1705,86 @@ def _verify_correlation_alignment_uses_date_intersection() -> bool:
         return False  # the old positional-trim bug must never reappear
     if "set.intersection(" not in text:
         return False
+    return True
+
+
+def _verify_candidate_funnel_is_observability_only() -> bool:
+    """PAPER_TRADING_V1.5.5, Step 4: a direct, executable proof (not
+    just a docstring claim) that candidate-funnel diagnostics cannot
+    structurally influence a trading decision. Two checks, both
+    mechanical: (1) every `FunnelDiagnostics.record_*` method is
+    annotated to return `None` -- so even a future caller that tried to
+    branch on a `record_*` call's return value would have nothing to
+    branch on; (2) the `diagnostics`/`diagnostics_by_ticker` parameters
+    `generate_candidates`/`scan_and_rank_opportunities` accept both
+    default to `None` -- so omitting them entirely (every caller before
+    this step, and every caller of either function that doesn't opt into
+    collection) reproduces the exact pre-V1.5.5 call shape. The full
+    behavioral proof (identical `OpportunityScanResult`s with/without
+    diagnostics, across 10 named scenarios) lives in
+    `tests/unit/workflows/test_candidate_funnel_equivalence.py`, re-run
+    on every `python -m pytest`."""
+    import inspect
+
+    from src.workflows.candidate_generation import generate_candidates
+    from src.workflows.funnel_diagnostics import FunnelDiagnostics
+    from src.portfolio.opportunity_scan import scan_and_rank_opportunities
+
+    for name in ("record_chain", "record_expirations", "record_strategy_attempt", "record_strategy_ineligible", "record_construction"):
+        method = getattr(FunnelDiagnostics, name, None)
+        if method is None:
+            return False
+        sig = inspect.signature(method)
+        if sig.return_annotation not in (None, "None"):
+            return False
+
+    for fn, param in ((generate_candidates, "diagnostics"), (scan_and_rank_opportunities, "diagnostics_by_ticker")):
+        params = inspect.signature(fn).parameters
+        if param not in params or params[param].default is not None:
+            return False
+    return True
+
+
+def _verify_candidate_funnel_field_is_optional_and_additive() -> bool:
+    """PAPER_TRADING_V1.5.5, Step 4: `ControlCycleRecord.candidate_funnel`
+    must default to `None` (the same additive-optional-field pattern
+    `experiment_version_id` already established in V1.5.0), so a
+    pre-V1.5.5 JSON blob -- lacking the key entirely -- deserializes
+    cleanly via `ControlCycleRecord.model_validate_json` without any
+    backfill, migration, or rewrite. See
+    `tests/unit/workflows/test_candidate_funnel.py::TestControlCycleRecordBackwardCompatibility`
+    for the executed round-trip proof."""
+    from src.portfolio.cycle_record import ControlCycleRecord
+
+    field = ControlCycleRecord.model_fields.get("candidate_funnel")
+    return field is not None and field.default is None
+
+
+def _verify_dashboard_candidate_funnel_is_read_only() -> bool:
+    """PAPER_TRADING_V1.5.5, Step 4: no dashboard route may write,
+    confirm, or otherwise act on candidate-funnel data -- it stays a
+    read-only projection of `OperatorStatusView`, exactly like every
+    other Control Center field. Checks that no route decorator anywhere
+    under `src/dashboard/` combines a mutating HTTP method (POST/PUT/
+    PATCH/DELETE) with the string `candidate_funnel` within the same
+    decorated function -- a stricter, narrower version of
+    `_verify_dashboard_cannot_confirm_candidates`'s own import-scan
+    technique, scoped to this step's specific new field."""
+    import re
+
+    route_pattern = re.compile(r'@app\.(post|put|patch|delete)\([^)]*\)\s*\n\s*(?:async\s+)?def\s+(\w+)', re.IGNORECASE)
+    dashboard_dir = REPO_ROOT / "src" / "dashboard"
+    if not dashboard_dir.is_dir():
+        return False
+    for path in dashboard_dir.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        for match in route_pattern.finditer(text):
+            body_start = match.end()
+            body = text[body_start:body_start + 2000]
+            if "candidate_funnel" in body:
+                return False
     return True
 
 

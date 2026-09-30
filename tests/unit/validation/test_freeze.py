@@ -1208,3 +1208,124 @@ class TestCorrelationAlignmentUsesDateIntersectionCheck:
         assert any(
             c.name == "correlation_alignment_uses_date_intersection" and not c.passed for c in result.checks
         )
+
+
+class TestCandidateFunnelIsObservabilityOnlyCheck:
+    """PAPER_TRADING_V1.5.5, Step 4: candidate-funnel diagnostics must be
+    structurally incapable of influencing a trading decision -- every
+    `FunnelDiagnostics.record_*` method returns `None`, and the
+    `diagnostics`/`diagnostics_by_ticker` parameters default to `None`."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "candidate_funnel_is_observability_only" and c.passed for c in result.checks)
+
+    def test_a_record_method_no_longer_returning_none_is_caught(self, tmp_path, monkeypatch):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        def _record_chain_returns_something(self, *, contracts_seen: int, stale: bool) -> bool:
+            self.chain_contracts_seen = contracts_seen
+            self.chain_stale = stale
+            return stale  # the regression this check must catch
+
+        monkeypatch.setattr(FunnelDiagnostics, "record_chain", _record_chain_returns_something)
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "candidate_funnel_is_observability_only" and not c.passed for c in result.checks)
+
+    def test_a_manifest_falsely_claiming_observability_only_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["candidate_funnel_is_observability_only"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "candidate_funnel_is_observability_only" and not c.passed for c in result.checks)
+
+
+class TestCandidateFunnelFieldIsOptionalAndAdditiveCheck:
+    """PAPER_TRADING_V1.5.5, Step 4: `ControlCycleRecord.candidate_funnel`
+    must default to `None`, so a pre-V1.5.5 record (lacking the key
+    entirely) always deserializes cleanly, never requiring a backfill."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "candidate_funnel_field_is_optional_and_additive" and c.passed for c in result.checks)
+
+    def test_a_manifest_falsely_claiming_optional_additive_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["candidate_funnel_field_is_optional_and_additive"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(
+            c.name == "candidate_funnel_field_is_optional_and_additive" and not c.passed for c in result.checks
+        )
+
+
+class TestDashboardCandidateFunnelIsReadOnlyCheck:
+    """PAPER_TRADING_V1.5.5, Step 4: no dashboard route may mutate or act
+    on candidate-funnel data -- it stays a read-only projection."""
+
+    def test_check_passes_on_the_real_repository(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+        result = verify_freeze(path)
+        assert any(c.name == "dashboard_candidate_funnel_is_read_only" and c.passed for c in result.checks)
+
+    def test_a_mutating_route_referencing_candidate_funnel_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        app_path = Path("src/dashboard/app.py")
+        original = app_path.read_text(encoding="utf-8")
+        try:
+            poisoned = original + (
+                "\n\n@app.post('/api/_regression_probe')\n"
+                "def _regression_probe():\n"
+                "    return {'candidate_funnel': 'poisoned'}\n"
+            )
+            assert poisoned != original
+            app_path.write_text(poisoned, encoding="utf-8")
+            result = verify_freeze(path)
+            assert result.passed is False
+            assert any(
+                c.name == "dashboard_candidate_funnel_is_read_only" and not c.passed for c in result.checks
+            )
+        finally:
+            app_path.write_text(original, encoding="utf-8")
+
+    def test_a_manifest_falsely_claiming_read_only_is_caught(self, tmp_path):
+        manifest = build_freeze_manifest(generated_at=NOW)
+        path = save_freeze_manifest(manifest, tmp_path / "manifest.json")
+
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["dashboard_candidate_funnel_is_read_only"] = False
+        from src.validation.freeze import compute_manifest_hash
+
+        tampered["manifest_hash"] = compute_manifest_hash(tampered)
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        result = verify_freeze(path)
+        assert result.passed is False
+        assert any(c.name == "dashboard_candidate_funnel_is_read_only" and not c.passed for c in result.checks)

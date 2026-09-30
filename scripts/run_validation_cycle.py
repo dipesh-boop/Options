@@ -350,6 +350,12 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             universe=universe, chains_by_ticker=chains_by_ticker, strategies=list(strategies),
             quant_filter=QuantFilterConfig(), market_regime=ops.default_market_regime,
             broker_capabilities=broker_capabilities, proposal_id_prefix=f"validation-scan-{now.date().isoformat()}",
+            # PAPER_TRADING_V1.5.5, Step 4: observability-only -- this
+            # collects the candidate funnel for THIS cycle's
+            # `ControlCycleRecord` but changes nothing about which
+            # candidate (if any) is found, ranked, or persisted below.
+            # See `src.workflows.candidate_funnel` module docstring.
+            collect_candidate_funnel=True,
         ),
     )
     result = run_outer_cycle(inputs)
@@ -396,6 +402,25 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             review_store.save_candidate(candidate)
             print(f"\nNEW CANDIDATE AWAITING HUMAN REVIEW: {candidate_id}")
             print(f"  To authorize (PaperBroker simulation only, never live): python scripts/confirm_candidate.py {candidate_id}")
+
+    # PAPER_TRADING_V1.5.5, Step 4: purely diagnostic -- printed from the
+    # funnel `collect_candidate_funnel=True` above already caused
+    # `run_outer_cycle` to build (and never fed back into any decision
+    # made above this point).
+    funnel = result.candidate_funnel
+    if funnel is not None:
+        _line("candidate funnel -- symbols scanned", funnel.symbols_requested)
+        _line("candidate funnel -- usable option chains", funnel.option_chains_quality_passed)
+        _line("candidate funnel -- contracts seen", funnel.contracts_seen)
+        _line("candidate funnel -- strategy construction attempts", funnel.construction_attempts)
+        _line("candidate funnel -- construction successes", funnel.construction_successes)
+        _line("candidate funnel -- quant rejected", funnel.quant_rejected)
+        _line("candidate funnel -- risk rejected", funnel.risk_rejected)
+        _line("candidate funnel -- candidates persisted for review", funnel.candidates_persisted_for_review)
+        if funnel.top_bottlenecks:
+            _line("candidate funnel -- top bottlenecks", ", ".join(funnel.top_bottlenecks))
+        if funnel.zero_candidate_summary is not None:
+            print(f"  ZERO-CANDIDATE SUMMARY: {funnel.zero_candidate_summary}")
 
     valuation = result.control_result.valuation
     per_strategy_nav: dict[str, float] = {}
