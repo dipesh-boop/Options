@@ -5978,3 +5978,116 @@ recommended by this step. Universe expansion, additional strategy
 activation, successor-cohort creation, and candidate confirmation
 remain explicitly out of scope. See `STEP_23_4_FREEZE_REPORT.md` for
 the full 15-item architecture trace and freeze detail.
+
+## 2026-09-30 -- V1.5 Step 4 (PAPER_TRADING_V1.5.5): candidate-funnel
+## observability / zero-candidate diagnostics
+
+**What was built.** Cohort `paper-trading-v1.4.3-validation-2026-09-22`
+remains ACTIVE (7/90 days recorded, 0 candidates, 0 completed trades as
+of the Sept 30 cycle). This step does not loosen the system to force
+candidates -- it makes the candidate-generation pipeline explain
+itself: what was scanned, what survived each stage, what was rejected,
+and why -- without changing what candidate (if any) is generated,
+ranked, selected, or persisted for human review.
+`src.workflows.funnel_diagnostics.FunnelDiagnostics` is a purely-
+additive, optional (default `None`) collector whose `record_*` methods
+return `None` and are never read back into any `if`/`return`/loop-
+control statement in `src.workflows.candidate_generation.generate_candidates`
+or `src.portfolio.opportunity_scan.scan_and_rank_opportunities` -- every
+call is appended strictly AFTER the real decision already happened.
+`src.workflows.candidate_funnel.build_candidate_funnel` is a second,
+entirely separate pass that reads the finished `FunnelDiagnostics`
+objects plus the already-complete `OpportunityScanResult` and produces
+a bounded, deterministic `CandidateFunnel` (rejection-reason counts,
+per-symbol/per-strategy summaries, top bottlenecks, a deterministic
+zero-candidate summary) -- no LLM anywhere in this path.
+
+**Architecture confirmed from source, not assumed.** The candidate-
+generation pipeline scans a 2-ticker universe (SPY/QQQ) for exactly 3
+strategies with actual candidate-generation branches
+(`CASH_SECURED_PUT`, `COVERED_CALL`, `PUT_CREDIT_SPREAD`) out of
+`StrategyKind`'s 16 members (15 `TRADE_PROPOSAL_ELIGIBLE` + `WHEEL`,
+never eligible for candidate generation). `COVERED_CALL` is confirmed
+inert against the active cohort's all-cash, zero-share portfolio --
+`generate_candidates` now records `COVERED_CALL_NO_SHARES` for this
+case explicitly rather than silently producing nothing. The top-level
+market-hours gate (`scripts/run_validation_cycle.py`'s
+`evaluate_validation_cycle_eligibility` check, returning `False` before
+`run_outer_cycle` is ever called) is confirmed, again, to prevent
+existing-position Lifecycle Engine/Risk kill-switch monitoring from
+running through this entrypoint when the new-position window is closed
+-- unchanged from V1.5.1's original finding, still not fixed here
+(explicitly out of scope), recorded again as a future safety-hardening
+item.
+
+**Decision-neutrality, proven, not just claimed.**
+`tests/unit/workflows/test_candidate_funnel_equivalence.py` runs
+`scan_and_rank_opportunities` twice -- once with diagnostics collection
+entirely absent (`diagnostics_by_ticker=None`, the exact V1.5.4 call
+shape) and once with it populated -- across 10 named scenarios
+(zero-candidate day, data-quality/liquidity/Quant/Risk rejection, valid
+candidate survives to review, Covered Call prerequisite failure,
+degraded provider, empty portfolio, portfolio with an existing
+position) and asserts the two `OpportunityScanResult`s are exactly
+equal. `OpportunityScanConfig.collect_candidate_funnel` (default
+`False`) is the one new opt-in flag threading collection through
+`src.portfolio.orchestrator._run_opportunity_scan_stage`;
+`scripts/run_validation_cycle.py` turns it on for the active cohort
+only after this equivalence proof passed.
+
+**Backward-compatible persistence, no migration.**
+`ControlCycleRecord.candidate_funnel: CandidateFunnel | None = None` is
+an additive field, the same pattern V1.5.0's `experiment_version_id`
+established -- a pre-V1.5.5 JSON blob, lacking the key entirely, still
+deserializes cleanly via `model_validate_json`, filling in `None`.
+`CONTROL_LOOP_DATABASE_SCHEMA_VERSION` stays `"1.0.0"`, unchanged --
+no SQL migration, no new table, no rewriting of the September 22-30
+records. `risk_data_wiring.enabled` stays `false`; the V1.5.4
+correlation date-intersection correction and historical-data capability
+remain installed and untouched.
+
+**Bug caught by the new tests.**
+`build_candidate_funnel`'s quant/risk aggregation loop originally
+bucketed by `StrategyType.value` (lowercase, e.g. `"cash_secured_put"`)
+while `candidate_generation.py`'s diagnostics tag strategies by `.name`
+(e.g. `"CASH_SECURED_PUT"`), splitting each strategy's funnel into two
+spurious buckets instead of merging into one. Fixed to use `.name` in
+both places; `tests/unit/workflows/test_candidate_funnel.py` now
+asserts `by_strategy` risk-rejection counts land in the correct bucket.
+
+**Dashboard.** A new read-only "Candidate Funnel -- Today's
+Diagnostics" card (symbols scanned, usable chains, contracts
+considered, strategy attempts, construction successes, Quant/Risk
+rejects, candidates awaiting review, top rejection reasons, zero-
+candidate summary) -- no confirmation, no threshold control, no
+strategy toggle, no universe control, no "trade anyway" capability.
+`OperatorStatusView.software_version` is now backend-derived from
+`src.validation.freeze.FREEZE_NAME` instead of a hard-coded frontend
+constant (previously stuck at a stale "PAPER_TRADING_V1.5.2" while the
+backend had moved to V1.5.4) -- purely presentational, no trading
+behavior change.
+
+**Testing.** 11 behavioral-equivalence tests (10 named scenarios + one
+generate_candidates-level proof), 15 funnel-correctness/bounding/
+backward-compatibility tests, 3 new freeze checks
+(`candidate_funnel_is_observability_only`,
+`candidate_funnel_field_is_optional_and_additive`,
+`dashboard_candidate_funnel_is_read_only`) with 8 dedicated tests, 5 new
+frontend tests (3 candidate-funnel-card + 2 backend-derived-version).
+Full suite: 3704 passed, 6 skipped, 0 failed (up from 3670).
+`make verify-freeze` against the regenerated `PAPER_TRADING_V1.5.5`
+manifest: all checks pass; `portfolio_module_hash`,
+`run_validation_cycle_script_hash`, and `dashboard_validation_ops_module_hash`
+legitimately drifted (this step adds genuine new production capability,
+same as V1.4.4's own freeze) -- every safety/capability-boundary check
+(Tradier market-data-only, Fidelity manual-only, `risk_data_wiring`
+inactive, no `place_order` in the daily cycle, dashboard cannot confirm
+candidates, market-hours gate precedes mutation) still passes unchanged.
+
+**What remains open.** No universe expansion, strategy activation,
+`risk_data_wiring` activation, successor-cohort creation, or candidate
+confirmation was started. The market-hours-gate-vs-lifecycle-monitoring
+architectural concern remains unresolved, flagged again for a future,
+explicitly-approved safety-hardening step. See
+`STEP_23_5_FREEZE_REPORT.md` for the full architecture trace and freeze
+detail.
