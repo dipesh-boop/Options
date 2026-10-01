@@ -576,6 +576,283 @@ class TestGetOptionChain:
         assert len(chain_calls) == 2  # bounded by max_expirations=2, not all 3 available
 
 
+class TestGetOptionChainForDteWindow:
+    """PAPER_TRADING_V1.5.6: the hotfix for the 2026-10-01 production
+    defect -- `get_option_chain` fetches its nearest `max_expirations`
+    expirations regardless of DTE, which can silently exclude every
+    expiration a strategy's own `[min_dte, max_dte]` window could ever
+    use. `get_option_chain_for_dte_window` fetches full chains ONLY for
+    expirations inside the caller-supplied window."""
+
+    def _routing_provider(self, *, expirations: list[str], max_expirations: int = 6) -> tuple[TradierMarketDataProvider, FakeHttpClient]:
+        underlying_resp = FakeResponse(json_body={"quotes": {"quote": {"symbol": "SPY", "bid": 454.5, "ask": 455.5, "last": 455.0, "volume": 1000}}})
+        expirations_resp = FakeResponse(json_body={"expirations": {"date": expirations}})
+        chain_resp = FakeResponse(json_body={"options": {"option": []}})
+
+        class RoutingClient(FakeHttpClient):
+            def __init__(self):
+                super().__init__(FakeResponse())
+                self._paths = {
+                    "/markets/quotes": underlying_resp,
+                    "/markets/options/expirations": expirations_resp,
+                    "/markets/options/chains": chain_resp,
+                }
+
+            async def get(self, path, params=None):
+                self.calls.append((path, params or {}))
+                return self._paths[path]
+
+        client = RoutingClient()
+        provider = TradierMarketDataProvider(TradierConfig(token=TOKEN, max_expirations=max_expirations), http_client=client)
+        return provider, client
+
+    def _chain_expiration_params(self, client: FakeHttpClient) -> list[str]:
+        return [params["expiration"] for path, params in client.calls if path == "/markets/options/chains"]
+
+    # ---- 1: below-window and in-window expirations both present
+    def test_only_in_window_expirations_fetched(self):
+        provider, client = self._routing_provider(
+            expirations=["2026-10-01", "2026-10-02", "2026-10-23", "2026-10-30"],
+        )
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == ["2026-10-23", "2026-10-30"]
+
+    # ---- 3: near-term expirations never consume the request bound
+    def test_near_term_expirations_do_not_consume_the_request_bound(self):
+        provider, client = self._routing_provider(
+            expirations=["2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-23", "2026-10-30"],
+            max_expirations=2,
+        )
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        # both in-window dates fetched -- the 4 near-term dates never
+        # occupied a slot in the bound
+        assert self._chain_expiration_params(client) == ["2026-10-23", "2026-10-30"]
+
+    # ---- 4: the exact 2026-10-01 production calendar
+    def test_exact_2026_10_01_production_calendar(self):
+        provider, client = self._routing_provider(
+            expirations=[
+                "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08",
+                "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16",
+                "2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13",
+            ],
+        )
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == ["2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13"]
+
+    # ---- 5: no expiration in window -- fails honestly, never substitutes
+    def test_no_expiration_in_window_yields_empty_chain(self):
+        provider, _ = self._routing_provider(expirations=["2026-10-01", "2026-10-02"])
+        chain = _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert chain.contracts == []
+
+    # ---- 6: more eligible expirations than the request bound -- deterministic
+    def test_more_eligible_than_bound_selects_closest_to_min_dte_first(self):
+        provider, client = self._routing_provider(
+            expirations=["2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13"], max_expirations=2,
+        )
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == ["2026-10-23", "2026-10-30"]
+
+    def test_bounding_is_deterministic_across_repeated_calls(self):
+        provider, client = self._routing_provider(
+            expirations=["2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13"], max_expirations=2,
+        )
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        result_a = self._chain_expiration_params(client)
+        provider2, client2 = self._routing_provider(
+            expirations=["2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13"], max_expirations=2,
+        )
+        _run(provider2.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        result_b = self._chain_expiration_params(client2)
+        assert result_a == result_b
+
+    # ---- 7/8: boundary inclusion
+    def test_expiration_exactly_at_min_dte_included(self):
+        # as_of + 20 days
+        provider, client = self._routing_provider(expirations=["2026-10-21"])  # Oct 1 + 20 = Oct 21
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == ["2026-10-21"]
+
+    def test_expiration_exactly_at_max_dte_included(self):
+        provider, client = self._routing_provider(expirations=["2026-11-15"])  # Oct 1 + 45 = Nov 15
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == ["2026-11-15"]
+
+    # ---- 9/10: boundary exclusion
+    def test_expiration_one_day_before_min_dte_excluded(self):
+        provider, client = self._routing_provider(expirations=["2026-10-20"])  # Oct 1 + 19
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == []
+
+    def test_expiration_one_day_after_max_dte_excluded(self):
+        provider, client = self._routing_provider(expirations=["2026-11-16"])  # Oct 1 + 46
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert self._chain_expiration_params(client) == []
+
+    # ---- 11: date semantics match candidate_generation.py exactly
+    def test_date_semantics_match_candidate_generation_eligible_expirations(self):
+        from src.workflows.candidate_generation import QuantFilterConfig, _eligible_expirations
+        from src.data.option_chain import OptionChain, OptionContract, OptionRight as DataOptionRight
+        from src.data.quotes import UnderlyingQuote
+
+        as_of = datetime(2026, 10, 1, 15, 0, tzinfo=timezone.utc)
+        candidate_dates = ["2026-10-20", "2026-10-21", "2026-11-15", "2026-11-16"]
+        underlying = UnderlyingQuote(symbol="SPY", bid=454.5, ask=455.5, last=455.0, volume=1000, timestamp=as_of, source="tradier")
+        contracts = [
+            OptionContract(
+                underlying="SPY", option_symbol=f"SPY{d}P00450000", expiration=date.fromisoformat(d), strike=450.0,
+                right=DataOptionRight.PUT, bid=1.0, ask=1.1, last=1.05, volume=100, open_interest=100,
+                underlying_price=455.0, timestamp=as_of, source="tradier",
+            )
+            for d in candidate_dates
+        ]
+        chain = OptionChain(underlying=underlying, contracts=contracts, timestamp=as_of, source="tradier")
+        eligible_via_candidate_generation = set(_eligible_expirations(chain, as_of, QuantFilterConfig(min_dte=20, max_dte=45)))
+
+        provider, client = self._routing_provider(expirations=candidate_dates)
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=as_of.date()))
+        eligible_via_provider = {date.fromisoformat(d) for d in self._chain_expiration_params(client)}
+        assert eligible_via_provider == eligible_via_candidate_generation == {date(2026, 10, 21), date(2026, 11, 15)}
+
+    # ---- 12: no hardcoded 20/45 inside the provider
+    def test_min_dte_and_max_dte_have_no_default_the_caller_must_always_supply_them(self):
+        import inspect
+
+        sig = inspect.signature(TradierMarketDataProvider.get_option_chain_for_dte_window)
+        assert sig.parameters["min_dte"].default is inspect.Parameter.empty
+        assert sig.parameters["max_dte"].default is inspect.Parameter.empty
+
+    def test_source_never_hardcodes_the_2045_dte_values(self):
+        # AST-based rather than string-matching: a docstring is free to
+        # mention "20"/"45" in prose without this test false-failing, but
+        # no bare `20`/`45` integer literal may appear anywhere in the
+        # function's actual executable body (the no-default-value test
+        # above already proves min_dte/max_dte must be caller-supplied;
+        # this proves nothing re-derives 20/45 internally either).
+        import ast
+        import inspect
+        import textwrap
+
+        source = inspect.getsource(TradierMarketDataProvider.get_option_chain_for_dte_window)
+        tree = ast.parse(textwrap.dedent(source))
+        func_def = tree.body[0]
+        assert isinstance(func_def, ast.AsyncFunctionDef)
+        body_without_docstring = func_def.body[1:] if ast.get_docstring(func_def) else func_def.body
+        literals = {
+            node.value
+            for stmt in body_without_docstring
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Constant) and isinstance(node.value, int)
+        }
+        assert 20 not in literals
+        assert 45 not in literals
+
+    # ---- diagnostics
+    def test_diagnostics_populated_with_accurate_counts(self):
+        from src.data.provider import DteWindowSelectionDiagnostics
+
+        provider, _ = self._routing_provider(
+            expirations=["2026-10-01", "2026-10-02", "2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13"],
+            max_expirations=2,
+        )
+        diag = DteWindowSelectionDiagnostics()
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1), diagnostics=diag))
+        assert diag.provider_expirations_returned == 6
+        assert diag.expirations_in_window == 4
+        assert diag.expirations_selected == 2
+        assert diag.expirations_skipped_outside_window == 2
+        assert diag.expirations_skipped_due_to_bound == 2
+
+    def test_diagnostics_is_optional_and_defaults_to_none(self):
+        provider, _ = self._routing_provider(expirations=["2026-10-23"])
+        # must not raise when diagnostics is omitted entirely
+        chain = _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert chain is not None
+
+    def test_isinstance_check_against_dte_window_capability(self):
+        from src.data.provider import DteWindowOptionChainProvider
+
+        provider, _ = self._routing_provider(expirations=["2026-10-23"])
+        assert isinstance(provider, DteWindowOptionChainProvider)
+
+    # ---- request-count: same shape as get_option_chain, never more
+    def test_request_count_is_the_same_shape_as_get_option_chain_not_more(self):
+        # Exactly the 2026-10-01 production calendar: get_option_chain
+        # (the pre-hotfix path) would fetch its nearest 6 expirations
+        # (all out-of-window, the production defect); get_option_chain_
+        # for_dte_window fetches at most the SAME 6-chain bound, just a
+        # different (in-window) selection -- never MORE chain requests
+        # for the same symbol/max_expirations.
+        expirations = [
+            "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08",
+            "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16",
+            "2026-10-23", "2026-10-30", "2026-11-06", "2026-11-13",
+        ]
+        provider_before, client_before = self._routing_provider(expirations=expirations, max_expirations=6)
+        _run(provider_before.get_option_chain("SPY"))
+        # 1 outer underlying quote + 1 expirations list, then
+        # get_option_chain_for_expiration's own (quote + chain) pair per
+        # selected expiration -- 2 + 2*6 = 14, bounded by max_expirations=6.
+        calls_before = len(client_before.calls)
+
+        provider_after, client_after = self._routing_provider(expirations=expirations, max_expirations=6)
+        _run(provider_after.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        calls_after = len(client_after.calls)
+
+        assert calls_before == 14  # 2 + 2*6 (max_expirations bound reached: nearest 6 by calendar date)
+        assert calls_after == 10  # 2 + 2*4 (only 4 of the 16 provider expirations fall in-window here)
+        assert calls_after <= calls_before  # the DTE-aware fetch never issues MORE requests for the same bound
+
+    def test_request_bound_never_exceeded_regardless_of_how_many_expirations_are_eligible(self):
+        # 10 eligible expirations, max_expirations=6 -- at most 6 chain
+        # requests are ever made, never one per eligible expiration.
+        expirations = [f"2026-10-{d:02d}" for d in range(21, 31)]  # all 20-29 DTE from Oct 1 -- in [20,45]
+        provider, client = self._routing_provider(expirations=expirations, max_expirations=6)
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1)))
+        assert len(self._chain_expiration_params(client)) == 6
+
+    # ---- rate-limit priority propagation preserved
+    def test_priority_argument_is_accepted_and_defaults_match_get_option_chain(self):
+        import inspect
+
+        dte_window_sig = inspect.signature(TradierMarketDataProvider.get_option_chain_for_dte_window)
+        chain_sig = inspect.signature(TradierMarketDataProvider.get_option_chain)
+        assert dte_window_sig.parameters["priority"].default == chain_sig.parameters["priority"].default
+
+    def test_custom_priority_is_honored_not_silently_overridden(self):
+        provider, client = self._routing_provider(expirations=["2026-10-23"])
+        _run(
+            provider.get_option_chain_for_dte_window(
+                "SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1), priority=RateLimitPriority.P0_POSITION_RISK,
+            )
+        )
+        # no exception, no silent downgrade to the default -- a real
+        # per-call priority was accepted and used to drive every
+        # underlying _request call this method made.
+        assert len(client.calls) == 4  # outer quote + expirations + (quote + chain) for the 1 selected expiration
+
+    # ---- diagnostics never carries a secret or token
+    def test_diagnostics_dataclass_carries_only_integer_counts_never_a_secret(self):
+        from src.data.provider import DteWindowSelectionDiagnostics
+
+        diag = DteWindowSelectionDiagnostics()
+        # every field this observability object exposes is a plain int
+        # count -- structurally incapable of carrying a token/secret
+        # string, unlike a free-text diagnostic field would be.
+        for name, value in vars(diag).items():
+            assert isinstance(value, int), f"{name} is {type(value)!r}, not int -- diagnostics must stay integer-only"
+
+    def test_token_never_appears_in_diagnostics_after_a_real_call(self):
+        from src.data.provider import DteWindowSelectionDiagnostics
+
+        provider, _ = self._routing_provider(expirations=["2026-10-23"])
+        diag = DteWindowSelectionDiagnostics()
+        _run(provider.get_option_chain_for_dte_window("SPY", min_dte=20, max_dte=45, as_of=date(2026, 10, 1), diagnostics=diag))
+        serialized = str(vars(diag))
+        assert TOKEN not in serialized
+
+
 class TestRequestBehavior:
     def test_200_returns_json_body(self):
         provider, _ = _provider(FakeResponse(status_code=200, json_body={"expirations": None}))

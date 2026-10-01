@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from src.data.option_chain import OptionChain, OptionContract, OptionRight, assert_tradable
+from src.data.option_chain import OptionChain, OptionContract, OptionRight, assert_tradable, merge_option_chains
 from src.data.provider import DEFAULT_MAX_QUOTE_AGE, StaleDataError
 from src.data.quotes import UnderlyingQuote
 
@@ -185,3 +185,57 @@ class TestAssertTradable:
             pytest.fail(f"expected StaleDataError, got a return value: {result!r}")
         except StaleDataError:
             pass
+
+
+class TestMergeOptionChains:
+    """PAPER_TRADING_V1.5.6: merges a ticker's near-term lifecycle chain
+    with its DTE-windowed opportunity-scan chain, for the one case where
+    a single ticker needs both (an existing position whose ticker is
+    also in the scan universe)."""
+
+    def _chain(self, *, expiration: date, timestamp: datetime, strike: float = 220.0, symbol: str = "AAPL") -> OptionChain:
+        underlying = UnderlyingQuote(symbol=symbol, bid=224.5, ask=225.5, last=225.0, volume=1_000_000, timestamp=timestamp, source="tradier")
+        contract = OptionContract(**_valid_contract_kwargs(
+            expiration=expiration, strike=strike, timestamp=timestamp, underlying_price=225.0,
+        ))
+        return OptionChain(underlying=underlying, contracts=[contract], timestamp=timestamp, source="tradier")
+
+    def test_merges_contracts_from_both_chains(self):
+        a = self._chain(expiration=date(2026, 1, 20), timestamp=NOW)
+        b = self._chain(expiration=date(2026, 2, 20), timestamp=NOW, strike=230.0)
+        merged = merge_option_chains(a, b)
+        assert {c.expiration for c in merged.contracts} == {date(2026, 1, 20), date(2026, 2, 20)}
+        assert len(merged.contracts) == 2
+
+    def test_duplicate_contract_a_wins(self):
+        a = self._chain(expiration=EXPIRY, timestamp=NOW)
+        b = self._chain(expiration=EXPIRY, timestamp=NOW + timedelta(minutes=1))
+        merged = merge_option_chains(a, b)
+        assert len(merged.contracts) == 1
+        assert merged.contracts[0].timestamp == a.contracts[0].timestamp
+
+    def test_merged_timestamp_is_the_earlier_of_the_two(self):
+        a = self._chain(expiration=date(2026, 1, 20), timestamp=NOW + timedelta(minutes=5))
+        b = self._chain(expiration=date(2026, 2, 20), timestamp=NOW, strike=230.0)
+        merged = merge_option_chains(a, b)
+        assert merged.timestamp == NOW
+
+    def test_underlying_and_source_come_from_a(self):
+        a = self._chain(expiration=date(2026, 1, 20), timestamp=NOW)
+        b = self._chain(expiration=date(2026, 2, 20), timestamp=NOW, strike=230.0)
+        merged = merge_option_chains(a, b)
+        assert merged.underlying == a.underlying
+        assert merged.source == a.source
+
+    def test_mismatched_underlying_symbols_raises(self):
+        a = self._chain(expiration=date(2026, 1, 20), timestamp=NOW, symbol="AAPL")
+        b = self._chain(expiration=date(2026, 2, 20), timestamp=NOW, symbol="MSFT")
+        with pytest.raises(ValueError, match="different underlyings"):
+            merge_option_chains(a, b)
+
+    def test_merging_with_an_empty_chain_is_a_no_op(self):
+        a = self._chain(expiration=date(2026, 1, 20), timestamp=NOW)
+        empty = OptionChain(underlying=a.underlying, contracts=[], timestamp=NOW, source="tradier")
+        merged = merge_option_chains(a, empty)
+        assert len(merged.contracts) == 1
+        assert merged.contracts[0] == a.contracts[0]

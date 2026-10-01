@@ -15,7 +15,7 @@ field.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
 
@@ -181,3 +181,60 @@ class MarketDataProvider(ABC):
     async def close(self) -> None:  # pragma: no cover - default no-op
         """Release any held connections."""
         return None
+
+
+class DteWindowSelectionDiagnostics:
+    """Optional, purely-additive observability a
+    `DteWindowOptionChainProvider` implementation MAY populate during
+    `get_option_chain_for_dte_window` (PAPER_TRADING_V1.5.6) -- mirrors
+    `src.workflows.funnel_diagnostics.FunnelDiagnostics`'s own
+    established pattern: every field is set strictly AFTER the real
+    expiration-selection decision already happened, never read back
+    into that decision. Answers, per call: how many expirations the
+    provider's calendar returned in total, how many fell inside the
+    requested DTE window, how many of those were actually selected for
+    a full chain fetch, and how many were left out -- split by WHY
+    (outside the window vs. inside the window but beyond the request
+    bound). Bounded by construction (five integers; never stores the
+    provider's own expiration-date list)."""
+
+    def __init__(self) -> None:
+        self.provider_expirations_returned = 0
+        self.expirations_in_window = 0
+        self.expirations_selected = 0
+        self.expirations_skipped_outside_window = 0
+        self.expirations_skipped_due_to_bound = 0
+
+
+class DteWindowOptionChainProvider(ABC):
+    """Optional capability (PAPER_TRADING_V1.5.6): a provider that can
+    retrieve a BOUNDED, DTE-FILTERED option chain -- full chains only
+    for expirations whose `(expiration - as_of).days` falls inside
+    `[min_dte, max_dte]`, rather than blindly fetching its nearest N
+    expirations by calendar date regardless of whether any of them
+    could ever satisfy a strategy's own DTE policy.
+
+    `min_dte`/`max_dte` are caller-supplied on every call -- this
+    interface has, and must never gain, an opinion of its own about
+    what a valid trading DTE window is. That policy is owned entirely
+    by `src.workflows.candidate_generation.QuantFilterConfig`; a
+    provider implementing this interface only knows how to fetch a
+    bounded, date-filtered set of chains for whatever window it's
+    told, exactly once per call, never a second hard-coded threshold.
+
+    A provider that already returns every expiration in one call (no
+    nearest-N request-bounding problem to begin with) has no need to
+    implement this at all -- `generate_candidates`'s own DTE filtering
+    already selects correctly from whatever chain it receives; this
+    interface exists only for providers (today: Tradier) whose
+    `get_option_chain` must choose a bounded SUBSET of expirations to
+    fetch full chains for, and whose default choice ("nearest N by
+    calendar date") can silently exclude every expiration a strategy's
+    DTE window actually wants."""
+
+    @abstractmethod
+    async def get_option_chain_for_dte_window(
+        self, symbol: str, *, min_dte: int, max_dte: int, as_of: date,
+        diagnostics: "DteWindowSelectionDiagnostics | None" = None,
+    ) -> "OptionChain":
+        raise NotImplementedError

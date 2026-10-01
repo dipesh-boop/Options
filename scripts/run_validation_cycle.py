@@ -105,7 +105,8 @@ from src.data.factory import (  # noqa: E402
 )
 from src.data.historical import HistoricalDataProvider  # noqa: E402
 from src.data.market_calendar import is_market_open, is_trading_day  # noqa: E402
-from src.data.option_chain import OptionChain  # noqa: E402
+from src.data.option_chain import OptionChain, merge_option_chains  # noqa: E402
+from src.data.provider import DteWindowOptionChainProvider, DteWindowSelectionDiagnostics  # noqa: E402
 from src.data.universe import load_universe, load_universe_strategies  # noqa: E402
 from src.lifecycle.persistence import SqliteLifecycleStore  # noqa: E402
 from src.lifecycle.policies_library import policies_for_strategy  # noqa: E402
@@ -316,17 +317,72 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             now=now, lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
         )
 
-        tickers = sorted({p.ticker for p in portfolio.positions} | {e.ticker for e in universe})
+        # PAPER_TRADING_V1.5.6: hoisted above the fetch loop (previously
+        # constructed inline, below, when building OpportunityScanConfig)
+        # so the SAME QuantFilterConfig instance's min_dte/max_dte drives
+        # both the DTE-aware fetch below and candidate generation itself
+        # -- one source of truth, never a second hard-coded threshold.
+        quant_filter = QuantFilterConfig()
+        position_tickers = {p.ticker for p in portfolio.positions}
+        universe_tickers = {e.ticker for e in universe}
+        tickers = sorted(position_tickers | universe_tickers)
         fetch_results: dict[str, OptionChain | Exception] = {}
+        # Bounded (at most len(universe) entries), operator-facing only --
+        # never persisted into CandidateFunnel/ControlCycleRecord this
+        # step. See DteWindowSelectionDiagnostics's own docstring.
+        dte_selection_diagnostics: dict[str, DteWindowSelectionDiagnostics] = {}
         for ticker in tickers:
             try:
-                fetch_results[ticker] = await provider.get_option_chain(ticker)
+                if ticker in universe_tickers and isinstance(provider, DteWindowOptionChainProvider):
+                    # Opportunity-scan tickers get a DTE-aware, BOUNDED
+                    # chain fetch -- only expirations inside the candidate
+                    # engine's own [min_dte, max_dte] window are ever
+                    # fetched, rather than the provider's nearest-N-by-
+                    # calendar-date default (get_option_chain), which can
+                    # silently exclude every expiration a strategy's DTE
+                    # policy could ever use (the exact 2026-10-01 defect
+                    # this step fixes). Existing-position tickers still
+                    # need get_option_chain's own near-term behavior for
+                    # lifecycle monitoring (a position can be well under
+                    # 20 DTE) -- a ticker that is BOTH an existing
+                    # position AND in the universe gets BOTH fetches,
+                    # merged, never one at the expense of the other.
+                    diag = DteWindowSelectionDiagnostics()
+                    dte_selection_diagnostics[ticker] = diag
+                    scan_chain = await provider.get_option_chain_for_dte_window(
+                        ticker, min_dte=quant_filter.min_dte, max_dte=quant_filter.max_dte, as_of=now.date(),
+                        diagnostics=diag,
+                    )
+                    if ticker in position_tickers:
+                        lifecycle_chain = await provider.get_option_chain(ticker)
+                        fetch_results[ticker] = merge_option_chains(lifecycle_chain, scan_chain)
+                    else:
+                        fetch_results[ticker] = scan_chain
+                else:
+                    # A position-only ticker, or a provider that doesn't
+                    # implement DteWindowOptionChainProvider at all (e.g.
+                    # Alpaca, whose get_option_chain already returns every
+                    # expiration in one call -- candidate_generation's own
+                    # DTE filtering already selects correctly from that,
+                    # no retrieval-side fix needed for it).
+                    fetch_results[ticker] = await provider.get_option_chain(ticker)
             except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the cycle
                 fetch_results[ticker] = exc
     finally:
         close = getattr(provider, "close", None)
         if close is not None:
             await close()
+
+    for ticker in sorted(dte_selection_diagnostics):
+        diag = dte_selection_diagnostics[ticker]
+        _line(
+            f"DTE-window chain selection -- {ticker}",
+            f"provider expirations returned={diag.provider_expirations_returned}, requested window="
+            f"{quant_filter.min_dte}-{quant_filter.max_dte} DTE, in window={diag.expirations_in_window}, "
+            f"selected={diag.expirations_selected}, skipped (outside window)="
+            f"{diag.expirations_skipped_outside_window}, skipped (over request bound)="
+            f"{diag.expirations_skipped_due_to_bound}",
+        )
 
     chains_by_ticker = {t: c for t, c in fetch_results.items() if isinstance(c, OptionChain)}
     failed = [t for t, c in fetch_results.items() if isinstance(c, Exception)]
@@ -348,7 +404,7 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         policy_name_for_position=policy_name_for_position,
         opportunity_scan=OpportunityScanConfig(
             universe=universe, chains_by_ticker=chains_by_ticker, strategies=list(strategies),
-            quant_filter=QuantFilterConfig(), market_regime=ops.default_market_regime,
+            quant_filter=quant_filter, market_regime=ops.default_market_regime,
             broker_capabilities=broker_capabilities, proposal_id_prefix=f"validation-scan-{now.date().isoformat()}",
             # PAPER_TRADING_V1.5.5, Step 4: observability-only -- this
             # collects the candidate funnel for THIS cycle's

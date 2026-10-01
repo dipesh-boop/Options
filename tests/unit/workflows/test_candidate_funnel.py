@@ -288,3 +288,123 @@ class TestControlCycleRecordBackwardCompatibility:
         loaded = store.get_cycle_record("cyc-with-funnel")
         assert loaded is not None
         assert loaded.candidate_funnel == funnel
+
+
+class TestExpirationDteOutOfRangeRejectionReason:
+    """PAPER_TRADING_V1.5.6: closes the V1.5.5 observability gap the
+    2026-10-01 production incident exposed -- when a provider's chain
+    carries expirations outside the candidate engine's own
+    `[min_dte, max_dte]` window, `expirations_rejected` was always
+    visible on `CandidateFunnel` itself, but NO entry ever appeared in
+    `rejection_reasons`/`top_bottlenecks`, so an unrelated, coincidental
+    construction-rejection reason (e.g. `COVERED_CALL_NO_SHARES`) could
+    misleadingly appear to be the dominant bottleneck when expiration
+    eligibility had actually eliminated every candidate before
+    construction was ever attempted. Derived purely from
+    `expirations_seen - expirations_eligible` -- no new `FunnelDiagnostics`
+    field, no change to `expirations_seen`/`expirations_eligible`
+    themselves, no change to trading behavior."""
+
+    def _empty_scan_result(self) -> OpportunityScanResult:
+        return OpportunityScanResult(scanned=(), best=None, no_trade_reason="no candidates this synthetic cycle")
+
+    def _out_of_window_chain(self) -> OptionChain:
+        # 3 DTE from NOW (2026-09-22) -- well below QUANT_FILTER's min_dte=20.
+        exp = date(2026, 9, 25)
+        underlying = UnderlyingQuote(symbol="SPY", bid=454.5, ask=455.5, last=455.0, volume=1_000_000, timestamp=NOW, source="tradier")
+        contracts = [
+            OptionContract(
+                underlying="SPY", option_symbol=f"SPY{exp.isoformat()}P{int(strike*1000):08d}", expiration=exp, strike=strike,
+                right=OptionRight.PUT, bid=3.0, ask=3.2, last=3.1, volume=500, open_interest=1000,
+                delta=delta, iv=0.18, underlying_price=455.0, timestamp=NOW, source="tradier",
+            )
+            for strike, delta in [(450.0, -0.20), (445.0, -0.12)]
+        ]
+        return OptionChain(underlying=underlying, contracts=contracts, timestamp=NOW, source="tradier")
+
+    def test_reproduces_the_2026_10_01_incident_shape_against_the_real_pipeline(self):
+        # expirations_seen > 0, expirations_eligible == 0 -- exactly the
+        # production defect's funnel shape (expirations_eligible=0,
+        # expirations_rejected=12, candidates_generated=0).
+        universe = [UniverseEntry(ticker="SPY", sector="ETF")]
+        chains = {"SPY": self._out_of_window_chain()}
+        result, diag = _scan_with_diagnostics(universe, chains, [StrategyType.CASH_SECURED_PUT], _portfolio(5_000_000.0))
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-dte-oor", generated_at=NOW, universe_tickers=("SPY",), chain_received_tickers=frozenset({"SPY"}),
+            diagnostics_by_ticker=diag, scan_result=result, candidates_persisted=0,
+        )
+        assert funnel.expirations_seen == 1
+        assert funnel.expirations_eligible == 0
+        assert funnel.expirations_rejected == 1
+        assert funnel.candidates_generated == 0
+        assert any(
+            r.stage == "expiration" and r.reason == "EXPIRATION_DTE_OUT_OF_RANGE" and r.count == 1
+            for r in funnel.rejection_reasons
+        )
+        assert any("EXPIRATION_DTE_OUT_OF_RANGE" in b for b in funnel.top_bottlenecks)
+
+    def test_rejected_expirations_count_matches_seen_minus_eligible_across_multiple_tickers(self):
+        diag = {}
+        for ticker, seen, eligible in [("AAA", 5, 1), ("BBB", 3, 3), ("CCC", 2, 0)]:
+            d = FunnelDiagnostics(ticker=ticker)
+            d.record_expirations(seen=seen, eligible=eligible)
+            diag[ticker] = d
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-dte-multi", generated_at=NOW, universe_tickers=("AAA", "BBB", "CCC"),
+            chain_received_tickers=frozenset({"AAA", "BBB", "CCC"}), diagnostics_by_ticker=diag,
+            scan_result=self._empty_scan_result(), candidates_persisted=0,
+        )
+        # (5-1) + (3-3) + (2-0) = 4 + 0 + 2 = 6
+        total_rejected = next(
+            (r.count for r in funnel.rejection_reasons if r.stage == "expiration" and r.reason == "EXPIRATION_DTE_OUT_OF_RANGE"),
+            0,
+        )
+        assert total_rejected == 6
+        assert funnel.expirations_seen == 10
+        assert funnel.expirations_eligible == 4
+        assert funnel.expirations_rejected == 6
+
+    def test_no_spurious_reason_when_every_seen_expiration_is_eligible(self):
+        diag = {"SPY": FunnelDiagnostics(ticker="SPY")}
+        diag["SPY"].record_expirations(seen=4, eligible=4)
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-dte-all-eligible", generated_at=NOW, universe_tickers=("SPY",),
+            chain_received_tickers=frozenset({"SPY"}), diagnostics_by_ticker=diag,
+            scan_result=self._empty_scan_result(), candidates_persisted=0,
+        )
+        assert funnel.expirations_rejected == 0
+        assert not any(r.stage == "expiration" and r.reason == "EXPIRATION_DTE_OUT_OF_RANGE" for r in funnel.rejection_reasons)
+
+    def test_no_spurious_reason_when_no_expirations_were_ever_seen(self):
+        # A ticker whose chain fetch failed entirely (expirations_seen=0,
+        # expirations_eligible=0) must never be counted as a DTE rejection
+        # -- rejected_expirations would be 0 - 0 = 0, correctly a no-op.
+        diag = {"SPY": FunnelDiagnostics(ticker="SPY")}
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-dte-never-seen", generated_at=NOW, universe_tickers=("SPY",),
+            chain_received_tickers=frozenset(), diagnostics_by_ticker=diag,
+            scan_result=self._empty_scan_result(), candidates_persisted=0,
+        )
+        assert funnel.expirations_seen == 0
+        assert funnel.expirations_eligible == 0
+        assert not any(r.stage == "expiration" and r.reason == "EXPIRATION_DTE_OUT_OF_RANGE" for r in funnel.rejection_reasons)
+
+    def test_covered_call_no_shares_no_longer_appears_as_the_sole_or_dominant_bottleneck(self):
+        # The exact V1.5.5 observability gap this closes: before this fix,
+        # an expiration-eliminated cycle's rejection_reasons contained
+        # ONLY the coincidental COVERED_CALL_NO_SHARES strategy-prerequisite
+        # rejection (itself real, but not the actual bottleneck) -- now
+        # EXPIRATION_DTE_OUT_OF_RANGE must also appear, and with a higher
+        # count whenever more expirations were rejected than strategies
+        # were attempted.
+        universe = [UniverseEntry(ticker="SPY", sector="ETF")]
+        chains = {"SPY": self._out_of_window_chain()}
+        result, diag = _scan_with_diagnostics(universe, chains, [StrategyType.COVERED_CALL], _portfolio(5_000_000.0))
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-dte-covered-call", generated_at=NOW, universe_tickers=("SPY",),
+            chain_received_tickers=frozenset({"SPY"}), diagnostics_by_ticker=diag,
+            scan_result=result, candidates_persisted=0,
+        )
+        reasons_by_key = {(r.stage, r.reason): r.count for r in funnel.rejection_reasons}
+        assert ("expiration", "EXPIRATION_DTE_OUT_OF_RANGE") in reasons_by_key
+        assert reasons_by_key[("expiration", "EXPIRATION_DTE_OUT_OF_RANGE")] == 1

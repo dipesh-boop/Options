@@ -121,3 +121,29 @@ def assert_tradable(
     if the contract's data is older than `max_age` relative to `as_of`.
     This is the concrete "prohibit trade approval" mechanism."""
     return contract.require_fresh(as_of, max_age)
+
+
+def merge_option_chains(a: OptionChain, b: OptionChain) -> OptionChain:
+    """Combines two separately-fetched snapshots of the SAME underlying
+    into one (PAPER_TRADING_V1.5.6) — for the one case where a single
+    ticker needs two different expiration sets fetched separately: an
+    existing position's own near-term expiration (`get_option_chain`)
+    plus a DTE-windowed opportunity-scan fetch
+    (`get_option_chain_for_dte_window`). Contracts are unioned, deduped
+    by `(expiration, strike, right)` — `a`'s contract wins a duplicate,
+    never silently overwritten by `b`'s (an arbitrary but deterministic
+    tie-break; the two fetches should rarely overlap at all, since one
+    targets near-term expirations and the other a 20+-day-out window).
+    The merged chain's own `timestamp` is the EARLIER of the two —
+    conservative, so a merged chain is never reported fresher than its
+    oldest piece actually is. `underlying`/`source` are taken from `a`
+    (both describe the identical ticker; neither is expected to
+    meaningfully differ between two fetches moments apart)."""
+    if a.underlying.symbol != b.underlying.symbol:
+        raise ValueError(f"cannot merge chains for different underlyings: {a.underlying.symbol!r} vs {b.underlying.symbol!r}")
+    seen = {(c.expiration, c.strike, c.right) for c in a.contracts}
+    merged_contracts = list(a.contracts) + [c for c in b.contracts if (c.expiration, c.strike, c.right) not in seen]
+    return OptionChain(
+        underlying=a.underlying, contracts=merged_contracts,
+        timestamp=min(a.timestamp, b.timestamp), source=a.source,
+    )

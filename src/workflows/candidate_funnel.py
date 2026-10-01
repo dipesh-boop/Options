@@ -224,6 +224,21 @@ def build_candidate_funnel(
             )
             continue
 
+        # PAPER_TRADING_V1.5.6: a V1.5.5 observability gap -- expiration
+        # eligibility was counted (`expirations_seen`/`expirations_eligible`)
+        # but never turned into a rejection_reasons/top_bottlenecks entry,
+        # so a cycle where DTE eligibility eliminated every expiration
+        # (zero `strategy_events` of any kind ever recorded, since no
+        # expiration survived to attempt a strategy against) showed NO
+        # bottleneck at all for the actual cause, only whatever incidental
+        # strategy-prerequisite reason happened to exist. Read directly
+        # from already-computed counts -- never re-derives or second-
+        # guesses the real DTE decision candidate_generation.py already
+        # made.
+        rejected_expirations = diag.expirations_seen - diag.expirations_eligible
+        if rejected_expirations > 0:
+            reason_counter[("expiration", "EXPIRATION_DTE_OUT_OF_RANGE")] += rejected_expirations
+
         sym_attempts = 0
         sym_successes = 0
         for strategy, event_type, reason in diag.strategy_events:

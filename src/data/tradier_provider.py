@@ -74,7 +74,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.data.historical import HistoricalBar, HistoricalDataProvider
 from src.data.option_chain import OptionChain, OptionContract, OptionRight
-from src.data.provider import MarketDataProvider, ProviderError
+from src.data.provider import DteWindowOptionChainProvider, DteWindowSelectionDiagnostics, MarketDataProvider, ProviderError
 from src.data.quotes import UnderlyingQuote
 from src.data.rate_limiter import RateLimitPriority, RateLimitState, may_proceed
 
@@ -424,7 +424,7 @@ def _parse_expirations_json(raw: dict) -> list[date]:
 # ------------------------------------------------------------ provider
 
 
-class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider):
+class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider, DteWindowOptionChainProvider):
     """Real-market-data-only Tradier adapter. `http_client` is accepted
     as a constructor override purely so tests can inject a fake
     implementing one async `get(path, params=None)` method (returning
@@ -581,6 +581,56 @@ class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider):
         contracts: list[OptionContract] = []
         for expiration in expirations[: self._config.max_expirations]:
             contracts.extend(await self.get_option_chain_for_expiration(symbol, expiration, priority=priority))
+        return OptionChain(underlying=underlying, contracts=contracts, timestamp=now, source=SOURCE_TRADIER)
+
+    async def get_option_chain_for_dte_window(
+        self, symbol: str, *, min_dte: int, max_dte: int, as_of: date,
+        diagnostics: DteWindowSelectionDiagnostics | None = None,
+        priority: RateLimitPriority = RateLimitPriority.P4_OPPORTUNITY_SCANNING,
+    ) -> OptionChain:
+        """Satisfies `src.data.provider.DteWindowOptionChainProvider`
+        (PAPER_TRADING_V1.5.6). Unlike `get_option_chain` (which fetches
+        its nearest `max_expirations` expirations regardless of DTE),
+        this fetches full chains ONLY for expirations whose
+        `(expiration - as_of).days` falls inside `[min_dte, max_dte]` --
+        the exact calendar-day semantics `src.workflows
+        .candidate_generation._eligible_expirations` already uses, so an
+        expiration this method selects is always one that strategy
+        could actually construct a candidate from. `min_dte`/`max_dte`
+        are caller-supplied every call -- never a second hard-coded
+        threshold here; this method has no opinion of its own about
+        what a valid DTE window is.
+
+        Bounded exactly like `get_option_chain` already is: at most
+        `self._config.max_expirations` chains are fetched, the ones
+        CLOSEST to `min_dte` first (ascending date order, deterministic,
+        no randomness) -- the same nearest-first precedence
+        `get_option_chain` already applies, just re-scoped to start
+        counting from the eligible window's own earliest date instead of
+        from `as_of`. If zero provider expirations fall in the
+        requested window, returns a chain with zero contracts (fails
+        honestly -- never substitutes a nearest expiration OUTSIDE the
+        window). Reuses `get_underlying_quote`/`get_expirations`/
+        `get_option_chain_for_expiration` unchanged -- no new network
+        code, no new endpoint, same `_request` choke point."""
+        symbol = symbol.upper()
+        now = datetime.now(timezone.utc)
+        underlying = await self.get_underlying_quote(symbol, priority=priority)
+        expirations = await self.get_expirations(symbol, priority=priority)
+        eligible = sorted(e for e in expirations if min_dte <= (e - as_of).days <= max_dte)
+        selected = eligible[: self._config.max_expirations]
+        contracts: list[OptionContract] = []
+        for expiration in selected:
+            contracts.extend(await self.get_option_chain_for_expiration(symbol, expiration, priority=priority))
+        if diagnostics is not None:
+            # Recorded strictly after the real selection above already
+            # happened -- never read back into it. See
+            # `DteWindowSelectionDiagnostics`'s own docstring.
+            diagnostics.provider_expirations_returned = len(expirations)
+            diagnostics.expirations_in_window = len(eligible)
+            diagnostics.expirations_selected = len(selected)
+            diagnostics.expirations_skipped_outside_window = len(expirations) - len(eligible)
+            diagnostics.expirations_skipped_due_to_bound = len(eligible) - len(selected)
         return OptionChain(underlying=underlying, contracts=contracts, timestamp=now, source=SOURCE_TRADIER)
 
     # ---------------------------------------------------- historical bars

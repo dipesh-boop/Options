@@ -74,6 +74,13 @@ class TestNoTradierOrderCapabilityAnywhere:
         allowed_extras = {
             "get_underlying_quotes", "get_expirations", "get_option_chain_for_expiration", "rate_limit_state",
             "get_bars",
+            # PAPER_TRADING_V1.5.6: satisfies src.data.provider
+            # .DteWindowOptionChainProvider via the exact same read-only
+            # /markets/options/expirations and /markets/options/chains
+            # GET endpoints get_option_chain/get_expirations/
+            # get_option_chain_for_expiration already use -- no new
+            # endpoint, same _request choke point.
+            "get_option_chain_for_dte_window",
         }
         unexpected = public - base_contract - allowed_extras
         assert unexpected == set(), f"unexpected extra public method(s) on TradierMarketDataProvider: {unexpected}"
