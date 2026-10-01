@@ -226,21 +226,36 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # STEP_22_9_FREEZE_REPORT.md / STEP_23_1_FREEZE_REPORT.md /
 # STEP_23_2_FREEZE_REPORT.md / STEP_23_2A_FREEZE_REPORT.md /
 # STEP_23_3_FREEZE_REPORT.md / STEP_23_4_FREEZE_REPORT.md /
-# STEP_23_5_FREEZE_REPORT.md.
+# STEP_23_5_FREEZE_REPORT.md), and Step 6 (PAPER_TRADING_V1.5.6: narrow
+# hotfix making opportunity-scan option-chain retrieval DTE-aware --
+# `TradierMarketDataProvider.get_option_chain` fetched its nearest
+# `max_expirations` expirations regardless of DTE, which on 2026-10-01
+# silently excluded every expiration the 20-45 DTE candidate-generation
+# window could ever use. `src.data.provider.DteWindowOptionChainProvider`
+# is a new, optional, provider-neutral capability interface (same pattern
+# as V1.5.4's `HistoricalDataProvider`); only `TradierMarketDataProvider`
+# implements it. `min_dte`/`max_dte` are always caller-supplied -- this
+# step never hard-codes 20/45 anywhere in the provider layer, and
+# `src.workflows.candidate_generation.QuantFilterConfig` remains the sole
+# DTE policy owner. Existing-position lifecycle fetches are unaffected
+# (still `get_option_chain`); a ticker that is both an existing position
+# and in the scan universe gets both fetches, merged via the new
+# `src.data.option_chain.merge_option_chains`. See
+# STEP_23_6_FREEZE_REPORT.md.
 # FREEZE_NAME/MANIFEST_VERSION always
 # reflect the *current* frozen state; the original V1.0/V1.1/V1.2/V1.3/
 # V1.4/V1.4.1/V1.4.2/V1.4.3/V1.4.4/V1.4.5/V1.4.6/V1.4.7/V1.4.8/V1.5.0/
-# V1.5.1/V1.5.2/V1.5.3/V1.5.4 manifests/reports remain recoverable from
-# git history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
+# V1.5.1/V1.5.2/V1.5.3/V1.5.4/V1.5.5 manifests/reports remain recoverable
+# from git history at the `paper-trading-v1.0` / `paper-trading-v1.1` /
 # `paper-trading-v1.2` / `paper-trading-v1.3` / `paper-trading-v1.4` /
 # `paper-trading-v1.4.1` / `paper-trading-v1.4.2` / `paper-trading-v1.4.3`
 # / `paper-trading-v1.4.4` / `paper-trading-v1.4.5` / `paper-trading-v1.4.6`
 # / `paper-trading-v1.4.7` / `paper-trading-v1.4.8` / `paper-trading-v1.5.0`
 # / `paper-trading-v1.5.1` / `paper-trading-v1.5.2` / `paper-trading-v1.5.3`
-# / `paper-trading-v1.5.4` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.5"
+# / `paper-trading-v1.5.4` / `paper-trading-v1.5.5` tags.
+FREEZE_NAME = "PAPER_TRADING_V1.5.6"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.5"
+MANIFEST_VERSION = "1.5.6"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -738,7 +753,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.5",
+        freeze_version="1.5.6",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -1684,11 +1699,23 @@ def _verify_historical_data_capability_installed() -> bool:
     verified by `_verify_risk_data_wiring_inactive_for_active_cohort` --
     this check only proves the capability exists in source, never that
     it is active."""
+    import re
+
     path = REPO_ROOT / "src" / "data" / "tradier_provider.py"
     if not path.is_file():
         return False
     text = path.read_text(errors="ignore")
-    if "class TradierMarketDataProvider(MarketDataProvider, HistoricalDataProvider):" not in text:
+    # PAPER_TRADING_V1.5.6 added a third optional base
+    # (DteWindowOptionChainProvider) to this same class declaration --
+    # matched by substring-within-the-declaration-line, not an exact
+    # whole-line match, so a future additional base class never
+    # spuriously fails this check as long as MarketDataProvider and
+    # HistoricalDataProvider are both still present.
+    class_decl = re.search(r"class TradierMarketDataProvider\(([^)]*)\):", text)
+    if class_decl is None:
+        return False
+    bases = class_decl.group(1)
+    if "MarketDataProvider" not in bases or "HistoricalDataProvider" not in bases:
         return False
     if "async def get_bars(" not in text:
         return False

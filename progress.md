@@ -6091,3 +6091,95 @@ architectural concern remains unresolved, flagged again for a future,
 explicitly-approved safety-hardening step. See
 `STEP_23_5_FREEZE_REPORT.md` for the full architecture trace and freeze
 detail.
+
+## 2026-10-01 -- PAPER_TRADING_V1.5.6 (Step 6): DTE-aware option-chain
+retrieval hotfix
+
+**The payoff of V1.5.5's observability.** The first real production
+cycle (2026-10-01) ran cleanly under V1.5.5's new funnel -- provider
+healthy, 2 symbols succeeded, 3768 contracts seen -- but the funnel
+itself immediately surfaced a concrete defect: `expirations_eligible=0`,
+`expirations_rejected=12`, `candidates_generated=0`. Root cause,
+confirmed from source: `TradierMarketDataProvider.get_option_chain()`
+fetches its nearest `max_expirations` (6) expirations by calendar date
+with no DTE awareness at all. That day's nearest 6 were 0/1/4/5/6/7
+DTE -- every one fails the candidate engine's own `[20, 45]` DTE
+window -- while real eligible expirations existed in the market (Oct
+23/30, Nov 6/13) and were simply never fetched. Not evidence that
+policy is too restrictive; a pure retrieval/integration defect.
+
+**The fix.** A new, optional, provider-neutral capability interface,
+`src.data.provider.DteWindowOptionChainProvider` (same pattern as
+V1.5.4's `HistoricalDataProvider`) -- only `TradierMarketDataProvider`
+implements it, since Alpaca's `get_option_chain` already returns every
+expiration in one call and has no nearest-N problem. The new
+`get_option_chain_for_dte_window(symbol, *, min_dte, max_dte, as_of,
+diagnostics=None)` selects the provider's expiration calendar, filters
+to the exact `_eligible_expirations`-matching `[min_dte, max_dte]`
+window, and fetches full chains only for the (at most
+`max_expirations`, nearest-to-`min_dte`-first) selected expirations.
+`min_dte`/`max_dte` are always caller-supplied -- `QuantFilterConfig`
+remains the one DTE-policy owner, never duplicated in the provider
+(proven by a no-default-value test and an AST-based no-hardcoded-20/45
+test). Zero eligible expirations -> an empty chain, never a substituted
+out-of-window expiration. The request bound reuses the existing
+`max_expirations` config value -- no new config field, and the fetch
+never issues more requests than the pre-hotfix path for the same bound
+(14 calls before vs. 10 after, reproducing the exact 2026-10-01
+16-expiration calendar).
+
+**Lifecycle vs. scan, kept separate.** `scripts/run_validation_cycle.py`'s
+fetch loop now branches per ticker: universe-only -> DTE-windowed fetch;
+position-only -> unchanged `get_option_chain()` (lifecycle monitoring
+still needs near-term expirations, since a position can be under 20
+DTE); both -> both fetches, merged via the new
+`src.data.option_chain.merge_option_chains` (dedup by `(expiration,
+strike, right)`, earlier timestamp, lifecycle chain's underlying/source
+retained). Proven at the acceptance level against the real
+`run_validation_cycle.py` entry point, and proven that a provider which
+doesn't implement the new capability (the existing
+`FakeMarketDataProvider` in `test_review_only_daily_cycle.py`) is
+completely unaffected.
+
+**Funnel fix.** Closes a V1.5.5 observability gap the incident itself
+exposed: `CandidateFunnel.expirations_rejected` was always visible, but
+no `rejection_reasons`/`top_bottlenecks` entry ever reflected it, so an
+unrelated, coincidental rejection (e.g. `COVERED_CALL_NO_SHARES`) could
+look like the dominant bottleneck when expiration eligibility had
+actually eliminated everything. Fix derives `rejected_expirations =
+diag.expirations_seen - diag.expirations_eligible` and adds an
+`EXPIRATION_DTE_OUT_OF_RANGE` reason when positive -- zero new
+`FunnelDiagnostics` fields, since both counts were already recorded by
+V1.5.5.
+
+**Freeze-check regression fix (found and fixed, not scope creep).**
+`_verify_historical_data_capability_installed` used an exact-string
+match for `TradierMarketDataProvider`'s two-base-class declaration,
+which broke the moment a third base class
+(`DteWindowOptionChainProvider`) was added. Replaced with a regex-based
+check that extracts the base-class list and confirms both
+`MarketDataProvider` and `HistoricalDataProvider` are present as
+substrings -- future-proof against further base classes.
+
+**Testing.** 22 new Tradier-provider tests (selection algorithm,
+boundary DTE inclusion/exclusion, the exact 2026-10-01 calendar
+reproduction, bounded deterministic selection, date-semantics parity
+with `candidate_generation.py`, no hardcoded 20/45, diagnostics
+accuracy, request-count comparison, rate-limit priority, no
+secret/token), 6 new `merge_option_chains` tests, 5 new candidate-funnel
+tests (including a direct 2026-10-01-shape reproduction against the
+real pipeline), 3 new acceptance tests proving the real runner script's
+branching and merge behavior. Full suite: 3740 passed, 6 skipped, 0
+failed (up from 3704). `make verify-freeze` against the regenerated
+`PAPER_TRADING_V1.5.6` manifest: every check passes, including the
+freeze-check regex fix.
+
+**What remains open.** No universe expansion, threshold change, strategy
+activation, `risk_data_wiring` activation, or successor-cohort creation.
+Two architecture issues remain explicitly flagged, not fixed this step:
+(1) `src.review.confirmation`'s fresh-quote refetch at confirmation time
+is still nearest-N, unfixed -- the same root cause, a different call
+site, deliberately out of this narrow hotfix's scope; (2) the
+market-hours-gate-vs-lifecycle-monitoring concern from V1.5.1, unchanged
+by this step. See `STEP_23_6_FREEZE_REPORT.md` for the full architecture
+trace, request-count comparison, and invariant-preservation proof.
