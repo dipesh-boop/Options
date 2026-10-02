@@ -408,3 +408,63 @@ class TestExpirationDteOutOfRangeRejectionReason:
         reasons_by_key = {(r.stage, r.reason): r.count for r in funnel.rejection_reasons}
         assert ("expiration", "EXPIRATION_DTE_OUT_OF_RANGE") in reasons_by_key
         assert reasons_by_key[("expiration", "EXPIRATION_DTE_OUT_OF_RANGE")] == 1
+
+
+class TestGenerationExceptionFunnelAggregationV157:
+    """PAPER_TRADING_V1.5.7: proves the exact 2026-10-02 funnel shape
+    (construction_successes > 0, quant_evaluations == 0,
+    candidates_generated == 0, with NOTHING explaining why) is now fully
+    explained by `generation_exceptions`, built against the real
+    pipeline (`_scan_with_diagnostics` -> `generate_candidates` ->
+    `scan_and_rank_opportunities`), not hand-faked counts."""
+
+    def _mismatched_timestamp_chain(self) -> OptionChain:
+        # chain.timestamp AFTER NOW -- the exact 2026-10-02 ordering bug,
+        # reproduced through the real generate_candidates call path this
+        # module's own _scan_with_diagnostics helper drives.
+        later = NOW + timedelta(seconds=5)
+        underlying = UnderlyingQuote(symbol="SPY", bid=454.5, ask=455.5, last=455.0, volume=1_000_000, timestamp=later, source="tradier")
+        contracts = [
+            OptionContract(
+                underlying="SPY", option_symbol=f"SPY{EXP.isoformat()}P{int(strike*1000):08d}", expiration=EXP, strike=strike,
+                right=OptionRight.PUT, bid=3.0, ask=3.2, last=3.1, volume=vol, open_interest=oi,
+                delta=delta, iv=0.18, underlying_price=455.0, timestamp=later, source="tradier",
+            )
+            for strike, delta, oi, vol in [(450.0, -0.20, 1000, 500), (445.0, -0.12, 800, 300)]
+        ]
+        return OptionChain(underlying=underlying, contracts=contracts, timestamp=later, source="tradier")
+
+    def test_reproduces_the_2026_10_02_shape_fully_explained_by_generation_exceptions(self):
+        universe = [UniverseEntry(ticker="SPY", sector="ETF")]
+        chains = {"SPY": self._mismatched_timestamp_chain()}
+        # `now=NOW` is EARLIER than the chain's own timestamp -- the
+        # exact bug. `_scan_with_diagnostics` passes `now=NOW` through
+        # to generate_candidates internally.
+        result, diag = _scan_with_diagnostics(universe, chains, [StrategyType.CASH_SECURED_PUT], _portfolio(5_000_000.0))
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-gen-exc", generated_at=NOW, universe_tickers=("SPY",), chain_received_tickers=frozenset({"SPY"}),
+            diagnostics_by_ticker=diag, scan_result=result, candidates_persisted=0,
+        )
+        # the exact observed 2026-10-02 shape
+        assert funnel.strategy_attempts == 1
+        assert funnel.construction_successes == 0  # never falsely counted
+        assert funnel.generation_exceptions == 1  # now explains the loss
+        assert funnel.quant_evaluations == 0  # never falsely incremented
+        assert funnel.candidates_generated == 0
+        strat = next(s for s in funnel.by_strategy if s.strategy == "CASH_SECURED_PUT")
+        assert strat.generation_exceptions == 1
+        assert strat.construction_successes == 0
+        assert any(r.stage == "generation_exception" and r.reason == "ValidationError" for r in funnel.rejection_reasons)
+        assert funnel.zero_candidate_summary is not None
+        assert "generation_exceptions=1" in funnel.zero_candidate_summary
+
+    def test_no_generation_exceptions_field_is_zero_and_absent_from_reasons(self):
+        universe = [UniverseEntry(ticker="SPY", sector="ETF")]
+        chains = {"SPY": _spy_chain()}
+        result, diag = _scan_with_diagnostics(universe, chains, [StrategyType.CASH_SECURED_PUT], _portfolio(5_000_000.0))
+        funnel = build_candidate_funnel(
+            cycle_id="cyc-no-gen-exc", generated_at=NOW, universe_tickers=("SPY",), chain_received_tickers=frozenset({"SPY"}),
+            diagnostics_by_ticker=diag, scan_result=result, candidates_persisted=0,
+        )
+        assert funnel.generation_exceptions == 0
+        assert not any(r.stage == "generation_exception" for r in funnel.rejection_reasons)

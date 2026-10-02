@@ -373,6 +373,23 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         if close is not None:
             await close()
 
+    # PAPER_TRADING_V1.5.7: a SECOND, LATER timestamp, captured only now
+    # that every chain fetch above has actually completed -- distinct
+    # from `now` (captured before the fetch, and still the cycle's own
+    # audit/lifecycle/control-loop timestamp, unchanged below). Every
+    # `OptionChain.timestamp` this cycle's fetch loop produced was
+    # necessarily stamped no later than this instant, so
+    # `evaluation_as_of >=` every `chain.timestamp` this scan will see --
+    # the exact invariant a `TradeProposal` built from one of those
+    # chains needs (`timestamp >= data_timestamp`) to satisfy its own
+    # (unmodified, zero-tolerance) integrity check honestly, rather than
+    # by chance. This is the fix for the 2026-10-02 incident: `now`
+    # alone, captured before the fetch, could be EARLIER than a chain
+    # timestamp the fetch produced moments later, failing that same
+    # check even though the data was perfectly fresh.
+    evaluation_as_of = datetime.now(timezone.utc)
+    _line("opportunity-evaluation timestamp (captured after market-data fetch)", evaluation_as_of.isoformat())
+
     for ticker in sorted(dte_selection_diagnostics):
         diag = dte_selection_diagnostics[ticker]
         _line(
@@ -412,6 +429,11 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             # candidate (if any) is found, ranked, or persisted below.
             # See `src.workflows.candidate_funnel` module docstring.
             collect_candidate_funnel=True,
+            # PAPER_TRADING_V1.5.7: see OpportunityScanConfig
+            # .evaluation_as_of's own field comment -- this scan, and
+            # every TradeProposal it builds, is evaluated against the
+            # POST-FETCH timestamp, never the pre-fetch cycle `now`.
+            evaluation_as_of=evaluation_as_of,
         ),
     )
     result = run_outer_cycle(inputs)
@@ -438,9 +460,15 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
             # evaluate_trade_proposal call it already made internally, on the
             # exact same inputs, to recover the full result for the durable
             # review snapshot. Pure re-computation, not a second Risk Engine.
+            # PAPER_TRADING_V1.5.7: `evaluation_as_of`, not `now` -- the
+            # exact same timestamp the scan itself used to evaluate this
+            # candidate (see `OpportunityScanConfig.evaluation_as_of`),
+            # so this re-run reproduces the scan's own decision rather
+            # than re-evaluating the same chain against an earlier clock
+            # reading.
             full_risk = evaluate_trade_proposal(
                 best.candidate.proposal, portfolio, best.quantitative_analysis, chain,
-                broker_capabilities, limits=limits, now=now,
+                broker_capabilities, limits=limits, now=evaluation_as_of,
             )
             policy_name = policies_for_strategy(StrategyKind(best.candidate.proposal.strategy.value))[0].name
             candidate = ReviewedCandidate(

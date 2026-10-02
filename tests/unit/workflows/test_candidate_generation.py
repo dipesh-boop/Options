@@ -2,7 +2,7 @@
 filter, and deterministic TradeProposal generation."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -298,3 +298,176 @@ class TestCandidateEligibleStrategies:
     def test_candidate_eligible_strategies_preserves_configured_order(self):
         ordered = (StrategyType.PUT_CREDIT_SPREAD, StrategyType.CASH_SECURED_PUT)
         assert candidate_eligible_strategies(ordered) == ordered
+
+
+class TestTimestampDomainIntegrityRegressionV157:
+    """PAPER_TRADING_V1.5.7: deterministic reproduction of the exact
+    2026-10-02 production defect, and proof of its fix -- NO network
+    access, NO sleep(), NO wall-clock dependency.
+
+    Root cause: `scripts/run_validation_cycle.py` captured its cycle
+    `now` BEFORE fetching market data; `TradierMarketDataProvider
+    .get_option_chain_for_dte_window` then stamped `chain.timestamp`
+    with a LATER `datetime.now(timezone.utc)`, during the fetch. A
+    `TradeProposal` built with `timestamp=<pre-fetch now>` and
+    `data_timestamp=chain.timestamp` (later) therefore always violated
+    `TradeProposal`'s own (correct, never-weakened) integrity check:
+    `data_timestamp cannot be after the proposal timestamp`.
+
+    `T` below stands in for the pre-fetch cycle `now`; `T + delta`
+    stands in for the chain's own (later, genuinely fresher) timestamp.
+    """
+
+    T = NOW
+    T_PLUS_DELTA = NOW + timedelta(seconds=5)
+
+    def _chain_at(self, timestamp):
+        return make_chain([make_put(95.0, -0.20, bid=1.95, ask=2.05)], timestamp=timestamp)
+
+    def test_reproduces_the_2026_10_02_incident_using_the_broken_pre_fetch_ordering(self):
+        """Calling generate_candidates with `now` EARLIER than
+        `chain.timestamp` (the exact pre-V1.5.7 ordering bug) must no
+        longer raise or silently vanish -- it must be caught internally
+        and recorded as a generation_exception, never a crash, never a
+        false construction_success."""
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        chain = self._chain_at(self.T_PLUS_DELTA)
+        diag = FunnelDiagnostics(ticker="XYZ")
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), chain, [StrategyType.CASH_SECURED_PUT], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=self.T, diagnostics=diag,
+        )
+        # the real chain timestamp is untouched -- never falsified
+        # backwards to satisfy the check
+        assert chain.timestamp == self.T_PLUS_DELTA
+        # no Candidate was produced for this mis-ordered call
+        assert candidates == []
+        # but the failure IS now visible, correctly categorized, and
+        # never confused with a legitimate construction rejection
+        assert ("CASH_SECURED_PUT", "generation_exception", "ValidationError") in diag.strategy_events
+        assert not any(evt[1] == "construction_success" for evt in diag.strategy_events)
+
+    def test_correct_post_fetch_evaluation_timestamp_produces_a_valid_candidate(self):
+        """The actual V1.5.7 fix: calling generate_candidates with `now`
+        AT OR AFTER `chain.timestamp` (the corrected ordering --
+        `evaluation_as_of` captured after the fetch completes) produces
+        a real Candidate, with a genuinely valid TradeProposal, no
+        construction failure, and no future-data validator weakened or
+        bypassed to get there."""
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        chain = self._chain_at(self.T_PLUS_DELTA)
+        evaluation_as_of = self.T_PLUS_DELTA + timedelta(seconds=1)
+        diag = FunnelDiagnostics(ticker="XYZ")
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), chain, [StrategyType.CASH_SECURED_PUT], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=evaluation_as_of, diagnostics=diag,
+        )
+        assert len(candidates) == 1
+        proposal = candidates[0].proposal
+        # the required invariant, satisfied honestly -- never by
+        # tolerance, never by falsifying either timestamp
+        assert proposal.timestamp >= proposal.data_timestamp
+        assert proposal.data_timestamp == self.T_PLUS_DELTA  # the real chain timestamp, untouched
+        assert proposal.timestamp == evaluation_as_of  # a genuine evaluation time, not a fabricated value
+        assert ("CASH_SECURED_PUT", "construction_success", None) in diag.strategy_events
+        assert not any(evt[1] == "generation_exception" for evt in diag.strategy_events)
+
+    def test_exactly_equal_timestamps_are_valid_not_a_boundary_failure(self):
+        chain = self._chain_at(self.T_PLUS_DELTA)
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), chain, [StrategyType.CASH_SECURED_PUT], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=self.T_PLUS_DELTA,
+        )
+        assert len(candidates) == 1
+        assert candidates[0].proposal.timestamp == candidates[0].proposal.data_timestamp
+
+    def test_future_data_integrity_validator_itself_is_unmodified_and_still_rejects_bad_input(self):
+        """Direct proof this fix never weakens, removes, or adds
+        tolerance to TradeProposal's own integrity check -- constructing
+        one directly with data_timestamp after timestamp must still
+        raise, exactly as before this step."""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from src.llm.schemas import Conviction, LegSide, OptionLeg, OptionRight, StrategyType as _ST, TradeDirection, TradeProposal
+
+        with _pytest.raises(ValidationError, match="data_timestamp cannot be after the proposal timestamp"):
+            TradeProposal(
+                proposal_id="direct-1", timestamp=self.T, ticker="XYZ", strategy=_ST.CASH_SECURED_PUT,
+                market_regime="normal", expiration=EXPIRATION,
+                legs=[OptionLeg(right=OptionRight.PUT, strike=95.0, side=LegSide.SELL)],
+                direction=TradeDirection.NEUTRAL, contracts_requested=1, target_entry=1.0, profit_target=0.5,
+                management_dte=21, thesis="t", risk_thesis="rt", confidence=Conviction.MEDIUM,
+                data_sources=["test"], data_timestamp=self.T_PLUS_DELTA, invalidation_conditions=["x"],
+            )
+
+
+class TestGenerationExceptionObservabilityV157:
+    """PAPER_TRADING_V1.5.7: a candidate-generation exception (any
+    exception raised during a strategy's own TradeProposal construction,
+    not just the timestamp-domain one above) must never silently
+    disappear, must never falsely increment construction_successes, and
+    must never leak a raw/uncontrolled exception payload."""
+
+    def test_an_exception_for_one_strategy_does_not_block_a_later_strategy_on_the_same_ticker(self):
+        """Direct proof of the section-15 "strategy anomaly" fix: before
+        this step, an exception raised inside the CASH_SECURED_PUT block
+        aborted generate_candidates entirely, so COVERED_CALL/
+        PUT_CREDIT_SPREAD's own diagnostic calls never ran at all for
+        that ticker. After this fix, CASH_SECURED_PUT's failure is
+        isolated to itself -- PUT_CREDIT_SPREAD, requested in the same
+        call, still gets its own fair attempt."""
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        bad_now = NOW  # earlier than the chain timestamp below -- breaks CSP's proposal construction
+        # A chain whose timestamp is after `bad_now` -- the exact mismatch shape.
+        later_chain = make_chain(
+            [make_put(95.0, -0.20, bid=1.95, ask=2.05), make_put(90.0, -0.10, bid=0.97, ask=1.03)],
+            timestamp=NOW + timedelta(seconds=5),
+        )
+        diag = FunnelDiagnostics(ticker="XYZ")
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), later_chain,
+            [StrategyType.CASH_SECURED_PUT, StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=bad_now, diagnostics=diag,
+        )
+        assert candidates == []  # both strategies build against the same mis-ordered now/chain
+        strategies_with_events = {evt[0] for evt in diag.strategy_events}
+        # the critical assertion: PUT_CREDIT_SPREAD's events exist at
+        # all -- proving generate_candidates did not abort after CSP's
+        # exception the way it did before this fix
+        assert "PUT_CREDIT_SPREAD" in strategies_with_events
+        assert ("CASH_SECURED_PUT", "generation_exception", "ValidationError") in diag.strategy_events
+        assert ("PUT_CREDIT_SPREAD", "generation_exception", "ValidationError") in diag.strategy_events
+
+    def test_generation_exception_category_is_bounded_never_the_raw_message(self):
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        later_chain = make_chain([make_put(95.0, -0.20, bid=1.95, ask=2.05)], timestamp=NOW + timedelta(seconds=5))
+        diag = FunnelDiagnostics(ticker="XYZ")
+        generate_candidates(
+            UniverseEntry("XYZ", "TECH"), later_chain, [StrategyType.CASH_SECURED_PUT], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=NOW, diagnostics=diag,
+        )
+        event = next(e for e in diag.strategy_events if e[1] == "generation_exception")
+        category = event[2]
+        # a short, bounded exception-class name -- never a multi-line
+        # pydantic error dump, never field values, never a provider
+        # payload fragment
+        assert category == "ValidationError"
+        assert len(category) < 64
+        assert "\n" not in category
+
+    def test_generate_candidates_never_raises_for_this_failure_mode_even_without_diagnostics(self):
+        """The isolation itself must not depend on the caller having
+        opted into diagnostics -- src.workflows.morning_scan calls
+        generate_candidates with diagnostics=None and must be protected
+        too."""
+        later_chain = make_chain([make_put(95.0, -0.20, bid=1.95, ask=2.05)], timestamp=NOW + timedelta(seconds=5))
+        candidates = generate_candidates(
+            UniverseEntry("XYZ", "TECH"), later_chain, [StrategyType.CASH_SECURED_PUT], QuantFilterConfig(),
+            LIMITS, _empty_portfolio(), "normal", now=NOW,  # diagnostics omitted entirely
+        )
+        assert candidates == []  # no exception propagated

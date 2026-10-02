@@ -198,6 +198,51 @@ class TestOpportunityScanWiring:
         assert result.opportunity_decision_snapshot is None
 
 
+class TestEvaluationAsOfWiringV157:
+    """PAPER_TRADING_V1.5.7: `OpportunityScanConfig.evaluation_as_of`
+    reproduces, and fixes, the exact 2026-10-02 ordering defect at the
+    real `run_outer_cycle` entry point -- never by touching
+    `OuterCycleInputs.as_of` itself, which must remain the cycle's own
+    audit/lifecycle/control-loop timestamp, unchanged either way."""
+
+    def test_default_none_falls_back_to_inputs_as_of_reproducing_the_ordering_bug(self):
+        # inputs.as_of (NOW) is EARLIER than the chain's own timestamp --
+        # the exact pre-fetch-vs-post-fetch mismatch. evaluation_as_of
+        # left unset (every pre-V1.5.7 caller's behavior).
+        later_chain = _scan_chain(timestamp=NOW + timedelta(seconds=5))
+        cfg = _scan_config(chains_by_ticker={"QQQ": later_chain}, collect_candidate_funnel=True)
+        result = run_outer_cycle(_base_inputs(opportunity_scan=cfg))
+        assert result.opportunity_scan_result.candidates_generated == 0
+        assert result.candidate_funnel is not None
+        assert result.candidate_funnel.generation_exceptions >= 1
+        assert result.candidate_funnel.quant_evaluations == 0  # never falsely incremented
+
+    def test_explicit_evaluation_as_of_after_the_chain_timestamp_fixes_it(self):
+        later_chain = _scan_chain(timestamp=NOW + timedelta(seconds=5))
+        cfg = _scan_config(
+            chains_by_ticker={"QQQ": later_chain}, collect_candidate_funnel=True,
+            evaluation_as_of=NOW + timedelta(seconds=10),
+        )
+        result = run_outer_cycle(_base_inputs(opportunity_scan=cfg))
+        assert result.opportunity_scan_result.candidates_generated >= 1
+        assert result.candidate_funnel.generation_exceptions == 0
+        for scanned in result.opportunity_scan_result.scanned:
+            assert scanned.candidate.proposal.timestamp >= scanned.candidate.proposal.data_timestamp
+
+    def test_inputs_as_of_itself_is_never_moved_by_evaluation_as_of(self):
+        # OuterCycleInputs.as_of drives cycle_id/lifecycle/control-loop
+        # semantics elsewhere -- evaluation_as_of must never leak back
+        # into it.
+        later_chain = _scan_chain(timestamp=NOW + timedelta(seconds=5))
+        cfg = _scan_config(
+            chains_by_ticker={"QQQ": later_chain}, collect_candidate_funnel=True,
+            evaluation_as_of=NOW + timedelta(seconds=10),
+        )
+        inputs = _base_inputs(opportunity_scan=cfg)
+        run_outer_cycle(inputs)
+        assert inputs.as_of == NOW  # untouched
+
+
 class TestTicketMonitorWiring:
     def test_stale_ticket_is_repriced_and_reported(self):
         ticket = _pending_ticket()

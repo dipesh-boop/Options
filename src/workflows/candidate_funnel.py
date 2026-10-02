@@ -102,6 +102,14 @@ class StrategyFunnelSummary(BaseModel):
     ineligible: int
     construction_successes: int
     construction_rejections: int
+    # PAPER_TRADING_V1.5.7: a liquid, in-range contract was found, but
+    # the final TradeProposal construction step itself raised (e.g. a
+    # data_timestamp > timestamp integrity failure) -- distinct from
+    # both construction_rejections (a legitimate policy rejection, e.g.
+    # liquidity) and construction_successes (a real, returned Candidate).
+    # Never counted toward quant_evaluations -- a candidate that failed
+    # here never reached Quant at all.
+    generation_exceptions: int
     quant_passed: int
     quant_rejected: int
     risk_passed: int
@@ -141,6 +149,13 @@ class CandidateFunnel(BaseModel):
     construction_attempts: int
     construction_successes: int
     construction_rejections: int
+    # PAPER_TRADING_V1.5.7: see StrategyFunnelSummary.generation_exceptions
+    # -- the total across every ticker/strategy this cycle. A positive
+    # count here, with quant_evaluations unaffected, means a candidate
+    # was found and then lost to a proposal-construction exception
+    # BEFORE Quant ever ran on it -- never silently absent from this
+    # funnel the way it was before this field existed.
+    generation_exceptions: int
 
     quant_evaluations: int
     quant_passed: int
@@ -199,6 +214,7 @@ def build_candidate_funnel(
     construction_attempts = 0
     construction_successes = 0
     construction_rejections = 0
+    generation_exceptions = 0
     reason_counter: Counter[tuple[str, str]] = Counter()
     per_strategy: dict[str, dict[str, int]] = {}
 
@@ -207,7 +223,7 @@ def build_candidate_funnel(
             name,
             dict(
                 attempts=0, ineligible=0, construction_successes=0, construction_rejections=0,
-                quant_passed=0, quant_rejected=0, risk_passed=0, risk_rejected=0,
+                generation_exceptions=0, quant_passed=0, quant_rejected=0, risk_passed=0, risk_rejected=0,
             ),
         )
 
@@ -263,6 +279,21 @@ def build_candidate_funnel(
                 bucket["construction_rejections"] += 1
                 if reason:
                     reason_counter[("construction", reason)] += 1
+            elif event_type == "generation_exception":
+                # PAPER_TRADING_V1.5.7: deliberately NOT counted toward
+                # construction_attempts/construction_successes/
+                # construction_rejections -- a generation_exception means
+                # a liquid, in-range contract WAS found (the construction
+                # step itself never ran to a pass/fail verdict), but the
+                # downstream TradeProposal build raised before a
+                # Candidate could ever be returned. Also never counted
+                # toward quant_evaluations below, which is derived solely
+                # from `scan_result.scanned` -- a candidate that failed
+                # here never reached that list at all.
+                generation_exceptions += 1
+                bucket["generation_exceptions"] += 1
+                if reason:
+                    reason_counter[("generation_exception", reason)] += 1
 
         by_symbol.append(
             SymbolFunnelSummary(
@@ -339,8 +370,9 @@ def build_candidate_funnel(
         zero_candidate_summary = (
             f"symbols_scanned={symbols_requested}, chains_usable={quality_passed}, "
             f"contracts_examined={contracts_seen_total}, strategy_attempts={strategy_attempts}, "
-            f"construction_successes={construction_successes}, quant_passed={quant_passed}, "
-            f"risk_passed={risk_passed}, dominant_rejections={list(top_bottlenecks[:3])}"
+            f"construction_successes={construction_successes}, generation_exceptions={generation_exceptions}, "
+            f"quant_passed={quant_passed}, risk_passed={risk_passed}, "
+            f"dominant_rejections={list(top_bottlenecks[:3])}"
         )
 
     return CandidateFunnel(
@@ -360,6 +392,7 @@ def build_candidate_funnel(
         construction_attempts=construction_attempts,
         construction_successes=construction_successes,
         construction_rejections=construction_rejections,
+        generation_exceptions=generation_exceptions,
         quant_evaluations=quant_evaluations, quant_passed=quant_passed, quant_rejected=quant_rejected,
         risk_evaluations=risk_evaluations, risk_passed=risk_passed, risk_rejected=risk_rejected,
         candidates_generated=candidates_generated, candidates_ranked=candidates_ranked,

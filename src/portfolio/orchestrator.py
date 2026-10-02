@@ -110,6 +110,31 @@ class OpportunityScanConfig:
     # `src.workflows.candidate_funnel`'s own docstring for why this can
     # never change `scan_and_rank_opportunities`'s own decision).
     collect_candidate_funnel: bool = False
+    # PAPER_TRADING_V1.5.7: optional, additive override for the `now`
+    # `scan_and_rank_opportunities` (and therefore every
+    # `TradeProposal.timestamp` it produces) is evaluated against.
+    # `None` (every caller before this step) falls back to
+    # `OuterCycleInputs.as_of` -- byte-identical to pre-V1.5.7 behavior.
+    #
+    # Exists to fix a real production defect (the 2026-10-02 incident):
+    # `OuterCycleInputs.as_of` is captured once, BEFORE market data is
+    # fetched, and is also the cycle's audit/lifecycle/control-loop
+    # timestamp -- it must never move for those purposes (see this
+    # module's own docstring on `as_of`'s other uses). But
+    # `chains_by_ticker`'s own `OptionChain.timestamp` values are
+    # necessarily stamped DURING that same fetch, strictly AFTER
+    # `as_of` was captured -- so a `TradeProposal` built with
+    # `timestamp=as_of` and `data_timestamp=chain.timestamp` can fail
+    # `TradeProposal`'s own (correct, zero-tolerance) "data_timestamp
+    # cannot be after the proposal timestamp" integrity check, even
+    # though the chain itself is perfectly fresh. A caller that fetches
+    # its own market data (`scripts/run_validation_cycle.py`) should
+    # capture a second, LATER timestamp once that fetch completes and
+    # supply it here -- guaranteeing `evaluation_as_of >=` every chain
+    # timestamp that fetch produced, hence every `TradeProposal` this
+    # scan builds satisfies its own integrity check by construction,
+    # never by loosening that check itself.
+    evaluation_as_of: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -217,10 +242,16 @@ def _run_opportunity_scan_stage(
     if cfg.collect_candidate_funnel:
         diagnostics_by_ticker = {e.ticker: FunnelDiagnostics(ticker=e.ticker) for e in cfg.universe}
 
+    # PAPER_TRADING_V1.5.7: `cfg.evaluation_as_of` (see its own field
+    # comment above) when the caller supplied one, else `inputs.as_of`
+    # unchanged -- every pre-V1.5.7 caller leaves `evaluation_as_of`
+    # unset and sees byte-identical behavior.
+    scan_as_of = cfg.evaluation_as_of if cfg.evaluation_as_of is not None else inputs.as_of
+
     result = scan_and_rank_opportunities(
         list(cfg.universe), cfg.chains_by_ticker, list(cfg.strategies), cfg.quant_filter,
         inputs.limits, inputs.portfolio, cfg.market_regime, cfg.broker_capabilities,
-        now=inputs.as_of, proposal_id_prefix=cfg.proposal_id_prefix, no_trade_hurdle=cfg.no_trade_hurdle,
+        now=scan_as_of, proposal_id_prefix=cfg.proposal_id_prefix, no_trade_hurdle=cfg.no_trade_hurdle,
         diagnostics_by_ticker=diagnostics_by_ticker,
     )
 
@@ -236,7 +267,7 @@ def _run_opportunity_scan_stage(
         # later persistence decision, since `ControlCycleRecord` (which
         # carries this funnel) is saved before that decision is made.
         candidate_funnel = build_candidate_funnel(
-            cycle_id=inputs.cycle_id, generated_at=inputs.as_of,
+            cycle_id=inputs.cycle_id, generated_at=scan_as_of,
             universe_tickers=tuple(e.ticker for e in cfg.universe),
             chain_received_tickers=frozenset(cfg.chains_by_ticker.keys()),
             diagnostics_by_ticker=diagnostics_by_ticker, scan_result=result,

@@ -37,7 +37,9 @@ class FunnelDiagnostics:
     expirations_seen: int = 0
     expirations_eligible: int = 0
     # (strategy_tag, event_type, reason) where event_type is one of
-    # "attempt" | "ineligible" | "construction_success" | "construction_rejected".
+    # "attempt" | "ineligible" | "construction_success" | "construction_rejected"
+    # | "generation_exception" (PAPER_TRADING_V1.5.7 -- see
+    # record_generation_exception below).
     strategy_events: list[tuple[str, str, str | None]] = field(default_factory=list)
 
     def record_chain(self, *, contracts_seen: int, stale: bool) -> None:
@@ -58,3 +60,25 @@ class FunnelDiagnostics:
         self.strategy_events.append(
             (strategy, "construction_success" if success else "construction_rejected", reason)
         )
+
+    def record_generation_exception(self, strategy: str, category: str) -> None:
+        """PAPER_TRADING_V1.5.7: a strategy's proposal-construction step
+        (`src.workflows.candidate_generation._build_proposal`) raised
+        AFTER a liquid, in-range contract was already found -- e.g. the
+        2026-10-02 production incident, where `TradeProposal`'s own
+        `data_timestamp > timestamp` integrity check rejected a proposal
+        built from a cycle-start `now` captured before the market-data
+        fetch that produced a later `chain.timestamp`. Before this
+        method existed, this failure mode left NO diagnostic at all (see
+        `record_construction`'s own call site in `candidate_generation.py`,
+        which now only fires once construction has actually succeeded) --
+        the candidate simply vanished between `construction_successes`
+        and `quant_evaluations` with nothing explaining why.
+
+        `category` must be a small, bounded, non-secret classifier (this
+        codebase passes `type(exc).__name__`, e.g. `"ValidationError"`)
+        -- never the raw exception message/args, which could in
+        principle echo back field values, a provider payload fragment,
+        or other content this module has no business persisting into a
+        funnel every operator can see."""
+        self.strategy_events.append((strategy, "generation_exception", category))

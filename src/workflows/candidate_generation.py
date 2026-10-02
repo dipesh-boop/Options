@@ -301,18 +301,31 @@ def generate_candidates(
                 best, best_score = (exp, contract), score
         if best is not None:
             exp, contract = best
-            if diagnostics is not None:
-                diagnostics.record_construction("CASH_SECURED_PUT", success=True, reason=None)
-            proposal = _build_proposal(
-                proposal_id=_next_id("csp", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.CASH_SECURED_PUT, expiration=exp,
-                legs=[OptionLeg(right=OptionRight.PUT, strike=contract.strike, side=LegSide.SELL)],
-                target_entry=contract.mid, market_regime=market_regime,
-                thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE, IV {contract.iv:.0%}" if contract.iv is not None else f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE",
-                risk_thesis=f"Max loss capped at strike ({contract.strike:g}) minus premium collected, times 100 shares per contract.",
-                invalidation_conditions=[f"underlying closes below {contract.strike:g} before expiration"],
-                data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
-            )
-            candidates.append(Candidate(proposal=proposal, entry_delta=contract.delta, entry_iv=contract.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
+            # PAPER_TRADING_V1.5.7: construction success is recorded ONLY
+            # after `_build_proposal` actually succeeds -- previously this
+            # was recorded first, so a proposal-construction exception
+            # (e.g. the 2026-10-02 incident's data_timestamp > timestamp
+            # TradeProposal integrity failure) left a false
+            # "construction_success" diagnostic with no corresponding
+            # Candidate ever returned. See `FunnelDiagnostics
+            # .record_generation_exception`'s own docstring.
+            try:
+                proposal = _build_proposal(
+                    proposal_id=_next_id("csp", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.CASH_SECURED_PUT, expiration=exp,
+                    legs=[OptionLeg(right=OptionRight.PUT, strike=contract.strike, side=LegSide.SELL)],
+                    target_entry=contract.mid, market_regime=market_regime,
+                    thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE, IV {contract.iv:.0%}" if contract.iv is not None else f"Systematic screen: {abs(contract.delta):.2f}-delta cash-secured put on {ticker}, {(exp - now.date()).days} DTE",
+                    risk_thesis=f"Max loss capped at strike ({contract.strike:g}) minus premium collected, times 100 shares per contract.",
+                    invalidation_conditions=[f"underlying closes below {contract.strike:g} before expiration"],
+                    data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
+                )
+            except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
+                if diagnostics is not None:
+                    diagnostics.record_generation_exception("CASH_SECURED_PUT", type(exc).__name__)
+            else:
+                if diagnostics is not None:
+                    diagnostics.record_construction("CASH_SECURED_PUT", success=True, reason=None)
+                candidates.append(Candidate(proposal=proposal, entry_delta=contract.delta, entry_iv=contract.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
 
     if StrategyType.COVERED_CALL in strategies:
         holding = portfolio.underlying_holdings.get(ticker)
@@ -332,18 +345,23 @@ def generate_candidates(
                     best, best_score = (exp, contract), score
             if best is not None:
                 exp, contract = best
-                if diagnostics is not None:
-                    diagnostics.record_construction("COVERED_CALL", success=True, reason=None)
-                proposal = _build_proposal(
-                    proposal_id=_next_id("cc", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.COVERED_CALL, expiration=exp,
-                    legs=[OptionLeg(right=OptionRight.CALL, strike=contract.strike, side=LegSide.SELL)],
-                    target_entry=contract.mid, market_regime=market_regime,
-                    thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta covered call on {ticker} against {holding.shares} held shares, {(exp - now.date()).days} DTE",
-                    risk_thesis=f"Upside capped at strike ({contract.strike:g}); downside is the underlying shares' own risk, unchanged by selling the call.",
-                    invalidation_conditions=[f"underlying closes above {contract.strike:g} before expiration"],
-                    data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
-                )
-                candidates.append(Candidate(proposal=proposal, entry_delta=contract.delta, entry_iv=contract.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
+                try:
+                    proposal = _build_proposal(
+                        proposal_id=_next_id("cc", exp, (contract.strike,)), ticker=ticker, strategy=StrategyType.COVERED_CALL, expiration=exp,
+                        legs=[OptionLeg(right=OptionRight.CALL, strike=contract.strike, side=LegSide.SELL)],
+                        target_entry=contract.mid, market_regime=market_regime,
+                        thesis=f"Systematic screen: {abs(contract.delta):.2f}-delta covered call on {ticker} against {holding.shares} held shares, {(exp - now.date()).days} DTE",
+                        risk_thesis=f"Upside capped at strike ({contract.strike:g}); downside is the underlying shares' own risk, unchanged by selling the call.",
+                        invalidation_conditions=[f"underlying closes above {contract.strike:g} before expiration"],
+                        data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
+                    if diagnostics is not None:
+                        diagnostics.record_generation_exception("COVERED_CALL", type(exc).__name__)
+                else:
+                    if diagnostics is not None:
+                        diagnostics.record_construction("COVERED_CALL", success=True, reason=None)
+                    candidates.append(Candidate(proposal=proposal, entry_delta=contract.delta, entry_iv=contract.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
         elif diagnostics is not None:
             diagnostics.record_strategy_ineligible("COVERED_CALL", "COVERED_CALL_NO_SHARES")
 
@@ -373,21 +391,26 @@ def generate_candidates(
                 best, best_score = (exp, short_put, long_put, credit), score
         if best is not None:
             exp, short_put, long_put, credit = best
-            if diagnostics is not None:
-                diagnostics.record_construction("PUT_CREDIT_SPREAD", success=True, reason=None)
-            proposal = _build_proposal(
-                proposal_id=_next_id("pcs", exp, (short_put.strike, long_put.strike)), ticker=ticker, strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=exp,
-                legs=[
-                    OptionLeg(right=OptionRight.PUT, strike=short_put.strike, side=LegSide.SELL),
-                    OptionLeg(right=OptionRight.PUT, strike=long_put.strike, side=LegSide.BUY),
-                ],
-                target_entry=credit, market_regime=market_regime,
-                thesis=f"Systematic screen: {abs(short_put.delta):.2f}-delta put credit spread on {ticker} ({short_put.strike:g}/{long_put.strike:g}), {(exp - now.date()).days} DTE",
-                risk_thesis=f"Max loss capped at strike width ({short_put.strike - long_put.strike:g}) minus credit collected, times 100 shares per contract.",
-                invalidation_conditions=[f"underlying closes below {long_put.strike:g} before expiration"],
-                data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
-            )
-            candidates.append(Candidate(proposal=proposal, entry_delta=short_put.delta, entry_iv=short_put.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
+            try:
+                proposal = _build_proposal(
+                    proposal_id=_next_id("pcs", exp, (short_put.strike, long_put.strike)), ticker=ticker, strategy=StrategyType.PUT_CREDIT_SPREAD, expiration=exp,
+                    legs=[
+                        OptionLeg(right=OptionRight.PUT, strike=short_put.strike, side=LegSide.SELL),
+                        OptionLeg(right=OptionRight.PUT, strike=long_put.strike, side=LegSide.BUY),
+                    ],
+                    target_entry=credit, market_regime=market_regime,
+                    thesis=f"Systematic screen: {abs(short_put.delta):.2f}-delta put credit spread on {ticker} ({short_put.strike:g}/{long_put.strike:g}), {(exp - now.date()).days} DTE",
+                    risk_thesis=f"Max loss capped at strike width ({short_put.strike - long_put.strike:g}) minus credit collected, times 100 shares per contract.",
+                    invalidation_conditions=[f"underlying closes below {long_put.strike:g} before expiration"],
+                    data_timestamp=chain.timestamp, data_source=chain.source, now=now, quant_filter=quant_filter,
+                )
+            except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
+                if diagnostics is not None:
+                    diagnostics.record_generation_exception("PUT_CREDIT_SPREAD", type(exc).__name__)
+            else:
+                if diagnostics is not None:
+                    diagnostics.record_construction("PUT_CREDIT_SPREAD", success=True, reason=None)
+                candidates.append(Candidate(proposal=proposal, entry_delta=short_put.delta, entry_iv=short_put.iv, sector=universe_entry.sector))  # type: ignore[arg-type]
 
     return candidates
 
