@@ -6183,3 +6183,89 @@ site, deliberately out of this narrow hotfix's scope; (2) the
 market-hours-gate-vs-lifecycle-monitoring concern from V1.5.1, unchanged
 by this step. See `STEP_23_6_FREEZE_REPORT.md` for the full architecture
 trace, request-count comparison, and invariant-preservation proof.
+
+## 2026-10-02 -- PAPER_TRADING_V1.5.7 (Step 7): opportunity-scan timestamp
+integrity + silent generation-failure observability
+
+**Two defects, one root cause, exposed by the official 2026-10-02
+cycle.** The V1.5.6 DTE-aware retrieval fix worked exactly as designed
+(8/8 expirations eligible, 3768+ contracts seen) -- but
+`construction_successes=2` turned into `candidates_generated=0` with
+nothing in the funnel explaining why. Root cause:
+`scripts/run_validation_cycle.py` captures its cycle `now` BEFORE
+fetching market data; `TradierMarketDataProvider`'s own chain-fetch
+methods necessarily stamp `OptionChain.timestamp` with a LATER
+`datetime.now(timezone.utc)`, during that fetch. A `TradeProposal` built
+with `timestamp=<pre-fetch now>` and `data_timestamp=<later chain
+timestamp>` always failed `TradeProposal`'s own (correct, never
+weakened) "data_timestamp cannot be after the proposal timestamp"
+integrity check -- silently, because
+`src.portfolio.opportunity_scan.scan_and_rank_opportunities`'s per-ticker
+`except Exception: continue` swallowed it with zero diagnostic, and
+`generate_candidates` had already recorded a false
+`FunnelDiagnostics` "construction_success" event BEFORE attempting the
+build that then failed.
+
+**Timestamp fix.** A new, optional `OpportunityScanConfig.evaluation_as_of`
+override (`src.portfolio.orchestrator`) -- when supplied, it drives
+`scan_and_rank_opportunities`'s `now=` (and therefore every
+`TradeProposal.timestamp` it builds) instead of `OuterCycleInputs.as_of`,
+which remains completely untouched for its own cycle-identity/lifecycle/
+control-loop/alert purposes (confirmed by tracing every one of its uses
+in `src.portfolio.orchestrator` before deciding not to touch it).
+`scripts/run_validation_cycle.py` captures a second timestamp,
+`evaluation_as_of = datetime.now(timezone.utc)`, strictly AFTER its
+fetch loop completes -- guaranteeing it is `>=` every chain timestamp
+that fetch produced, by construction, never by chance or by weakening
+`TradeProposal`'s own integrity check (verified unmodified by a
+dedicated test).
+
+**Observability fix.** `generate_candidates`'s three strategy blocks now
+wrap their own `_build_proposal` call in try/except: `construction_success`
+is recorded only AFTER a real proposal is built; on exception, a new
+`FunnelDiagnostics.record_generation_exception(strategy,
+type(exc).__name__)` fires instead -- `category` is always a bounded
+exception-class name, never a raw message or payload. `CandidateFunnel`/
+`StrategyFunnelSummary` gained `generation_exceptions` counters, surfaced
+in `rejection_reasons`/`top_bottlenecks`/`zero_candidate_summary`.
+`quant_evaluations` is never falsely incremented (it's derived solely
+from `OpportunityScanResult.scanned`, which a failed-generation
+candidate never reaches). The catch is unconditional, not gated on
+`diagnostics` being supplied, so `generate_candidates` itself can no
+longer raise for this failure mode for ANY caller, including
+`src.workflows.morning_scan`'s own diagnostics-free call site.
+
+**Strategy anomaly explained, not a separate defect.** The 2026-10-02
+funnel showing only `CASH_SECURED_PUT` (not `COVERED_CALL`/
+`PUT_CREDIT_SPREAD`, both configured) is a direct consequence of the
+same root cause: before this fix, an exception inside the
+`CASH_SECURED_PUT` block aborted `generate_candidates` entirely, so the
+later `COVERED_CALL`/`PUT_CREDIT_SPREAD` blocks' own diagnostic calls
+never ran at all for that ticker. The new per-strategy exception
+isolation fixes this as a direct, necessary consequence -- no strategy
+activation or selection policy was touched.
+
+**Testing.** 7 new tests reproducing the exact T/T+delta timestamp
+defect and its fix directly against `generate_candidates`; 3 new tests
+proving one strategy's exception no longer blocks another's diagnostics
+on the same ticker; 2 new funnel-aggregation tests against the real
+pipeline; 3 new orchestrator-level tests proving `evaluation_as_of`
+wiring and that `OuterCycleInputs.as_of` is never moved; 2 new
+acceptance tests against the real `scripts/run_validation_cycle.py`
+entry point (a provider stamping chains with the real wall clock at
+fetch time -- no artificial offset -- reproduces the exact production
+shape). Full suite: 3754 passed, 6 skipped, 0 failed (up from 3740).
+`make verify-freeze` against the regenerated `PAPER_TRADING_V1.5.7`
+manifest: every check passes; `portfolio_module_hash`/
+`run_validation_cycle_script_hash` legitimately drifted before
+regeneration (genuine new capability, same pattern as every prior
+freeze bump).
+
+**What remains open.** No DTE/liquidity/Quant/Risk/sizing/universe/
+strategy-activation/broker-policy change of any kind. Two architecture
+issues remain explicitly flagged, not fixed this step: (1)
+`src.review.confirmation`'s nearest-N fresh-quote refetch, unrelated to
+this step's scope; (2) the market-hours-gate-vs-lifecycle-monitoring
+concern from V1.5.1, unchanged. See `STEP_23_7_FREEZE_REPORT.md` for the
+full root-cause trace, architecture diagram, and invariant-preservation
+proof.

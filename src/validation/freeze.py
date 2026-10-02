@@ -252,10 +252,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # / `paper-trading-v1.4.4` / `paper-trading-v1.4.5` / `paper-trading-v1.4.6`
 # / `paper-trading-v1.4.7` / `paper-trading-v1.4.8` / `paper-trading-v1.5.0`
 # / `paper-trading-v1.5.1` / `paper-trading-v1.5.2` / `paper-trading-v1.5.3`
-# / `paper-trading-v1.5.4` / `paper-trading-v1.5.5` tags.
-FREEZE_NAME = "PAPER_TRADING_V1.5.6"
+# / `paper-trading-v1.5.4` / `paper-trading-v1.5.5` / `paper-trading-v1.5.6`
+# tags.
+#
+# PAPER_TRADING_V1.5.7 (narrow corrective release): fixes a timestamp-
+# domain inconsistency in opportunity scanning and a candidate-generation
+# observability defect, both exposed by the 2026-10-02 official cycle.
+# `scripts/run_validation_cycle.py` captures its cycle `now` BEFORE
+# fetching market data, but a real provider stamps `OptionChain.timestamp`
+# with a LATER `datetime.now(timezone.utc)` during that fetch -- so a
+# `TradeProposal` built with `timestamp=<pre-fetch now>` and
+# `data_timestamp=<later chain timestamp>` always failed
+# `TradeProposal`'s own (unmodified, zero-tolerance) "data_timestamp
+# cannot be after the proposal timestamp" integrity check. Fixed via a
+# new, optional `OpportunityScanConfig.evaluation_as_of` override
+# (`src.portfolio.orchestrator`): when supplied, it is captured by the
+# caller strictly AFTER its own market-data fetch completes and used
+# ONLY for opportunity-scan evaluation/proposal timestamps -- never for
+# `OuterCycleInputs.as_of` itself, which remains the cycle's own
+# unmodified audit/lifecycle/control-loop timestamp. Separately,
+# `src.workflows.candidate_generation.generate_candidates` previously
+# recorded a `FunnelDiagnostics` "construction_success" BEFORE actually
+# building the `TradeProposal`, and `src.portfolio.opportunity_scan
+# .scan_and_rank_opportunities`'s own per-ticker `except Exception:
+# continue` swallowed any resulting exception with zero diagnostic --
+# so a found-and-then-lost candidate left no trace at all. Fixed by
+# moving construction-success recording to AFTER a successful build,
+# isolating each strategy's own proposal-construction exception (a new
+# `FunnelDiagnostics.record_generation_exception(strategy, category)`,
+# `category` always a bounded exception-class name, never a raw
+# message/payload), and adding `CandidateFunnel.generation_exceptions`
+# (total and per-strategy) -- `quant_evaluations` is never falsely
+# incremented, since it is derived solely from `OpportunityScanResult
+# .scanned`, which a failed-generation candidate never reaches. See
+# STEP_23_7_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.7"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.6"
+MANIFEST_VERSION = "1.5.7"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -753,7 +786,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.6",
+        freeze_version="1.5.7",
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
@@ -1768,7 +1801,10 @@ def _verify_candidate_funnel_is_observability_only() -> bool:
     from src.workflows.funnel_diagnostics import FunnelDiagnostics
     from src.portfolio.opportunity_scan import scan_and_rank_opportunities
 
-    for name in ("record_chain", "record_expirations", "record_strategy_attempt", "record_strategy_ineligible", "record_construction"):
+    for name in (
+        "record_chain", "record_expirations", "record_strategy_attempt", "record_strategy_ineligible",
+        "record_construction", "record_generation_exception",
+    ):
         method = getattr(FunnelDiagnostics, name, None)
         if method is None:
             return False
