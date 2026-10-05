@@ -353,9 +353,49 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # `scripts/run_validation_cycle.py`'s own control flow. The active
 # validation cohort (`paper-trading-v1.4.3-validation-2026-09-22`) and
 # its database were not touched. See STEP_23_9_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.9"
+# PAPER_TRADING_V1.5.10: fixes a narrow retrieval gap in V1.5.9's own
+# lifecycle-only safety check, identified by the V1.5.9 acceptance
+# audit. `TradierMarketDataProvider.get_option_chain` fetches only the
+# nearest `max_expirations` (default 6) calendar expirations,
+# REGARDLESS of DTE -- for a position opened at 20-45 DTE on a dense-
+# expiration underlying (SPY/QQQ), that default is highly likely to
+# omit the position's own held expiration entirely (the risk is
+# highest right after the position is OPENED, not as it "ages" --
+# DTE shrinks toward the front of the provider's nearest-N list over
+# time). `_run_lifecycle_only_safety_check` had NO DTE-aware retrieval
+# at all before this fix, so an affected position would silently fail
+# closed to DATA_INSUFFICIENT every time the gate-closed path ran,
+# even though nothing was actually wrong with the position or the
+# Lifecycle/Risk machinery evaluating it. Fixed by a new
+# `_fetch_existing_position_chain` helper that requests EACH position's
+# own actual held expiration EXACTLY (`min_dte=max_dte=` that
+# position's real DTE, via the same `DteWindowOptionChainProvider`
+# capability V1.5.8 already uses for confirmation) -- driven by the
+# position's own expiration, never the candidate-entry [20, 45] DTE
+# window (a position can legitimately still be open below that floor).
+# Used by BOTH the lifecycle-only path AND the normal scan-eligible
+# cycle's own existing-position fetch (which previously only got DTE-
+# aware coverage when its ticker happened to ALSO be in the
+# opportunity-scan universe) -- one canonical existing-position
+# retrieval mechanism for both paths. Contract-identity matching itself
+# (`src.portfolio.revaluation`, exact `(expiration, strike, right)`,
+# fail-closed to DATA_INSUFFICIENT on any unmatched/stale leg) is
+# UNCHANGED -- this fix only ever widens what can be successfully
+# retrieved, never what counts as a valid match. Lifecycle cadence/
+# idempotency (the date-only cycle_id, the once-daily behavior) is
+# explicitly UNCHANGED and out of scope for this release -- see
+# `_run_lifecycle_only_safety_check`'s own cycle-id handling, untouched.
+# No risk limit, Quant threshold, liquidity threshold, candidate DTE
+# policy, ranking policy, NAV, or universe changed; `src/risk/`,
+# `src/quant/`, `src/portfolio/orchestrator.py`,
+# `src/portfolio/control_loop.py`, and `src/portfolio/revaluation.py`
+# were not touched -- only `scripts/run_validation_cycle.py`'s own
+# fetch-loop logic. The active validation cohort
+# (`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
+# not touched. See STEP_23_10_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.10"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.9"
+MANIFEST_VERSION = "1.5.10"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

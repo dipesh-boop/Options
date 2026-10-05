@@ -6417,3 +6417,98 @@ and `src/portfolio/market_session.py` were not modified -- only
 `scripts/run_validation_cycle.py`'s own control flow. See
 `STEP_23_9_FREEZE_REPORT.md` for the full root-cause trace, old/new
 control-flow diagrams, and the complete idempotency-slot reasoning.
+
+## PAPER_TRADING_V1.5.10 (Step 10): lifecycle existing-position exact/DTE-aware retrieval safety fix
+
+**Context.** The V1.5.9 acceptance audit (read-only, no changes) found
+one narrow blocker before the first paper position: V1.5.9's own
+`_run_lifecycle_only_safety_check` fetched existing-position market
+data via `provider.get_option_chain(ticker)` alone --
+`TradierMarketDataProvider.get_option_chain` fetches only its nearest
+`max_expirations` (default 6) calendar expirations, REGARDLESS of DTE.
+For a position opened at 20-45 DTE on a dense-expiration underlying
+(SPY/QQQ, the active cohort's own universe), the position's own held
+expiration is highly likely to be entirely absent from that default --
+and, unlike the analogous V1.5.8 confirmation-retrieval defect, this
+has nothing to do with the position "aging": the risk is HIGHEST right
+after a position is opened (far from the front of the provider's
+nearest-N list) and falls as the position's DTE naturally shrinks
+toward the front of that list over time. A position can also
+legitimately still be open below the candidate-entry DTE floor (20),
+which the global scan window could never cover either way. Both gaps
+caused the position to fail closed to `DATA_INSUFFICIENT` -- honest,
+never a fabricated price, but it meant the Lifecycle Engine/Risk
+kill-switch V1.5.9 worked so hard to guarantee gets CALLED never
+actually had usable data to evaluate.
+
+**Fix.** New `_fetch_existing_position_chain` helper
+(`scripts/run_validation_cycle.py`): for one ticker's existing
+position(s), merges the provider's plain `get_option_chain` call with
+one EXACT `get_option_chain_for_dte_window(min_dte=max_dte=` that
+position's own real DTE `)` call per DISTINCT held expiration (via the
+same `DteWindowOptionChainProvider` capability V1.5.8 already uses for
+confirmation) -- driven entirely by the position's own expiration,
+never the candidate-entry window. A provider that doesn't implement
+`DteWindowOptionChainProvider` gets byte-identical behavior to
+pre-V1.5.10 (the helper only ever adds coverage). Used by BOTH
+`_run_lifecycle_only_safety_check` (which had no DTE-aware retrieval at
+all before this fix) and the normal scan-eligible cycle's own
+existing-position fetch (which previously only got DTE-aware coverage
+when its ticker happened to ALSO be in the opportunity-scan universe,
+by coincidence rather than guarantee) -- one canonical existing-
+position retrieval mechanism for both paths, per the audit's own
+recommendation to prefer reuse over letting the two paths diverge
+again. Contract-identity matching itself
+(`src.portfolio.revaluation.build_contract_index`/`revalue_position`,
+exact `(expiration, strike, right)` key lookup, fail-closed to
+`DATA_INSUFFICIENT` on any unmatched/stale leg) is completely
+unchanged -- this fix only ever widens what can be successfully
+retrieved, never what counts as a valid match, so "no nearest-
+expiration substitution, no nearest-strike substitution, no wrong-
+right substitution" holds by construction, not by a new check. Lifecycle
+cadence/idempotency (the date-only cycle_id, the once-daily behavior
+the V1.5.9 audit separately flagged as a documented architectural
+limitation) is explicitly OUT OF SCOPE and unchanged -- `_run_lifecycle_
+only_safety_check`'s own cycle-id handling was not touched.
+
+**Testing.** 15 new tests
+(`tests/acceptance/test_lifecycle_exact_expiration_retrieval.py`)
+covering every edge case the task spec required: a far-dated position
+outside the provider's nearest-six default, a position aged below the
+candidate-entry DTE floor, a near-expiration position, two positions
+in the same ticker at different expirations, a multi-leg spread with
+all legs matched, a multi-leg structure with a required leg genuinely
+missing (fails closed, never partial), a provider returning the wrong
+expiration or the wrong strike/right (never substituted), a stale
+exact-held contract (freshness gate still rejects it), one ticker's
+provider failure isolated from another's success, no scan/candidate
+despite successful lifecycle data, the gate-open path benefiting from
+the same shared helper for a position outside both the provider
+default AND the global scan window, dashboard/CLI equivalence, and
+V1.5.9's once-daily idempotency unchanged. One pre-existing V1.5.6 test
+(`test_dte_window_chain_retrieval.py::test_ticker_both_position_and_
+universe_gets_both_fetches_merged`) asserted an exact, now-superseded
+call list for the gate-open merge path -- updated (not deleted) to
+assert the new, intentional second exact-DTE call, computed
+dynamically from the real wall clock rather than hardcoded, per
+CLAUDE.md's own testing-discipline guidance on updating a test that
+asserts a reversed architectural decision. Full suite: 3788 passed, 6
+skipped, 9 failed -- the same 9 pre-existing, date-rot failures already
+known and accepted on frozen V1.5.9 (verified directly via a temporary
+`git worktree` at the pristine V1.5.9 commit, same wall clock,
+identical 9 failures). Zero new failures. `make verify-freeze` against
+the regenerated `PAPER_TRADING_V1.5.10` manifest: every check passes.
+
+**What remains open.** No risk/Quant/liquidity/candidate-DTE/ranking/
+NAV/universe/strategy change of any kind, and no lifecycle-cadence
+change of any kind (explicitly out of scope, per the audit's own
+finding that this is a documented architectural limitation, not a
+defect this release addresses). The active cohort
+(`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
+not touched. `src/risk/`, `src/quant/`, `src/portfolio/orchestrator.py`,
+`src/portfolio/control_loop.py`, and `src/portfolio/revaluation.py`
+were not modified -- only `scripts/run_validation_cycle.py`'s own
+fetch-loop logic, plus the one updated pre-existing test assertion.
+See `STEP_23_10_FREEZE_REPORT.md` for the full root-cause trace,
+old/new retrieval-flow diagrams, and the complete contract-identity
+reasoning.
