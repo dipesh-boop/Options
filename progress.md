@@ -6512,3 +6512,105 @@ fetch-loop logic, plus the one updated pre-existing test assertion.
 See `STEP_23_10_FREEZE_REPORT.md` for the full root-cause trace,
 old/new retrieval-flow diagrams, and the complete contract-identity
 reasoning.
+
+## Step 23.11 -- PAPER_TRADING_V1.5.11 (Manual Intraday Lifecycle Recheck Safety Release)
+
+**What was built.** A preceding, explicitly read-only V1.5.11
+architecture audit found that `run_validation_cycle()`'s own
+`cycle_id = f"validation-{date}"` existence check was an unconditional,
+FUNCTION-WIDE early return: once the daily new-position scan had run,
+an operator manually re-invoking the script later the same day got a
+complete no-op -- no fresh existing-position lifecycle evaluation, no
+Risk kill-switch re-run, nothing -- regardless of open positions. This
+step fixes exactly that gap, without adding any scheduler or
+background automation. The top-level check is now captured as a plain
+boolean (`main_cycle_already_ran`), used only to route to the
+pre-existing, UNMODIFIED `_run_lifecycle_only_safety_check` whenever
+positions exist -- never to stop the function. That helper's own cycle
+id changed from a once-per-calendar-day `validation-{date}-lifecycle`
+to an hour-bucketed `validation-{market-local date}-lifecycle-{market-
+local hour:02d}`, computed via `now.astimezone(EASTERN)` (the same
+`src.data.market_calendar.EASTERN` zoneinfo this codebase already
+uses) -- DST-correct by construction, no fixed-offset arithmetic. A
+manually-initiated existing-position recheck may now run once per
+America/New_York clock hour; new-position scanning remains at most
+once per trading day, via the completely untouched `validation-{date}`
+id and its own idempotency check. The two id families are
+independently idempotent and can never consume or block each other's
+slot. This is a duplicate/retry guard, not a scheduler: V1.5.11 adds no
+cron, background loop, dashboard auto-trigger, or any other mechanism
+that causes a recheck to run on its own -- every invocation remains
+exactly as manually-initiated (CLI or the one pre-existing dashboard
+POST route) as it already was.
+`_run_lifecycle_only_safety_check` itself is unmodified beyond its
+cycle-id string -- it still cannot construct a `PaperBroker`, scan for
+new positions, generate a candidate, or place an order.
+
+**What was tested.** 18 new test classes
+(`tests/acceptance/test_lifecycle_hourly_recheck.py`) covering the
+task's 22 required items: fresh evaluation on a later-hour recheck
+after the main cycle; a same-hour second invocation no-opping (zero
+extra provider calls, zero extra snapshot); the 13:59/14:00 ET hour
+boundary producing two distinct buckets; EDT/EST DST correctness;
+gate-closed-with-position preserving the main daily id untouched, with
+the normal daily cycle still runnable once the gate opens; gate-
+closed-again-after-the-main-cycle-ran still running the hourly
+recheck; no-positions-after-the-main-cycle-ran safely no-opping;
+V1.5.10's exact held-expiration retrieval (grouped by ticker, exact
+per-expiration DTE window, below-min-DTE coverage) verified unchanged
+across repeated hourly invocations; missing/stale held contracts still
+failing closed on a recheck; one ticker's provider failure still
+isolated from another's success on a recheck; zero candidates and zero
+reachable PaperBroker/order/fill/confirmation path through the hourly
+route, proven by direct source inspection; the same unresolved DTE
+forced-exit alert deduped across two hourly checks while each still
+gets its own audit snapshot (one alert, not two -- `EXPIRATION_
+APPROACHING`'s own, separate, pre-existing `0 <= dte <= 7` trigger
+required picking a test DTE outside that band to isolate the dedup
+property cleanly); a cleared trigger condition correctly leaving the
+earlier alert unresolved (documented, pre-existing non-auto-resolution
+behavior, NOT changed by this release); and dashboard-route
+equivalence. Fixing two pre-existing test-infrastructure gaps was
+needed along the way (both confined to `tests/acceptance/test_
+lifecycle_exact_expiration_retrieval.py`'s shared
+`_DenseExpirationFakeProvider` fake, never production code): (1) its
+chain/underlying-level timestamps always used the real wall clock,
+regardless of a test's own simulated `now` -- fixed additively via an
+optional `reference_now`/`set_reference_now()`, defaulting to the
+original real-wall-clock behavior for every existing V1.5.10 caller;
+(2) its individually pre-built `OptionContract.timestamp` values were
+still baked in at construction time independent of that same
+`reference_now` -- fixed by having `get_option_chain`/`get_option_
+chain_for_dte_window` re-stamp every returned contract's `.timestamp`
+to that call's own `as_of` at fetch time, so a fake chain's quotes are
+always "fresh as of whenever it was fetched," matching real-provider
+behavior. Both fixes were re-verified not to change any of the
+existing 15 V1.5.10 tests' behavior (all 15 still pass unchanged). The
+broader focused suite (market-hours separation + exact-expiration
+retrieval + the new hourly-recheck suite + review-only daily cycle +
+market-hours gate + DTE-window retrieval, 58 tests) passed except the
+4 known pre-existing date-rot failures within that subset. Full suite:
+3806 passed, 6 skipped, 9 failed -- the same 9 pre-existing, date-rot
+failures already known and accepted on frozen V1.5.10 (re-verified
+directly via `git stash` against this branch's own V1.5.10 HEAD at the
+same wall clock -- identical 9 failures, identical root cause). Zero
+new failures. `make verify-freeze` against the regenerated
+`PAPER_TRADING_V1.5.11` manifest: every check passes.
+
+**What remains open.** The 9 known date-rot failures remain, by
+design. Alerts still do not automatically resolve when their trigger
+condition clears -- a known, pre-existing issue, explicitly out of
+scope for this release and NOT silently fixed. The real operational
+`run_validation_cycle` still does not populate `RateLimitState` from
+live Tradier response headers -- also explicitly out of scope, not
+redesigned here. No risk/Quant/liquidity/candidate-DTE/ranking/NAV/
+universe/strategy change of any kind. The active cohort
+(`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
+not touched. `src/risk/`, `src/quant/`, `src/portfolio/orchestrator.py`,
+`src/portfolio/control_loop.py`, `src/portfolio/revaluation.py`, and
+V1.5.10's `_fetch_existing_position_chain` retrieval helper were not
+modified -- only `scripts/run_validation_cycle.py`'s top-level control
+flow and lifecycle-only cycle-id construction, plus the additive test-
+infrastructure fixes above. See `STEP_23_11_FREEZE_REPORT.md` for the
+full root-cause trace, old/new control-flow diagrams, and the complete
+timezone/bucket/alert-dedup reasoning.

@@ -393,9 +393,47 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # fetch-loop logic. The active validation cohort
 # (`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
 # not touched. See STEP_23_10_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.10"
+#
+# PAPER_TRADING_V1.5.11 (Manual Intraday Lifecycle Recheck Safety
+# Release): the pre-V1.5.11 `run_validation_cycle()` control flow had a
+# single, unconditional, FUNCTION-WIDE early return the moment today's
+# main `validation-{date}` cycle record already existed -- meaning once
+# the daily new-position scan had run, an operator who manually
+# re-invoked the script later that SAME day (e.g. to get a fresh
+# existing-position safety check after lunch) got nothing at all: no
+# fresh lifecycle evaluation, no new audit snapshot, no re-run of the
+# Risk kill-switch against current data -- a silent no-op regardless of
+# how many open positions needed monitoring. Fixed by capturing that
+# check as a plain boolean (`main_cycle_already_ran`) used ONLY to skip
+# the *opportunity-scan* continuation -- never to skip the function
+# itself -- and routing to the pre-existing, UNMODIFIED
+# `_run_lifecycle_only_safety_check` whenever positions are open. That
+# helper's own cycle id changed from a once-per-day
+# `validation-{date}-lifecycle` to an hour-bucketed
+# `validation-{market-local date}-lifecycle-{market-local hour:02d}`,
+# computed via `now.astimezone(EASTERN)` (the same
+# `src.data.market_calendar.EASTERN` zoneinfo used throughout this
+# codebase) -- a manually-initiated recheck may now run once per
+# America/New_York clock hour rather than once per day, while the main
+# `validation-{date}` id and its own once-per-day semantics are
+# completely untouched (the two id families are independently
+# idempotent; neither can consume or block the other's slot). This is a
+# duplicate/retry guard, not a scheduler: V1.5.11 adds no cron,
+# background loop, dashboard auto-trigger, or any other mechanism that
+# causes a recheck to run on its own -- every invocation remains
+# exactly as manually-initiated (CLI or the one existing dashboard POST
+# route) as it already was. `_run_lifecycle_only_safety_check` itself is
+# unmodified beyond its cycle-id string: it still cannot construct a
+# `PaperBroker`, scan for new positions, generate a candidate, or place
+# an order -- only observation cadence changed. V1.5.10's exact held-
+# expiration retrieval (`_fetch_existing_position_chain`), the Risk
+# Engine, the Quant Engine, alert raising/dedup (including the known,
+# unchanged pre-existing non-auto-resolution of alerts), and the active
+# validation cohort/database were not touched. See
+# STEP_23_11_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.11"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.10"
+MANIFEST_VERSION = "1.5.11"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
