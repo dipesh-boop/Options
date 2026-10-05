@@ -2,7 +2,43 @@
 """Operator-run daily validation-cycle runner (Step 22.6; operator
 usability/startup fixes in Step 22.8; dashboard UI completion in
 Step 22.9; market-hours safety gate in Step 2, PAPER_TRADING_V1.5.1;
-lifecycle/market-hours separation in PAPER_TRADING_V1.5.9).
+lifecycle/market-hours separation in PAPER_TRADING_V1.5.9;
+existing-position retrieval safety fix in PAPER_TRADING_V1.5.10).
+
+**PAPER_TRADING_V1.5.10: existing-position market-data retrieval must
+cover each position's ACTUAL held expiration, never merely the
+candidate-entry DTE window a position happened to be OPENED under.**
+`TradierMarketDataProvider.get_option_chain` fetches only its nearest
+`max_expirations` (default 6) calendar expirations, regardless of DTE
+-- for a position opened at 20-45 DTE on a dense-expiration underlying
+(SPY/QQQ), that default is highly likely to omit the position's own
+expiration entirely, and (unlike the analogous V1.5.8 confirmation-
+retrieval defect) this has nothing to do with a position "aging": the
+risk is highest right after a position is OPENED (far from the front
+of the provider's nearest-N list) and falls as the position's DTE
+naturally shrinks toward the front of that list over time -- but a
+position can also legitimately still be open below `QuantFilterConfig
+.min_dte` (20), which the global candidate window could never cover
+either way. `_fetch_existing_position_chain` (new) fixes this by
+requesting each position's own real expiration EXACTLY (`min_dte=
+max_dte=` that position's actual DTE, via the same
+`DteWindowOptionChainProvider` capability V1.5.8 already uses for
+confirmation) rather than inferring coverage from either the provider's
+nearest-N default or the global scan window. Used by BOTH
+`_run_lifecycle_only_safety_check` (which had NO DTE-aware retrieval at
+all before this fix) and the normal scan-eligible cycle's existing-
+position fetch below (which previously only got DTE-aware coverage
+when its ticker happened to ALSO be a universe ticker) -- one canonical
+existing-position retrieval mechanism for both paths, so they cannot
+diverge again. Contract-identity matching itself
+(`src.portfolio.revaluation.build_contract_index`/`revalue_position`,
+exact `(expiration, strike, right)`, fail-closed to
+`DATA_INSUFFICIENT` on any unmatched/stale leg) is UNCHANGED -- this
+fix only ever widens what can be successfully retrieved, never what
+counts as a valid match, and never touches candidate-generation's own
+`QuantFilterConfig`/[20, 45] DTE window, `max_expirations`, or the
+opportunity-scan fetch path. See `_fetch_existing_position_chain`'s own
+docstring and `STEP_23_10_FREEZE_REPORT.md` for the complete trace.
 
 **PAPER_TRADING_V1.5.9: the new-position market-hours gate must never
 suppress existing-position Lifecycle Engine/Risk kill-switch monitoring.**
@@ -160,7 +196,7 @@ from src.review.candidates import CandidateStatus, ReviewedCandidate, SqliteCand
 from src.risk.broker_constraints import load_broker_capabilities  # noqa: E402
 from src.risk.engine import evaluate_trade_proposal  # noqa: E402
 from src.risk.limits import RiskLimitsConfig, get_default_limits  # noqa: E402
-from src.risk.portfolio_risk import Portfolio, sector_exposure_pct, underlying_exposure_pct  # noqa: E402
+from src.risk.portfolio_risk import PortfolioPosition, Portfolio, sector_exposure_pct, underlying_exposure_pct  # noqa: E402
 from src.strategies.base import StrategyKind  # noqa: E402
 from src.validation.cohort import has_cohort_started  # noqa: E402
 from src.validation.protocol import ValidationConfigError, load_validation_config  # noqa: E402
@@ -195,6 +231,54 @@ def _expire_stale_candidates(review_store, cohort_id: str, validation_store, now
         expired_count += 1
         _line("expired stale candidate", candidate.candidate_id)
     return expired_count
+
+
+async def _fetch_existing_position_chain(
+    provider, positions: list[PortfolioPosition], *, now: datetime,
+) -> OptionChain:
+    """PAPER_TRADING_V1.5.10: one ticker's existing PaperBroker position(s)
+    may legitimately be held at ANY DTE -- including below
+    `QuantFilterConfig.min_dte` once a position has aged past the
+    candidate-entry window it was OPENED under -- so an existing
+    position's market-data coverage can never be inferred from that
+    entry-time window. `positions` is every currently-open
+    `PortfolioPosition` for ONE ticker (the caller groups by `.ticker`);
+    this returns one merged chain guaranteed (whenever `provider`
+    implements `DteWindowOptionChainProvider`) to include a full chain
+    for every DISTINCT expiration date this ticker's positions actually
+    hold -- each requested EXACTLY (`min_dte=max_dte=` that one
+    position's own real DTE), never a nearest-N substitution and never a
+    min..max range spanning multiple expirations (which could still
+    silently exclude one of them behind `max_expirations`'s own bound).
+    This mirrors `src.review.confirmation._fetch_exact_expiration_chain`
+    (V1.5.8's fix for the analogous confirmation-retrieval gap) applied
+    to existing positions instead of a single review candidate.
+
+    Merged with the provider's own near-term default (`get_option_chain`)
+    first, so a provider that does NOT implement
+    `DteWindowOptionChainProvider` (e.g. Alpaca) gets byte-identical
+    behavior to pre-V1.5.10 -- this function only ever ADDS coverage, it
+    never removes any contract the plain call would already have
+    returned. `merge_option_chains` dedupes by `(expiration, strike,
+    right)`, so requesting an expiration the plain call already covered
+    is a harmless no-op, never a duplicate or a conflicting value.
+
+    This function performs retrieval ONLY -- it never decides whether a
+    leg is usable (that stays `src.data.quality_gate.validate_option_chain`
+    and `src.portfolio.revaluation.revalue_position`'s unmodified,
+    exact-identity `(expiration, strike, right)` contract-index lookup,
+    which already fails a position closed to `DATA_INSUFFICIENT` on any
+    unmatched/stale leg rather than fabricating or substituting data)."""
+    ticker = positions[0].ticker
+    chain = await provider.get_option_chain(ticker)
+    if isinstance(provider, DteWindowOptionChainProvider):
+        for expiration in sorted({p.expiration for p in positions}):
+            dte = (expiration - now.date()).days
+            exact_chain = await provider.get_option_chain_for_dte_window(
+                ticker, min_dte=dte, max_dte=dte, as_of=now.date(),
+            )
+            chain = merge_option_chains(chain, exact_chain)
+    return chain
 
 
 async def _run_lifecycle_only_safety_check(
@@ -237,25 +321,37 @@ async def _run_lifecycle_only_safety_check(
     no-ops; the scan-eligible cycle later that same day sees its own,
     still-untouched id and proceeds completely normally.
 
-    **Fetches ONLY existing positions' tickers**, via the provider's
-    plain `get_option_chain` (the same near-term-appropriate call the
-    normal cycle already uses for position tickers) -- never the scan
-    universe, never a DTE-windowed fetch (there is no candidate
-    generation to serve). All existing freshness/quality-gate/kill-switch
-    protections apply completely unchanged, since this flows through the
-    identical, unmodified `run_control_cycle`."""
+    **Fetches ONLY existing positions' tickers**, via `_fetch_existing_
+    position_chain` (PAPER_TRADING_V1.5.10) -- never the scan universe,
+    never a candidate-entry-DTE-window fetch (there is no candidate
+    generation to serve). V1.5.10 fix: this now requests EACH position's
+    own actual held expiration explicitly (exact DTE, never the global
+    [20, 45] candidate window and never a nearest-N substitution), so a
+    position that has legitimately aged below that window -- or was
+    simply never within reach of the provider's own nearest-N default to
+    begin with -- is still retrievable. All existing freshness/quality-
+    gate/kill-switch protections apply completely unchanged, since this
+    flows through the identical, unmodified `run_control_cycle`; a leg
+    this fetch still can't cover (provider failure, or genuinely no
+    matching contract) fails closed to `DATA_INSUFFICIENT` exactly as
+    before -- this function only ever widens what can be successfully
+    retrieved, never what counts as a valid match."""
     lifecycle_cycle_id = f"validation-{now.date().isoformat()}-lifecycle"
     if control_loop_store.get_cycle_record(lifecycle_cycle_id) is not None:
         print(f"Lifecycle-only safety check {lifecycle_cycle_id!r} already ran today -- nothing to do.")
         return True
 
     provider = get_configured_market_data_provider()
-    position_tickers = sorted({p.ticker for p in portfolio.positions})
+    positions_by_ticker: dict[str, list[PortfolioPosition]] = {}
+    for p in portfolio.positions:
+        positions_by_ticker.setdefault(p.ticker, []).append(p)
     fetch_results: dict[str, OptionChain | Exception] = {}
     try:
-        for ticker in position_tickers:
+        for ticker in sorted(positions_by_ticker):
             try:
-                fetch_results[ticker] = await provider.get_option_chain(ticker)
+                fetch_results[ticker] = await _fetch_existing_position_chain(
+                    provider, positions_by_ticker[ticker], now=now,
+                )
             except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the cycle
                 fetch_results[ticker] = exc
     finally:
@@ -477,7 +573,10 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         # both the DTE-aware fetch below and candidate generation itself
         # -- one source of truth, never a second hard-coded threshold.
         quant_filter = QuantFilterConfig()
-        position_tickers = {p.ticker for p in portfolio.positions}
+        positions_by_ticker: dict[str, list[PortfolioPosition]] = {}
+        for p in portfolio.positions:
+            positions_by_ticker.setdefault(p.ticker, []).append(p)
+        position_tickers = set(positions_by_ticker)
         universe_tickers = {e.ticker for e in universe}
         tickers = sorted(position_tickers | universe_tickers)
         fetch_results: dict[str, OptionChain | Exception] = {}
@@ -495,12 +594,15 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
                     # calendar-date default (get_option_chain), which can
                     # silently exclude every expiration a strategy's DTE
                     # policy could ever use (the exact 2026-10-01 defect
-                    # this step fixes). Existing-position tickers still
-                    # need get_option_chain's own near-term behavior for
-                    # lifecycle monitoring (a position can be well under
-                    # 20 DTE) -- a ticker that is BOTH an existing
-                    # position AND in the universe gets BOTH fetches,
-                    # merged, never one at the expense of the other.
+                    # this step fixes). Existing-position tickers get
+                    # `_fetch_existing_position_chain` (PAPER_TRADING_V1.5.10)
+                    # instead of a bare `get_option_chain` call -- a
+                    # position can be well under 20 DTE, or simply never
+                    # within the provider's nearest-N default to begin
+                    # with (see that function's own docstring) -- merged
+                    # with `scan_chain`, never at the expense of it, for a
+                    # ticker that is BOTH an existing position AND in the
+                    # universe.
                     diag = DteWindowSelectionDiagnostics()
                     dte_selection_diagnostics[ticker] = diag
                     scan_chain = await provider.get_option_chain_for_dte_window(
@@ -508,12 +610,25 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
                         diagnostics=diag,
                     )
                     if ticker in position_tickers:
-                        lifecycle_chain = await provider.get_option_chain(ticker)
+                        lifecycle_chain = await _fetch_existing_position_chain(
+                            provider, positions_by_ticker[ticker], now=now,
+                        )
                         fetch_results[ticker] = merge_option_chains(lifecycle_chain, scan_chain)
                     else:
                         fetch_results[ticker] = scan_chain
+                elif ticker in position_tickers:
+                    # PAPER_TRADING_V1.5.10: a position-only ticker (not in
+                    # the opportunity-scan universe), or a universe ticker
+                    # whose provider doesn't implement
+                    # DteWindowOptionChainProvider at all -- either way,
+                    # this existing position's own held expiration(s) are
+                    # the authoritative retrieval requirement, same as the
+                    # branch above.
+                    fetch_results[ticker] = await _fetch_existing_position_chain(
+                        provider, positions_by_ticker[ticker], now=now,
+                    )
                 else:
-                    # A position-only ticker, or a provider that doesn't
+                    # A universe-only ticker whose provider doesn't
                     # implement DteWindowOptionChainProvider at all (e.g.
                     # Alpaca, whose get_option_chain already returns every
                     # expiration in one call -- candidate_generation's own

@@ -230,7 +230,20 @@ class TestDteWindowBranchTakenForUniverseTickers:
         # both the near-term lifecycle fetch and the DTE-windowed scan
         # fetch must have been made, never only one.
         assert provider.get_option_chain_calls == ["SPY"]
-        assert provider.get_option_chain_for_dte_window_calls == [("SPY", 20, 45)]
+        # PAPER_TRADING_V1.5.10: `_fetch_existing_position_chain` ALSO
+        # requests the position's own actual held expiration exactly
+        # (min_dte=max_dte=that position's real DTE) -- a second,
+        # intentional call alongside the universe scan's own [20, 45]
+        # window, never a replacement for it. The position's DTE is
+        # computed dynamically here (never hardcoded) because `EXPIRATION`
+        # (tests/unit/review/conftest.py) is a fixed calendar date whose
+        # DTE relative to the real wall clock drifts over time -- this
+        # assertion must stay correct however many days that drift has
+        # reached when the suite happens to run.
+        position_dte = (EXPIRATION - datetime.now(timezone.utc).date()).days
+        assert provider.get_option_chain_for_dte_window_calls == [
+            ("SPY", 20, 45), ("SPY", position_dte, position_dte),
+        ]
 
         # And the merge succeeded well enough for the cycle to evaluate
         # the existing position through the (unmodified) Lifecycle Engine.
