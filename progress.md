@@ -6269,3 +6269,85 @@ this step's scope; (2) the market-hours-gate-vs-lifecycle-monitoring
 concern from V1.5.1, unchanged. See `STEP_23_7_FREEZE_REPORT.md` for the
 full root-cause trace, architecture diagram, and invariant-preservation
 proof.
+
+## 2026-10-05 -- PAPER_TRADING_V1.5.8 (Step 8): exact-expiration
+confirmation refresh safety fix
+
+**Root cause.** `src.review.confirmation.confirm_candidate` -- the final
+safety boundary before a PaperBroker fill -- fetched fresh market data
+for revalidation via a plain `MarketDataProvider.get_option_chain(ticker)`
+call: a nearest-N-expirations fetch with no guarantee the candidate's own
+persisted `TradeProposal.expiration` was among the N returned. This is
+the exact nearest-N limitation `PAPER_TRADING_V1.5.6` already fixed at
+scan time; this safety boundary had not yet adopted the same fix.
+Per-leg matching itself (`src.risk.trade_risk.resolve_leg_contracts`/
+`_find_contract`, both left completely unmodified) already matched
+strictly on `(underlying, expiration, strike, right)` and already raised
+on any unresolved leg -- so there was never a risk of a WRONG contract
+being silently substituted; the real, narrower gap was that confirmation
+never explicitly asked for the right data in the first place, leaving
+its success contingent on an unrelated calendar-nearest-N heuristic.
+
+**Fix.** A new `_fetch_exact_expiration_chain` helper in
+`src.review.confirmation` deliberately requests the candidate's EXACT
+persisted expiration -- reusing the already provider-neutral
+`src.data.provider.DteWindowOptionChainProvider` capability
+(PAPER_TRADING_V1.5.6) with `min_dte == max_dte` collapsed to a single
+calendar date, never a new interface and never Tradier-specific logic in
+`src.review.confirmation`. A provider without that capability falls back
+to the pre-V1.5.8 `get_option_chain` call, byte-for-byte unchanged. A new
+explicit post-fetch check verifies the exact expiration was actually
+returned before any Quant/Risk recomputation proceeds -- failing closed
+with the existing `DATA_INSUFFICIENT` outcome, never substituting a
+nearby expiration. No new `ConfirmationOutcome`/`CandidateStatus` value
+was added; every new failure mode maps onto the existing
+"data could not be positively established" semantics `DATA_INSUFFICIENT`
+already carries.
+
+**Also fixed in passing**: `src/validation/freeze.py`'s
+`FreezeManifest.freeze_version` field (distinct from `manifest_version`)
+was hardcoded as the literal string `"1.5.7"` at its construction site
+rather than referencing the `MANIFEST_VERSION` constant -- a latent bug
+that would have left it silently stuck at `"1.5.7"` through every future
+freeze had it not been caught while bumping the version this step. Fixed
+to read `freeze_version=MANIFEST_VERSION`, matching the pattern every
+other version-bearing manifest field already used.
+
+**Testing.** 17 new tests
+(`tests/unit/review/test_confirmation_exact_expiration.py`): the
+exact-window capability is preferred and called with the correct
+single-day window and never falls back when available; a provider
+without the capability falls back unchanged (behavior-equivalence
+boundary); exact-expiration-unavailable, expiration-mismatch,
+strike-missing, right-mismatch, underlying-mismatch (the MD-003
+cross-check re-exercised at this boundary), stale-contract, and
+future-dated-contract all fail closed; a 2-leg and a 4-leg proposal each
+missing exactly one leg in the refresh fail the ENTIRE confirmation
+(atomicity), with a 4-leg positive control proving all-legs-fresh still
+fills correctly as one combo order; Risk rejection and price-drift
+REPRICE_REQUIRED both still apply unchanged after the new fetch path; a
+structural test documents that `OptionLeg` carries no `option_symbol`
+field today, so there is nothing persisted to cross-verify it against;
+a CLI test proves `scripts/confirm_candidate.py`'s wrong-argument-count
+path never touches any store. Confirmed meaningful, not vacuous: 3 of the
+17 tests fail against the pre-fix code (exactly the ones proving the new
+behavior), the other 14 already passed (they exercise logic that was
+already correct). Full suite: 3762 passed, 6 skipped, 9 failed -- the
+same 9 pre-existing, environment/time-of-day-dependent failures present
+on the unmodified V1.5.7 baseline (confirmed via `git stash` + re-run),
+none related to this step's files. `make verify-freeze` against the
+regenerated `PAPER_TRADING_V1.5.8` manifest: every check passes;
+`review_module_hash` legitimately drifted before regeneration (genuine
+production change, same pattern as every prior freeze bump with real
+code changes).
+
+**What remains open.** No risk/Quant/liquidity/DTE/ranking/
+candidate-generation/NAV/universe/strategy-activation change of any
+kind. The active cohort (`paper-trading-v1.4.3-validation-2026-09-22`)
+and its database were not touched -- this release changes only the
+software operating that cohort, not its experimental configuration. The
+market-hours-gate-vs-lifecycle-monitoring concern (first identified
+V1.5.1) remains the one still-open, previously-flagged architecture
+issue, explicitly out of scope for this release per its own instructions.
+See `STEP_23_8_FREEZE_REPORT.md` for the full root-cause trace,
+provider/interface design, and identity-matching rules.

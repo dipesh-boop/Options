@@ -286,9 +286,39 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # incremented, since it is derived solely from `OpportunityScanResult
 # .scanned`, which a failed-generation candidate never reaches. See
 # STEP_23_7_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.7"
+#
+# PAPER_TRADING_V1.5.8 (narrow safety/integrity release): closes a gap at
+# `src.review.confirmation.confirm_candidate` -- the final safety boundary
+# before a PaperBroker fill. Before this step, confirmation's market-data
+# refresh called `MarketDataProvider.get_option_chain` (a nearest-N-
+# expirations fetch) with no guarantee the candidate's own persisted
+# `TradeProposal.expiration` was among the N returned -- the same
+# nearest-N limitation PAPER_TRADING_V1.5.6 already fixed at scan time,
+# which this boundary had not yet adopted. Per-leg contract matching
+# itself (`src.risk.trade_risk.resolve_leg_contracts`/`_find_contract`,
+# both UNMODIFIED by this step) already matched strictly on
+# `(underlying, expiration, strike, right)` and already raised on any
+# unmatched leg, so there was never a risk of a wrong contract being
+# silently substituted -- the risk closed here is that confirmation could
+# fail to even retrieve the right data purely because the default window
+# happened not to reach it. Fixed via a new `_fetch_exact_expiration_chain`
+# helper in `src.review.confirmation` that deliberately requests the
+# candidate's EXACT persisted expiration -- reusing the already provider-
+# neutral `src.data.provider.DteWindowOptionChainProvider` capability
+# (PAPER_TRADING_V1.5.6) with `min_dte == max_dte` collapsed to a single
+# calendar date, never a new interface and never Tradier-specific logic in
+# this module. A provider without that capability falls back to the
+# pre-V1.5.8 `get_option_chain` call, unchanged. An explicit post-fetch
+# check then verifies the exact expiration was actually returned before
+# any Quant/Risk recomputation proceeds -- failing closed with
+# `DATA_INSUFFICIENT`, never substituting a nearby expiration. No risk
+# limit, Quant threshold, liquidity threshold, DTE policy, ranking policy,
+# or candidate-generation behavior changed; the active validation cohort
+# (`paper-trading-v1.4.3-validation-2026-09-22`) and its database were not
+# touched. See STEP_23_8_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.8"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.7"
+MANIFEST_VERSION = "1.5.8"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
@@ -786,7 +816,7 @@ def build_freeze_manifest(*, generated_at: datetime | None = None) -> FreezeMani
             "src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's "
             "sibling code but not independently hashed here"
         ),
-        freeze_version="1.5.7",
+        freeze_version=MANIFEST_VERSION,
         alpaca_provider_module_hash=compute_file_hash(_CODE_MODULE_FILES["alpaca_provider_module"]),
         data_provider_at_freeze_time=_current_data_provider_selection(),
         required_options_feed_for_validation=REQUIRED_OPTIONS_FEED_FOR_VALIDATION,
