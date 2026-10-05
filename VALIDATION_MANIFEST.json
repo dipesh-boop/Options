@@ -1,8 +1,8 @@
 {
-  "manifest_version": "1.5.8",
-  "freeze_name": "PAPER_TRADING_V1.5.8",
-  "freeze_timestamp": "2026-10-05T15:36:02.067173Z",
-  "git_commit": "47378b25a14c3761e9797cef22f991264c94c1f2",
+  "manifest_version": "1.5.9",
+  "freeze_name": "PAPER_TRADING_V1.5.9",
+  "freeze_timestamp": "2026-10-05T17:24:38.919424Z",
+  "git_commit": "904ee5c248d525ede43a9b9fb8f6122daae3e190",
   "git_branch": "claude/options-trading-agent-2b4yi8",
   "repository_state": "dirty (4 uncommitted change(s))",
   "python_version": "3.11.15 (CPython)",
@@ -88,7 +88,7 @@
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
   "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
-  "freeze_version": "1.5.8",
+  "freeze_version": "1.5.9",
   "alpaca_provider_module_hash": "4c54584fb0452020918ec89bc690e6350745156428d5569f1ad39f4bea5a7610",
   "data_provider_at_freeze_time": "mock",
   "required_options_feed_for_validation": "opra",
@@ -108,7 +108,7 @@
   "orchestrator_cannot_bypass_risk_or_lifecycle": true,
   "opportunity_scan_never_outranks_risk_monitoring": true,
   "review_module_hash": "461729f1243ae0d9d84e2f246b71d02a3eaf43a485df9dee089f65a796ba9cd9",
-  "run_validation_cycle_script_hash": "da8e5c597314dac7b5792d965d7e9808150f57eb9fc77f910c80a9bb35d44fc7",
+  "run_validation_cycle_script_hash": "5ebab2836886c6d2bf0c2810611ed6895bdc1d8c5a53487d828998f2cc92f740",
   "confirm_candidate_script_hash": "7f46f9618d9a8a91a8f60a05e82ef21d0835b1bdc95c57ca97fc9ac7cf846f3f",
   "daily_cycle_never_calls_place_order": true,
   "review_only_path_never_imports_llm": true,
@@ -174,5 +174,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "39810106679948adfdd4a3beb41e311e4f3c334ecec1180e29b9faecb16caa95"
+  "manifest_hash": "fb7d7dc05fb80ee597ccddf1fa83d6fc258f97ba8eeb84f54ad73abd5edb23fa"
 }

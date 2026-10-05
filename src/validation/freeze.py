@@ -316,9 +316,46 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # or candidate-generation behavior changed; the active validation cohort
 # (`paper-trading-v1.4.3-validation-2026-09-22`) and its database were not
 # touched. See STEP_23_8_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.8"
+#
+# PAPER_TRADING_V1.5.9 (narrow safety release): the new-position
+# market-hours gate (`src.portfolio.market_session
+# .evaluate_validation_cycle_eligibility`, V1.5.1) was being enforced by
+# `scripts/run_validation_cycle.py` with an immediate `return False` the
+# moment the gate closed -- BEFORE `src.portfolio.orchestrator
+# .run_outer_cycle` (the only caller of `run_control_cycle`, which alone
+# invokes the Lifecycle Engine/Risk kill-switch) was ever reached, for ANY
+# reason the gate was closed, regardless of whether existing positions
+# needed evaluation. Both this script's own module docstring and
+# `market_session.py`'s docstring already claimed existing-position
+# monitoring "remains fully intact and callable regardless of this gate"
+# -- true of the UNMODIFIED Lifecycle/Risk code itself, but false of
+# whether it was ever actually CALLED when the gate was closed. Fixed by
+# separating the two questions `run_validation_cycle` now asks
+# independently: whether a new-position scan may start (unchanged), and
+# whether `Portfolio.positions` is non-empty and therefore needs
+# lifecycle/risk evaluation regardless (new). When the gate is closed and
+# positions exist, a new `_run_lifecycle_only_safety_check` helper calls
+# the SAME, UNMODIFIED `run_outer_cycle` with `OpportunityScanConfig`
+# omitted and `skip_opportunity_scan=True` -- structurally incapable of
+# scanning, generating a candidate, or constructing a `PaperBroker` at
+# all -- under its OWN cycle id (`f"validation-{date}-lifecycle"`),
+# distinct from the scan-eligible cycle's `f"validation-{date}"` id, so
+# this safety-net check can never consume, and therefore never block,
+# that day's real new-position opportunity once the scan window opens.
+# The zero-position, gate-closed case is UNCHANGED from pre-V1.5.9 (still
+# returns `False`, still touches no provider, persists nothing) --
+# proven by the pre-existing acceptance tests in
+# `tests/acceptance/test_market_hours_gate.py`, which pass unmodified.
+# No risk limit, Quant threshold, liquidity threshold, DTE policy,
+# ranking policy, candidate-generation behavior, NAV, or universe
+# changed; `src/portfolio/orchestrator.py`, `src/portfolio/control_loop.py`,
+# and `src/portfolio/market_session.py` were not touched -- only
+# `scripts/run_validation_cycle.py`'s own control flow. The active
+# validation cohort (`paper-trading-v1.4.3-validation-2026-09-22`) and
+# its database were not touched. See STEP_23_9_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.9"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.8"
+MANIFEST_VERSION = "1.5.9"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

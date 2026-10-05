@@ -6351,3 +6351,69 @@ V1.5.1) remains the one still-open, previously-flagged architecture
 issue, explicitly out of scope for this release per its own instructions.
 See `STEP_23_8_FREEZE_REPORT.md` for the full root-cause trace,
 provider/interface design, and identity-matching rules.
+
+## 2026-10-06 -- PAPER_TRADING_V1.5.9 (Step 9): lifecycle monitoring /
+market-hours safety fix
+
+**Root cause.** `scripts/run_validation_cycle.py::run_validation_cycle()`
+enforced the V1.5.1 new-position market-hours gate with an immediate
+`return False` the moment the gate closed -- BEFORE
+`src.portfolio.orchestrator.run_outer_cycle` (the only caller of
+`run_control_cycle`, which alone invokes the Lifecycle Engine/Risk
+kill-switch) was ever reached, for ANY reason the gate was closed,
+regardless of whether `Portfolio.positions` was empty. This directly
+contradicted both this script's own module docstring and
+`src.portfolio.market_session`'s module docstring, which already
+claimed existing-position monitoring "remains fully intact and
+callable regardless of this gate" -- true of the unmodified Lifecycle/
+Risk code itself, false of whether it was ever actually CALLED.
+
+**Fix.** `run_validation_cycle` now asks two questions independently:
+may a new-position scan start (unchanged, still gated by
+`evaluate_validation_cycle_eligibility` before any provider call or
+candidate persistence), and does `Portfolio.positions` need lifecycle/
+risk evaluation regardless. When the gate is closed and positions
+exist, a new `_run_lifecycle_only_safety_check` helper calls the SAME,
+unmodified `run_outer_cycle` with `opportunity_scan=None` and
+`skip_opportunity_scan=True` -- structurally incapable of scanning,
+generating a candidate, or constructing a `PaperBroker` -- under its
+OWN cycle id (`f"validation-{date}-lifecycle"`), distinct from the
+scan-eligible cycle's own `f"validation-{date}"` id. This separation
+is deliberate: `run_control_cycle` unconditionally consumes a per-
+cycle-id idempotency slot the moment it runs, so sharing the
+scan-eligible id would let an early, gate-closed safety check silently
+block that day's real new-position opportunity once the window
+opened. The zero-position, gate-closed case is unchanged from
+pre-V1.5.9 (still returns `False`, still touches no provider, persists
+nothing) -- proven by the pre-existing `test_market_hours_gate.py`
+tests, which pass unmodified. Weekends/holidays route through the same
+gate-closed branch as an ordinary pre/post-market closure -- a
+deliberate decision (documented, tested), not a separate code path;
+genuinely stale weekend data fails closed via the existing, unmodified
+freshness quality gate, exactly as it already does on an ordinary
+trading day.
+
+**Testing.** 11 new tests (`tests/acceptance/test_lifecycle_market_hours_separation.py`)
+covering all 12 of the task's edge cases: scan OPEN/CLOSED crossed with
+zero/one/multiple positions, stale data, provider failure, weekend
+behavior, idempotency (repeated invocation never duplicates a
+lifecycle decision or touches the provider twice), dashboard/CLI
+equivalence (proven via the real FastAPI route), and a direct proof
+that the lifecycle-only path can never create a candidate, order, or
+new position. Full suite: 3773 passed, 6 skipped, 9 failed -- the same
+9 pre-existing, date-rot failures already known and accepted on frozen
+V1.5.8 (verified directly via a temporary `git worktree` at the
+pristine V1.5.8 commit, same wall clock, identical 9 failures). Zero
+new failures. `make verify-freeze` against the regenerated
+`PAPER_TRADING_V1.5.9` manifest: every check passes, including
+`market_hours_gate_precedes_mutation` and
+`daily_cycle_never_calls_place_order`.
+
+**What remains open.** No risk/Quant/liquidity/DTE/ranking/candidate-
+generation/NAV/universe/strategy change of any kind. The active cohort
+(`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
+not touched. `src/portfolio/orchestrator.py`, `src/portfolio/control_loop.py`,
+and `src/portfolio/market_session.py` were not modified -- only
+`scripts/run_validation_cycle.py`'s own control flow. See
+`STEP_23_9_FREEZE_REPORT.md` for the full root-cause trace, old/new
+control-flow diagrams, and the complete idempotency-slot reasoning.
