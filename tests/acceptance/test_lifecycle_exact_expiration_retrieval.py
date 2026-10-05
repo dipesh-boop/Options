@@ -132,16 +132,37 @@ class _DenseExpirationFakeProvider(DteWindowOptionChainProvider):
     def __init__(
         self, *, slices_by_ticker: dict[str, list[tuple[date, list[OptionContract]]]], max_expirations: int = 6,
         stale_tickers: frozenset[str] = frozenset(), raising_tickers: frozenset[str] = frozenset(),
+        reference_now: datetime | None = None,
     ):
         self._slices_by_ticker = slices_by_ticker
         self._max_expirations = max_expirations
         self._stale_tickers = stale_tickers
         self._raising_tickers = raising_tickers
+        # PAPER_TRADING_V1.5.11: when a caller injects an explicit,
+        # simulated `now` into `run_validation_cycle(now=...)` (e.g. to
+        # test a specific market-local hour), contract/quote timestamps
+        # must be stamped relative to THAT simulated instant, never the
+        # real wall clock -- otherwise a simulated `now` set even one
+        # day away from the real wall clock would make every quote look
+        # wildly stale (or wildly "from the future") purely as an
+        # artifact of this fake, never a real freshness condition the
+        # test intended to exercise. `None` (every V1.5.10 caller)
+        # preserves the original real-wall-clock behavior exactly.
+        self._reference_now = reference_now
         self.get_option_chain_calls: list[str] = []
         self.get_option_chain_for_dte_window_calls: list[tuple[str, int, int]] = []
 
+    def set_reference_now(self, reference_now: datetime) -> None:
+        """Lets a test reuse the SAME provider instance across multiple
+        `run_validation_cycle(now=...)` calls at different simulated
+        instants (e.g. a 10am main cycle, then a 1pm hourly recheck)
+        while still stamping each call's own data relative to that
+        call's own simulated `now` rather than whatever instant the
+        provider happened to be constructed at."""
+        self._reference_now = reference_now
+
     def _as_of_for(self, symbol: str) -> datetime:
-        as_of = datetime.now(timezone.utc)
+        as_of = self._reference_now if self._reference_now is not None else datetime.now(timezone.utc)
         if symbol in self._stale_tickers:
             as_of -= timedelta(hours=6)  # far beyond the 15-minute freshness tolerance
         return as_of
@@ -149,13 +170,24 @@ class _DenseExpirationFakeProvider(DteWindowOptionChainProvider):
     def _underlying(self, symbol: str, as_of: datetime) -> UnderlyingQuote:
         return UnderlyingQuote(symbol=symbol, bid=454.5, ask=455.5, last=455.0, volume=1000, timestamp=as_of, source="tradier")
 
+    def _restamped(self, contracts: list[OptionContract], symbol: str, as_of: datetime) -> list[OptionContract]:
+        """`_dense_near_term_slices`/`_held_slice` bake a contract's
+        `.timestamp` in at TEST-SETUP time (real wall clock), independent
+        of this provider's `_reference_now` -- re-stamping here at fetch
+        time is what actually makes a test's simulated `now` control
+        freshness, exactly like a real provider's quote would be "fresh
+        as of whenever it was fetched." A `stale_tickers` ticker keeps
+        its already-backdated `_as_of_for` value, so staleness tests are
+        unaffected."""
+        return [c.model_copy(update={"timestamp": as_of}) for c in contracts]
+
     async def get_option_chain(self, symbol: str) -> OptionChain:
         self.get_option_chain_calls.append(symbol)
         if symbol in self._raising_tickers:
             raise RuntimeError(f"simulated provider failure for {symbol}")
         slices = sorted(self._slices_by_ticker.get(symbol, []), key=lambda s: s[0])[: self._max_expirations]
         as_of = self._as_of_for(symbol)
-        contracts = [c for _, cs in slices for c in cs]
+        contracts = self._restamped([c for _, cs in slices for c in cs], symbol, as_of)
         return OptionChain(underlying=self._underlying(symbol, as_of), contracts=contracts, timestamp=as_of, source="tradier")
 
     async def get_option_chain_for_dte_window(
@@ -168,7 +200,7 @@ class _DenseExpirationFakeProvider(DteWindowOptionChainProvider):
             (exp, cs) for exp, cs in self._slices_by_ticker.get(symbol, []) if min_dte <= (exp - as_of).days <= max_dte
         ]
         chain_as_of = self._as_of_for(symbol)
-        contracts = [c for _, cs in eligible for c in cs]
+        contracts = self._restamped([c for _, cs in eligible for c in cs], symbol, chain_as_of)
         return OptionChain(underlying=self._underlying(symbol, chain_as_of), contracts=contracts, timestamp=chain_as_of, source="tradier")
 
     async def get_underlying_quote(self, symbol: str) -> UnderlyingQuote:

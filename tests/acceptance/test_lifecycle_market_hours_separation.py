@@ -31,6 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from src.data.market_calendar import EASTERN
 from src.data.option_chain import OptionChain, OptionContract, OptionRight
 from src.data.quotes import UnderlyingQuote
 from src.llm.schemas import StrategyType
@@ -145,7 +146,12 @@ def _patch_env(monkeypatch):
 
 
 def _lifecycle_cycle_id() -> str:
-    return f"validation-{datetime.now(timezone.utc).date().isoformat()}-lifecycle"
+    """PAPER_TRADING_V1.5.11: the lifecycle-only cycle id is now
+    bucketed by the market-local (America/New_York) hour, not merely
+    the whole day -- mirrors `_run_lifecycle_only_safety_check`'s own
+    construction exactly."""
+    local = datetime.now(timezone.utc).astimezone(EASTERN)
+    return f"validation-{local.date().isoformat()}-lifecycle-{local.hour:02d}"
 
 
 def _main_cycle_id() -> str:

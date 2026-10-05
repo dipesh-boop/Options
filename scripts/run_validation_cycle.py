@@ -3,7 +3,34 @@
 usability/startup fixes in Step 22.8; dashboard UI completion in
 Step 22.9; market-hours safety gate in Step 2, PAPER_TRADING_V1.5.1;
 lifecycle/market-hours separation in PAPER_TRADING_V1.5.9;
-existing-position retrieval safety fix in PAPER_TRADING_V1.5.10).
+existing-position retrieval safety fix in PAPER_TRADING_V1.5.10;
+manual intraday lifecycle recheck safety release in
+PAPER_TRADING_V1.5.11).
+
+**PAPER_TRADING_V1.5.11: a manually-initiated existing-position
+lifecycle recheck may now run more than once per trading day.** The
+V1.5.9/V1.5.10 lifecycle-only safety check was still blocked, in full,
+by this function's OWN top-level `validation-{date}` early-return the
+moment the main cycle had run once that day -- a second manual
+invocation later the same day, even with open positions and even with
+a materially-changed market, did nothing at all (not even reaching
+`_run_lifecycle_only_safety_check`). Fixed by no longer treating
+"the main cycle already ran today" as a reason to do NOTHING for the
+rest of this invocation -- it is now a reason only to skip the
+opportunity-scan continuation specifically (new-position scanning
+remains at most once per trading day, exactly as before: the main
+`cycle_id` and its own idempotency check are both completely
+unmodified). Existing positions found at that point still get routed
+to `_run_lifecycle_only_safety_check`, exactly as the gate-closed
+branch already did. That function's own cycle id is now bucketed by
+the market-local (America/New_York, DST-correct via `zoneinfo`) hour
+rather than the whole day, so a genuinely new manual recheck in a new
+hour runs fresh, while a second call within the SAME hour is still a
+documented no-op (a duplicate/retry guard, never a scheduler -- no
+automatic trigger of any kind was added; every invocation remains as
+manually-initiated, via the CLI or the one existing dashboard POST
+route, as it already was). See `_run_lifecycle_only_safety_check`'s own
+docstring and `STEP_23_11_FREEZE_REPORT.md` for the complete trace.
 
 **PAPER_TRADING_V1.5.10: existing-position market-data retrieval must
 cover each position's ACTUAL held expiration, never merely the
@@ -177,7 +204,7 @@ from src.data.factory import (  # noqa: E402
     verify_official_provider_is_tradier_production,
 )
 from src.data.historical import HistoricalDataProvider  # noqa: E402
-from src.data.market_calendar import is_market_open, is_trading_day  # noqa: E402
+from src.data.market_calendar import EASTERN, is_market_open, is_trading_day  # noqa: E402
 from src.data.option_chain import OptionChain, merge_option_chains  # noqa: E402
 from src.data.provider import DteWindowOptionChainProvider, DteWindowSelectionDiagnostics  # noqa: E402
 from src.data.universe import load_universe, load_universe_strategies  # noqa: E402
@@ -307,19 +334,37 @@ async def _run_lifecycle_only_safety_check(
     own fill-simulation state, and nothing in this function can mutate
     either.
 
-    **Own cycle id, deliberately.** Uses `f"validation-{date}-lifecycle"`,
+    **Own cycle id, deliberately -- and, since PAPER_TRADING_V1.5.11,
+    bucketed by the hour, not the whole day.** Uses
+    `f"validation-{market-local date}-lifecycle-{market-local hour:02d}"`,
     never the scan-eligible cycle's own `f"validation-{date}"` id --
     `run_control_cycle` unconditionally persists a `ControlCycleRecord`
     keyed by whatever cycle id it's given the moment it runs, consuming
-    that id's once-per-day idempotency slot. Sharing the scan-eligible
-    id here would let an early, gate-closed safety check silently
-    consume the day's REAL opportunity-scan slot, permanently blocking
-    that day's actual new-position scan once the window opened --
-    exactly the kind of regression this fix must not introduce. The two
-    ids are independently idempotent: a second gate-closed invocation
-    the same day sees its own `-lifecycle` record already exists and
-    no-ops; the scan-eligible cycle later that same day sees its own,
-    still-untouched id and proceeds completely normally.
+    that id's idempotency slot. Sharing the scan-eligible id here would
+    let an early, gate-closed safety check silently consume the day's
+    REAL opportunity-scan slot, permanently blocking that day's actual
+    new-position scan once the window opened -- exactly the kind of
+    regression this fix must not introduce. The two id FAMILIES are
+    independently idempotent: a second call within the SAME market-local
+    hour sees its own hourly record already exists and no-ops (a
+    duplicate/retry guard -- documented, not a scheduler); a call in a
+    NEW hour -- whether later the same day, or after the main cycle has
+    already run today -- gets its own, still-untouched hourly id and
+    runs a fresh evaluation; the scan-eligible cycle, whenever its own
+    window is open, sees its own, still-untouched daily id and proceeds
+    completely normally. PAPER_TRADING_V1.5.11 explicitly does NOT add
+    an automatic scheduler, background loop, or periodic trigger of any
+    kind -- every lifecycle-only invocation remains exactly as
+    manually-initiated (CLI or the one dashboard POST route) as it
+    already was; the hourly bucket only changes what a manual recheck is
+    ALLOWED to do, never what causes one to happen. The hour is computed
+    from `now`'s own America/New_York-local wall-clock hour (the same
+    `EASTERN` zoneinfo `src.data.market_calendar` already uses
+    throughout this codebase), not from `now`'s own timezone (`now` is
+    UTC in every real invocation) -- using UTC's hour directly would
+    silently misalign the bucket boundary from the market session this
+    whole module is about, and `zoneinfo`-based conversion already
+    handles DST correctly with no fixed-offset special-casing needed.
 
     **Fetches ONLY existing positions' tickers**, via `_fetch_existing_
     position_chain` (PAPER_TRADING_V1.5.10) -- never the scan universe,
@@ -336,9 +381,10 @@ async def _run_lifecycle_only_safety_check(
     matching contract) fails closed to `DATA_INSUFFICIENT` exactly as
     before -- this function only ever widens what can be successfully
     retrieved, never what counts as a valid match."""
-    lifecycle_cycle_id = f"validation-{now.date().isoformat()}-lifecycle"
+    local_now = now.astimezone(EASTERN)
+    lifecycle_cycle_id = f"validation-{local_now.date().isoformat()}-lifecycle-{local_now.hour:02d}"
     if control_loop_store.get_cycle_record(lifecycle_cycle_id) is not None:
-        print(f"Lifecycle-only safety check {lifecycle_cycle_id!r} already ran today -- nothing to do.")
+        print(f"Lifecycle-only safety check {lifecycle_cycle_id!r} already ran this hour -- nothing to do.")
         return True
 
     provider = get_configured_market_data_provider()
@@ -475,9 +521,17 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
     cycle_id = f"validation-{now.date().isoformat()}"
     _line("cycle_id", cycle_id)
 
-    if control_loop_store.get_cycle_record(cycle_id) is not None:
-        print(f"Cycle {cycle_id!r} already ran today -- nothing to do.")
-        return True
+    # PAPER_TRADING_V1.5.11: captured as a plain boolean rather than an
+    # immediate `return True` -- the old unconditional early-return here
+    # blocked EVERYTHING this function could do for the rest of the day
+    # the instant the main cycle ran once, including a later, manually-
+    # initiated existing-position lifecycle recheck. The main cycle's own
+    # once-per-trading-day guarantee is unchanged (see below: this boolean
+    # only ever SKIPS the opportunity-scan continuation; it never lets a
+    # second opportunity scan, candidate, or snapshot through) -- it is
+    # just no longer the one check that decides whether the ENTIRE
+    # function does anything at all this invocation.
+    main_cycle_already_ran = control_loop_store.get_cycle_record(cycle_id) is not None
 
     # PAPER_TRADING_V1.5.9: candidate TTL hygiene is unrelated to whether
     # the new-position scan window happens to be open right now -- runs
@@ -507,6 +561,26 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         )
 
     _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
+
+    # PAPER_TRADING_V1.5.11: the new-position scan window is open, but
+    # today's one-and-only opportunity scan already happened under
+    # `cycle_id` -- new-position scanning stays at most once per trading
+    # day (this never re-enters the opportunity-scan continuation below).
+    # Existing positions, if any, may still receive a manually-initiated
+    # lifecycle recheck -- `_run_lifecycle_only_safety_check` uses its OWN,
+    # hourly-bucketed cycle id (never `cycle_id` itself), so this can never
+    # consume, duplicate, or otherwise interact with the main cycle's own
+    # idempotency slot.
+    if main_cycle_already_ran:
+        block_reason = f"cycle {cycle_id!r} already completed today's new-position scan"
+        print(f"Cycle {cycle_id!r} already ran today -- new-position scanning stays at most once per trading day.")
+        if not existing_positions:
+            print("No existing positions -- nothing further to do this invocation.")
+            return True
+        return await _run_lifecycle_only_safety_check(
+            now=now, block_reason=block_reason, limits=limits, portfolio=existing_portfolio,
+            lifecycle_store=lifecycle_store, control_loop_store=control_loop_store,
+        )
 
     portfolio = existing_portfolio
     if portfolio is None:
