@@ -2,6 +2,36 @@
 may call `PaperBroker.place_order` for a NEW position during the Review-Only
 90-day validation.
 
+**Exact-expiration confirmation refresh (PAPER_TRADING_V1.5.8).** Before this
+step, the market-data refresh below called `MarketDataProvider.get_option_chain`
+-- a nearest-N-expirations fetch with no guarantee the candidate's own
+persisted `TradeProposal.expiration` is among the N returned (the same
+nearest-N limitation PAPER_TRADING_V1.5.6 already fixed at scan time via
+`src.data.provider.DteWindowOptionChainProvider`, but which this, the final
+safety boundary before a PaperBroker fill, had not yet adopted). Per-leg
+contract matching itself (`src.risk.trade_risk.resolve_leg_contracts` /
+`_find_contract`, both unmodified by this step) already matches strictly on
+`(underlying, expiration, strike, right)` and already raises
+`ContractNotFoundError` on any unmatched leg -- there was never a risk of a
+*wrong* contract being silently substituted. The risk V1.5.8 closes is
+narrower but still real: confirmation could spuriously and unnecessarily
+fail (or, in principle, simply never retrieve the data needed to make a
+sound decision) purely because the default nearest-N window happened not to
+reach the candidate's actual expiration, rather than because that data was
+genuinely unavailable. `_fetch_exact_expiration_chain` below closes this by
+deliberately requesting the EXACT persisted expiration -- reusing the
+already provider-neutral `DteWindowOptionChainProvider` capability with
+`min_dte == max_dte` collapsed to a single calendar date, never adding a
+new interface and never special-casing Tradier in this module. A provider
+without that capability falls back to the pre-V1.5.8 `get_option_chain`
+call, unchanged -- this step never weakens what already existed for such a
+provider; it only makes the preferred path deliberate instead of
+incidental. An explicit post-fetch check then verifies the exact expiration
+was actually returned before any Quant/Risk recomputation proceeds --
+failing closed with `DATA_INSUFFICIENT`, never substituting a nearby
+expiration -- so the "fetch the wrong window" failure mode is now
+impossible rather than merely improbable.
+
 **No LLM review of any kind occurs here, and none is faked.** This
 deliberately does NOT call `src.orchestration.pipeline.run_order_pipeline`
 (which hard-requires a `devils_advocate_stage`/`portfolio_manager_stage`
@@ -32,13 +62,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 from src.brokers.base import Fill
 from src.brokers.order_validator import OrderValidationError, validate_and_build_order_request
 from src.brokers.paper import PaperBroker
-from src.data.provider import MarketDataProvider
+from src.data.option_chain import OptionChain
+from src.data.provider import DteWindowOptionChainProvider, MarketDataProvider
 from src.orchestration.pipeline import default_portfolio_update_stage, default_quant_stage
 from src.portfolio.account_state import PaperAccountStateStore, PortfolioStore
 from src.review.candidates import CandidateReviewStore, CandidateStatus, ConfirmationAttemptRecord, ReviewedCandidate
@@ -92,6 +123,38 @@ class ConfirmCandidateInputs:
     automated_broker_capabilities: BrokerCapabilities | None
     max_price_drift_pct: float
     max_capital_required_drift_pct: float
+
+
+async def _fetch_exact_expiration_chain(
+    provider: MarketDataProvider, ticker: str, expiration: date, *, as_of: datetime,
+) -> OptionChain:
+    """PAPER_TRADING_V1.5.8: confirmation's refresh must target the
+    candidate's EXACT persisted `TradeProposal.expiration`, never rely on a
+    provider's nearest-N-expirations default to happen to include it.
+
+    Reuses the existing, already provider-neutral
+    `src.data.provider.DteWindowOptionChainProvider` capability
+    (PAPER_TRADING_V1.5.6) rather than adding any new interface or any
+    Tradier-specific logic here: requesting `min_dte == max_dte` collapses
+    that capability's window to exactly one calendar date -- the
+    candidate's persisted expiration, nothing else. Per that interface's
+    own documented contract, if the provider has no expiration in that
+    single-day window it returns a chain with zero contracts rather than
+    substituting one outside the window -- this function inherits that
+    fail-honest behavior rather than reimplementing it.
+
+    A provider with no exact-window capability falls back to the
+    pre-V1.5.8 `get_option_chain` fetch, unchanged -- never weakened, never
+    special-cased for Tradier. Either way, confirmation's own exact-identity
+    leg matching (`src.risk.trade_risk.resolve_leg_contracts`/
+    `_find_contract`, untouched by this step) is what ultimately fails
+    closed if the exact contract still isn't present; this function only
+    makes finding it in the first place deliberate rather than incidental.
+    """
+    if isinstance(provider, DteWindowOptionChainProvider):
+        dte = (expiration - as_of.date()).days
+        return await provider.get_option_chain_for_dte_window(ticker, min_dte=dte, max_dte=dte, as_of=as_of.date())
+    return await provider.get_option_chain(ticker)
 
 
 def _record_attempt(
@@ -188,11 +251,32 @@ async def confirm_candidate(inputs: ConfirmCandidateInputs) -> ConfirmationOutco
         )
 
     try:
-        chain = await inputs.market_data_provider.get_option_chain(candidate.proposal.ticker)
+        # V1.5.8: deliberately targets the candidate's EXACT persisted
+        # expiration -- see _fetch_exact_expiration_chain's own docstring.
+        chain = await _fetch_exact_expiration_chain(
+            inputs.market_data_provider, candidate.proposal.ticker, candidate.proposal.expiration, as_of=inputs.now,
+        )
     except Exception as exc:  # noqa: BLE001 - any fetch failure is DATA_INSUFFICIENT, never a crash
         return _finalize(
             inputs, candidate, outcome=ConfirmationOutcome.DATA_INSUFFICIENT,
             detail=f"fresh market data fetch failed: {exc!r}", original_quoted_economics=original_economics,
+        )
+
+    if not any(c.expiration == candidate.proposal.expiration for c in chain.contracts):
+        # V1.5.8 fail-closed boundary, stated explicitly and checked BEFORE
+        # any Quant/Risk recomputation: the exact persisted expiration was
+        # not returned by the refresh. This is never a "try a nearby
+        # expiration instead" situation -- a candidate whose exact
+        # expiration cannot be refreshed is DATA_INSUFFICIENT, full stop.
+        return _finalize(
+            inputs, candidate, outcome=ConfirmationOutcome.DATA_INSUFFICIENT,
+            detail=(
+                f"confirmation requires the exact persisted expiration "
+                f"{candidate.proposal.expiration.isoformat()} for {candidate.proposal.ticker}, but no contract "
+                "at that exact expiration could be refreshed -- failing closed rather than substituting "
+                "a nearby expiration"
+            ),
+            original_quoted_economics=original_economics,
         )
 
     try:
