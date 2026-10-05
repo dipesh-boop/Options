@@ -1,7 +1,35 @@
 #!/usr/bin/env python3
 """Operator-run daily validation-cycle runner (Step 22.6; operator
 usability/startup fixes in Step 22.8; dashboard UI completion in
-Step 22.9; market-hours safety gate in Step 2, PAPER_TRADING_V1.5.1).
+Step 22.9; market-hours safety gate in Step 2, PAPER_TRADING_V1.5.1;
+lifecycle/market-hours separation in PAPER_TRADING_V1.5.9).
+
+**PAPER_TRADING_V1.5.9: the new-position market-hours gate must never
+suppress existing-position Lifecycle Engine/Risk kill-switch monitoring.**
+Before this step, a closed scan window made this function `return False`
+immediately -- before `run_outer_cycle` (the only caller of
+`run_control_cycle`) was ever reached, for ANY reason the gate was
+closed, even on a day with open positions genuinely needing evaluation.
+Fixed by separating two questions this function now asks independently:
+"may a new-position scan start right now" (unchanged: still
+`evaluate_validation_cycle_eligibility`, still enforced before any
+market-data provider call or candidate persistence) and "do existing
+positions need lifecycle/risk evaluation regardless" (new: whenever the
+gate is closed AND `Portfolio.positions` is non-empty, this function
+runs a lifecycle-ONLY pass through the unmodified `run_outer_cycle`,
+with `OpportunityScanConfig` omitted and `skip_opportunity_scan=True` so
+no scan, no candidate, and no `PaperBroker.place_order` call can occur).
+This lifecycle-only pass uses its OWN cycle id
+(`f"validation-{date}-lifecycle"`), distinct from the scan-eligible
+cycle's own `f"validation-{date}"` id -- `run_control_cycle` unconditionally
+consumes a per-cycle-id idempotency slot the moment it runs, so sharing
+one id between the two would let an early, gate-closed lifecycle check
+silently consume the day's REAL scan-eligible slot, permanently blocking
+that day's actual new-position opportunity once the window opened. The
+zero-position, gate-closed case is UNCHANGED from pre-V1.5.9: still
+returns `False`, still touches no provider, persists no record -- see
+`_run_lifecycle_only_safety_check`'s own docstring for the full
+reasoning and `STEP_23_9_FREEZE_REPORT.md` for the complete trace.
 
 **Explicit CLI, parsed before anything else runs.** `main()`'s very first
 statement is `parser.parse_args()`. `--help`/`-h` prints usage and exits 0;
@@ -51,10 +79,13 @@ so a provider that was never going to be Tradier in the first place
 (`mock`, `alpaca`, `ibkr`, Tradier's own sandbox host) can never reach
 that fetch, or touch official validation state, at all.
 
-Existing positions are still evaluated every cycle through the unmodified
+Existing positions are evaluated through the unmodified
 `src.portfolio.orchestrator.run_outer_cycle` (Lifecycle Engine + Risk kill-
-switch), exactly as designed -- only new-position execution is gated behind
-human confirmation.
+switch) -- during the normal scan-eligible cycle below, AND (PAPER_TRADING_V1.5.9)
+via a dedicated lifecycle-only pass whenever the scan window is closed but
+open positions exist, so this evaluation is never conditional on the scan
+window being open. Only new-position execution is gated behind human
+confirmation -- that gate is unconditional and unaffected by this step.
 
 **Step 2: the new-position daily opportunity scan may only START during
 the approved regular market session.** Immediately after the provider
@@ -63,14 +94,20 @@ market-data provider is constructed, before any cycle/candidate/snapshot
 record is persisted), `src.portfolio.market_session
 .evaluate_validation_cycle_eligibility` decides whether today's session
 is open, in a trading day, and past the configured post-open/pre-close
-buffer (`config/operations.yaml`'s `market_hours` section) -- if not,
-this function fails closed with a plain reason and nothing below this
-point ever runs. This gate lives ONLY here, in this one script's daily-
-invocation entry point; it never touches `run_control_cycle`/
-`evaluate_position`/`check_kill_switch`, so existing-position Lifecycle/
-Risk monitoring remains fully intact and callable regardless of this
-gate. Fails closed if the market calendar itself cannot be evaluated --
-see that module's own docstring for the full reasoning.
+buffer (`config/operations.yaml`'s `market_hours` section). This gate
+lives ONLY here, in this one script's daily-invocation entry point; it
+never touches `run_control_cycle`/`evaluate_position`/`check_kill_switch`
+themselves (confirmed by a dedicated structural test), so existing-position
+Lifecycle/Risk monitoring remains fully intact and independently callable.
+PAPER_TRADING_V1.5.9 correction: before this step, this function also
+*stopped running entirely* the moment the gate closed -- meaning
+`run_outer_cycle` (the only caller of `run_control_cycle`) was never
+reached either, for ANY reason the gate was closed, regardless of
+whether positions existed. The module docstring above now reflects the
+corrected behavior; see `_run_lifecycle_only_safety_check` for exactly
+how the gate closing now affects ONLY the opportunity-scan sub-stage.
+Fails closed if the market calendar itself cannot be evaluated -- see
+that module's own docstring for the full reasoning.
 
 Cycle-level idempotent: if today's cycle already completed
 (`SqliteControlLoopStore.get_cycle_record`), this script logs and exits 0
@@ -122,7 +159,7 @@ from src.portfolio.persistence import SqliteControlLoopStore  # noqa: E402
 from src.review.candidates import CandidateStatus, ReviewedCandidate, SqliteCandidateReviewStore  # noqa: E402
 from src.risk.broker_constraints import load_broker_capabilities  # noqa: E402
 from src.risk.engine import evaluate_trade_proposal  # noqa: E402
-from src.risk.limits import get_default_limits  # noqa: E402
+from src.risk.limits import RiskLimitsConfig, get_default_limits  # noqa: E402
 from src.risk.portfolio_risk import Portfolio, sector_exposure_pct, underlying_exposure_pct  # noqa: E402
 from src.strategies.base import StrategyKind  # noqa: E402
 from src.validation.cohort import has_cohort_started  # noqa: E402
@@ -158,6 +195,106 @@ def _expire_stale_candidates(review_store, cohort_id: str, validation_store, now
         expired_count += 1
         _line("expired stale candidate", candidate.candidate_id)
     return expired_count
+
+
+async def _run_lifecycle_only_safety_check(
+    *, now: datetime, block_reason: str | None, limits: RiskLimitsConfig, portfolio: Portfolio,
+    lifecycle_store, control_loop_store,
+) -> bool:
+    """PAPER_TRADING_V1.5.9: existing-position Lifecycle Engine/Risk
+    kill-switch monitoring must never be suppressed merely because the
+    new-position scan window is closed -- see this module's own
+    docstring. Called ONLY by `run_validation_cycle`, and only when
+    `evaluate_validation_cycle_eligibility` blocked the new-position scan
+    AND `portfolio.positions` is non-empty (the zero-position case is a
+    safe no-op the caller handles itself, without ever reaching here).
+
+    **Structurally cannot scan, generate a candidate, or fill an order.**
+    Calls the exact same, unmodified `src.portfolio.orchestrator
+    .run_outer_cycle` the normal scan-eligible cycle below calls, with
+    `OuterCycleInputs.opportunity_scan=None` and `skip_opportunity_scan=
+    True` -- `_run_opportunity_scan_stage` (orchestrator.py) returns a
+    pure no-op for both reasons independently, so there is no way for
+    this call to reach `scan_and_rank_opportunities`,
+    `evaluate_trade_proposal` for a NEW candidate, or
+    `PaperBroker.place_order`. Nothing here constructs a `PaperBroker`
+    at all -- lifecycle evaluation only ever reads `Portfolio.positions`
+    (an independent, already-durable domain object), never the broker's
+    own fill-simulation state, and nothing in this function can mutate
+    either.
+
+    **Own cycle id, deliberately.** Uses `f"validation-{date}-lifecycle"`,
+    never the scan-eligible cycle's own `f"validation-{date}"` id --
+    `run_control_cycle` unconditionally persists a `ControlCycleRecord`
+    keyed by whatever cycle id it's given the moment it runs, consuming
+    that id's once-per-day idempotency slot. Sharing the scan-eligible
+    id here would let an early, gate-closed safety check silently
+    consume the day's REAL opportunity-scan slot, permanently blocking
+    that day's actual new-position scan once the window opened --
+    exactly the kind of regression this fix must not introduce. The two
+    ids are independently idempotent: a second gate-closed invocation
+    the same day sees its own `-lifecycle` record already exists and
+    no-ops; the scan-eligible cycle later that same day sees its own,
+    still-untouched id and proceeds completely normally.
+
+    **Fetches ONLY existing positions' tickers**, via the provider's
+    plain `get_option_chain` (the same near-term-appropriate call the
+    normal cycle already uses for position tickers) -- never the scan
+    universe, never a DTE-windowed fetch (there is no candidate
+    generation to serve). All existing freshness/quality-gate/kill-switch
+    protections apply completely unchanged, since this flows through the
+    identical, unmodified `run_control_cycle`."""
+    lifecycle_cycle_id = f"validation-{now.date().isoformat()}-lifecycle"
+    if control_loop_store.get_cycle_record(lifecycle_cycle_id) is not None:
+        print(f"Lifecycle-only safety check {lifecycle_cycle_id!r} already ran today -- nothing to do.")
+        return True
+
+    provider = get_configured_market_data_provider()
+    position_tickers = sorted({p.ticker for p in portfolio.positions})
+    fetch_results: dict[str, OptionChain | Exception] = {}
+    try:
+        for ticker in position_tickers:
+            try:
+                fetch_results[ticker] = await provider.get_option_chain(ticker)
+            except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the cycle
+                fetch_results[ticker] = exc
+    finally:
+        close = getattr(provider, "close", None)
+        if close is not None:
+            await close()
+
+    failed = [t for t, c in fetch_results.items() if isinstance(c, Exception)]
+    if failed:
+        _line("lifecycle-only safety check -- symbols failed (isolated, cycle continues)", failed)
+    provider_name = next((c.source for c in fetch_results.values() if isinstance(c, OptionChain)), "unknown")
+    provider_health_status = "healthy" if not failed else "degraded"
+
+    policy_name_for_position = {
+        p.position_id: policies_for_strategy(StrategyKind(p.strategy.value))[0].name for p in portfolio.positions
+    }
+
+    inputs = OuterCycleInputs(
+        cycle_id=lifecycle_cycle_id, as_of=now, portfolio=portfolio, limits=limits,
+        provider=provider_name, provider_health_status=provider_health_status,
+        is_trading_day=is_trading_day(now.date()), is_market_open=is_market_open(now),
+        fetch_results=fetch_results, lifecycle_store=lifecycle_store, control_loop_store=control_loop_store,
+        policy_name_for_position=policy_name_for_position,
+        opportunity_scan=None, skip_opportunity_scan=True,
+    )
+    result = run_outer_cycle(inputs)
+
+    _line("lifecycle-only safety check -- existing positions evaluated", result.control_result.cycle_record.positions_evaluated)
+    _line("lifecycle-only safety check -- lifecycle triggers", result.control_result.cycle_record.lifecycle_triggers)
+    _line("lifecycle-only safety check -- degraded_mode", result.control_result.cycle_record.degraded_mode)
+    if result.new_alerts:
+        _line("lifecycle-only safety check -- new alerts", len(result.new_alerts))
+
+    print(
+        "\nPASS: lifecycle-only safety check complete -- existing positions were evaluated through the "
+        "unmodified Lifecycle Engine/Risk kill-switch. New-position scanning was skipped this invocation "
+        f"because the new-position scan window is closed ({block_reason})."
+    )
+    return True
 
 
 async def run_validation_cycle(*, now: datetime | None = None) -> bool:
@@ -217,31 +354,21 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         return False
     _line("provider preflight", "Tradier production market data configured")
 
-    # PAPER_TRADING_V1.5.1, Step 2: the new-position daily opportunity
-    # scan's market-hours safety gate -- checked BEFORE any store beyond
-    # `validation_store` (already open for the cohort-started check
-    # above) is constructed, before `cycle_id` is computed, before the
-    # market-data provider is touched, before `_expire_stale_candidates`
-    # (this script's first real mutation), and therefore before any
-    # candidate/cycle/snapshot record could be persisted. See
-    # `src.portfolio.market_session`'s module docstring for why gating
-    # the WHOLE daily invocation here (rather than only the opportunity-
-    # scan sub-stage inside `run_outer_cycle`) is the safe choice: it
-    # never adds a market-hours check inside `run_control_cycle`/
-    # `evaluate_position`/`check_kill_switch` themselves, so existing-
-    # position Lifecycle Engine/Risk kill-switch monitoring remains
-    # fully intact, unmodified, and independently callable -- this gate
-    # only ever decides whether THIS script's one daily automated
-    # invocation may start, exactly like the provider preflight above
-    # already does for a different reason.
+    # PAPER_TRADING_V1.5.1, Step 2 (behavior corrected in PAPER_TRADING_V1.5.9):
+    # the new-position daily opportunity scan's market-hours safety gate --
+    # evaluated BEFORE any store beyond `validation_store` (already open for
+    # the cohort-started check above) is constructed, before `cycle_id` is
+    # computed, before the market-data provider is touched, before
+    # `_expire_stale_candidates` runs, and therefore before any new-position
+    # candidate/scan-cycle/snapshot record could be persisted. Unlike
+    # pre-V1.5.9, a closed gate no longer returns immediately here -- see
+    # `_run_lifecycle_only_safety_check` below for why: existing-position
+    # Lifecycle Engine/Risk kill-switch monitoring must still run whenever
+    # `Portfolio.positions` is non-empty, regardless of this gate.
     now = now or datetime.now(timezone.utc)
     eligibility = evaluate_validation_cycle_eligibility(
         now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
     )
-    if not eligibility.validation_cycle_allowed:
-        print(f"FAIL: market-hours gate -- {eligibility.block_reason}")
-        return False
-    _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
 
     control_loop_store = SqliteControlLoopStore(ops.control_loop_db_path)
     lifecycle_store = SqliteLifecycleStore(ops.lifecycle_db_path)
@@ -256,9 +383,36 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         print(f"Cycle {cycle_id!r} already ran today -- nothing to do.")
         return True
 
+    # PAPER_TRADING_V1.5.9: candidate TTL hygiene is unrelated to whether
+    # the new-position scan window happens to be open right now -- runs
+    # unconditionally, exactly like the cohort/provider preflights above it.
     _expire_stale_candidates(review_store, ops.cohort_id, validation_store, now)
 
-    portfolio = portfolio_store.get(ops.account_id)
+    # PAPER_TRADING_V1.5.9: peeked read-only here (no bootstrap yet) so the
+    # gate-closed branch below can decide "lifecycle-only" vs "safe no-op"
+    # from the REAL current position count, without ever constructing a
+    # market-data provider or persisting anything for an account that has
+    # no positions and whose scan window is closed (preserves the exact
+    # pre-V1.5.9 zero-position behavior byte-for-byte).
+    existing_portfolio = portfolio_store.get(ops.account_id)
+    existing_positions = existing_portfolio.positions if existing_portfolio is not None else []
+
+    if not eligibility.validation_cycle_allowed:
+        _line("market-hours gate", f"new-position scan window closed -- {eligibility.block_reason}")
+        if not existing_positions:
+            print(
+                "FAIL: new-position scan window closed and no existing positions require lifecycle "
+                "monitoring -- safe no-op, nothing was persisted."
+            )
+            return False
+        return await _run_lifecycle_only_safety_check(
+            now=now, block_reason=eligibility.block_reason, limits=limits, portfolio=existing_portfolio,
+            lifecycle_store=lifecycle_store, control_loop_store=control_loop_store,
+        )
+
+    _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
+
+    portfolio = existing_portfolio
     if portfolio is None:
         _line(
             "bootstrapping Portfolio for a never-before-seen account",
