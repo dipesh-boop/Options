@@ -6614,3 +6614,69 @@ flow and lifecycle-only cycle-id construction, plus the additive test-
 infrastructure fixes above. See `STEP_23_11_FREEZE_REPORT.md` for the
 full root-cause trace, old/new control-flow diagrams, and the complete
 timezone/bucket/alert-dedup reasoning.
+
+## Step 23.12 -- PAPER_TRADING_V1.5.12 (Proposal-ID Length Bug Fix)
+
+**What was built.** The official 2026-10-06 validation cycle's two
+PUT_CREDIT_SPREAD candidates both failed with a Pydantic
+`ValidationError` before ever reaching Quant/Risk, while its two
+CASH_SECURED_PUT candidates both passed Quant and were correctly
+rejected by Risk. Root cause: `scripts/run_validation_cycle.py` called
+the opportunity scan with `proposal_id_prefix=f"validation-scan-
+{now.date().isoformat()}"`, but `src.workflows.candidate_generation
+._next_id()` independently appends `now.date().isoformat()` to every
+proposal_id it builds (its own, pre-existing SY-001 uniqueness fix) --
+the scan date was encoded twice. A realistic multi-leg PUT_CREDIT_SPREAD
+id (ticker + two strikes) reached 66 characters, two over
+`TradeProposal.proposal_id`'s `max_length=64`; the shorter, single-leg
+CASH_SECURED_PUT id (62 characters) happened to stay just under the
+limit. Fixed by the smallest possible change: the runner's
+`proposal_id_prefix` literal changed from `f"validation-scan-{now.date
+().isoformat()}"` to the bare `"validation-scan"` -- `_next_id()` still
+appends the date exactly once, now against a prefix that no longer
+duplicates it. No other production call site shared this bug (`src
+/portfolio/opportunity_scan.py`/`orchestrator.py`'s own
+`"control-loop-scan"` default never carried a date). The `Makefile`'s
+stale `confirm-candidate` usage example was updated to match the
+corrected id layout; `confirm-candidate`'s own behavior is unchanged.
+
+**What was tested.** A new `TestProposalIdLengthRegressionV1512` class
+(`tests/unit/workflows/test_candidate_generation.py`, 5 tests) proves,
+using the corrected bare prefix and realistic SPY-sized strikes
+(600/595): a valid `TradeProposal` is produced; its `proposal_id` is
+`<= 64` characters; the scan date is present exactly once (never
+dropped, per the existing SY-001 contract); the same ticker/strike on
+two different scan dates still produces different ids; multiple
+candidates in the same scan remain unique; and -- as a direct
+reproduction, not a synthetic edge case -- the OLD, double-dated
+prefix format still fails this exact scenario with a recorded
+`ValidationError` diagnostic event and zero PUT_CREDIT_SPREAD
+candidates. A new acceptance test
+(`tests/acceptance/test_proposal_id_length_regression_v1512.py`)
+intercepts the REAL `scan_and_rank_opportunities` call the production
+`run_validation_cycle()` entry point makes (never a source-text match)
+and asserts the `proposal_id_prefix` it actually receives at runtime
+no longer ends with the scan date `_next_id()` is about to append --
+verified to fail against the pristine, pre-fix script and pass against
+the fix. All 29 pre-existing proposal-ID/candidate-generation tests
+continue to pass unchanged. Full suite: 3811 passed, 6 skipped, 9
+failed -- the same 9 pre-existing, date-rot failures already known and
+accepted on frozen V1.5.11 (re-verified directly via `git stash`
+against this branch's own V1.5.11 HEAD at the same wall clock --
+identical 9 failures, identical root cause). Zero new failures. `make
+verify-freeze` against the regenerated `PAPER_TRADING_V1.5.12`
+manifest: every check passes.
+
+**What remains open.** The 9 known date-rot failures remain, by
+design. Generation-exception diagnostics still report only the bounded
+exception-class name (`"ValidationError"`), not which field or what
+length was exceeded -- left unchanged in this release per its own
+explicit scope guard, flagged as a future observability improvement.
+No risk/Quant/liquidity/DTE/universe/strategy/ranking/sizing/market-
+hours/lifecycle/Tradier/Fidelity/human-confirmation/PaperBroker change
+of any kind, and `TradeProposal.proposal_id`'s `max_length=64` and
+`_next_id()`'s own uniqueness scheme were not touched. The active
+cohort (`paper-trading-v1.4.3-validation-2026-09-22`) and its database
+were not touched. See `STEP_23_12_FREEZE_REPORT.md` for the full
+root-cause trace, exact before/after proposal-id character counts,
+and the complete SY-001 protection argument.

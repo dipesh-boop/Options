@@ -431,9 +431,32 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # unchanged pre-existing non-auto-resolution of alerts), and the active
 # validation cohort/database were not touched. See
 # STEP_23_11_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.11"
+#
+# PAPER_TRADING_V1.5.12 (Proposal-ID Length Bug Fix): the official
+# 2026-10-06 validation cycle's PUT_CREDIT_SPREAD candidates both
+# failed with a Pydantic `ValidationError` before ever reaching
+# Quant/Risk -- `scripts/run_validation_cycle.py` called the
+# opportunity scan with `proposal_id_prefix=f"validation-scan-
+# {now.date().isoformat()}"`, but `src.workflows.candidate_generation
+# ._next_id()` INDEPENDENTLY appends `now.date().isoformat()` to every
+# proposal_id it builds (its own, pre-existing SY-001 fix). The scan
+# date was therefore encoded twice, pushing a realistic multi-leg
+# PUT_CREDIT_SPREAD id (ticker + two strikes) past `TradeProposal
+# .proposal_id`'s `max_length=64` (66 chars observed vs. a 64-char
+# limit); the shorter single-leg CASH_SECURED_PUT id (62 chars)
+# happened to stay just under the limit, which is exactly why only PCS
+# candidates failed that day. Fixed by the smallest possible change:
+# the runner's own `proposal_id_prefix` literal changed from the
+# redundantly-dated `f"validation-scan-{date}"` to the bare
+# `"validation-scan"` -- `_next_id()` itself, `TradeProposal
+# .proposal_id`'s `max_length=64`, every Risk/Quant/liquidity/DTE/
+# universe/strategy/ranking/sizing/market-hours/lifecycle/Tradier/
+# Fidelity/human-confirmation/PaperBroker behavior, and the active
+# validation cohort/database were not touched. See
+# STEP_23_12_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.12"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.11"
+MANIFEST_VERSION = "1.5.12"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

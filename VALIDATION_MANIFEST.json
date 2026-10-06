@@ -1,10 +1,10 @@
 {
-  "manifest_version": "1.5.11",
-  "freeze_name": "PAPER_TRADING_V1.5.11",
-  "freeze_timestamp": "2026-10-05T21:41:43.557353Z",
-  "git_commit": "5699d782beaa3abba3a9e9226d2b5ea3064da7b9",
+  "manifest_version": "1.5.12",
+  "freeze_name": "PAPER_TRADING_V1.5.12",
+  "freeze_timestamp": "2026-10-06T15:17:09.641596Z",
+  "git_commit": "a08820ea0717254b4dc34ac566d97d8b828a1ca1",
   "git_branch": "claude/options-trading-agent-2b4yi8",
-  "repository_state": "dirty (9 uncommitted change(s))",
+  "repository_state": "dirty (8 uncommitted change(s))",
   "python_version": "3.11.15 (CPython)",
   "dependency_requirements_hash": "1065c8854d1b7464e7c09a94990b555cbaeaada575f7e101f6da762dab78cf78",
   "strategy_library_version": "481376ddbac87cbfad83b0b351b3f12d34a98072b67214835ac4c3bac287bc78",
@@ -88,7 +88,7 @@
   "market_calendar_module_hash": "3d26e775669ba0f27a05d33d9148d75e79103b78f3462b116206b916e9f95d4c",
   "market_data_provider_config_version": "n/a",
   "market_data_provider_config_note": "no separate market-data-provider config YAML file exists -- provider selection (mock/ibkr/alpaca) is the single OPTIONS_AGENT_DATA_PROVIDER environment variable (src.data.factory.DataProviderSelection), and canonical quote/chain shape plus freshness thresholds are defined directly in src/data/provider.py, src/data/quotes.py, src/data/option_chain.py -- covered by risk_module_hash's sibling code but not independently hashed here",
-  "freeze_version": "1.5.11",
+  "freeze_version": "1.5.12",
   "alpaca_provider_module_hash": "4c54584fb0452020918ec89bc690e6350745156428d5569f1ad39f4bea5a7610",
   "data_provider_at_freeze_time": "mock",
   "required_options_feed_for_validation": "opra",
@@ -108,7 +108,7 @@
   "orchestrator_cannot_bypass_risk_or_lifecycle": true,
   "opportunity_scan_never_outranks_risk_monitoring": true,
   "review_module_hash": "461729f1243ae0d9d84e2f246b71d02a3eaf43a485df9dee089f65a796ba9cd9",
-  "run_validation_cycle_script_hash": "5c307eda4a34be8db2eb139aa0f7748cbe86c1cdb2b0a0ec246b4b84369a188e",
+  "run_validation_cycle_script_hash": "d4d0a3abe84434811748d78ef24bc4ba5177ed13ccff128d29e0f782f91fa9b3",
   "confirm_candidate_script_hash": "7f46f9618d9a8a91a8f60a05e82ef21d0835b1bdc95c57ca97fc9ac7cf846f3f",
   "daily_cycle_never_calls_place_order": true,
   "review_only_path_never_imports_llm": true,
@@ -174,5 +174,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "f1cc02fdc76a71581b19666bb6c61be1313ae00baa321fa1f49dfbf18e8112b4"
+  "manifest_hash": "3c27a9e0ed78d0f1602d531e02ecb66dcd6f5f6d0710d6d9d56af3764e31af43"
 }
