@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 from src.data.option_chain import OptionChain
 from src.llm.schemas import MarketRegimeLabel, StrategyType
@@ -104,6 +105,7 @@ def scan_and_rank_opportunities(
     proposal_id_prefix: str = "control-loop-scan",
     no_trade_hurdle: float = 0.0,
     diagnostics_by_ticker: dict[str, FunnelDiagnostics] | None = None,
+    on_generation_exception: Callable[[str, str, Exception], None] | None = None,
 ) -> OpportunityScanResult:
     """One control-loop cycle's opportunity-scan phase (Part 23),
     followed by portfolio-aware ranking (Part 24). A ticker missing from
@@ -128,7 +130,17 @@ def scan_and_rank_opportunities(
     below. Neither addition changes `scanned`, `survivors`, `ranked`, or
     `best` in any way -- see
     `tests/unit/workflows/test_candidate_funnel_equivalence.py`.
-    """
+
+    `on_generation_exception` (PAPER_TRADING_V1.5.13) is entirely
+    optional and purely additive, exactly like `diagnostics_by_ticker`
+    above -- `None` (every official call site) leaves this function's
+    own decision logic completely untouched. When supplied, it is
+    forwarded into `generate_candidates` for each ticker (with
+    `entry.ticker` bound in), called with `(ticker, strategy_tag, exc)`
+    at the exact same point that call's own `diagnostics
+    .record_generation_exception` fires -- read-only, never consulted
+    by this function's own control flow. See
+    `generate_candidates.on_generation_exception`'s own docstring."""
     scanned: list[ScannedCandidate] = []
 
     for entry in universe:
@@ -136,10 +148,15 @@ def scan_and_rank_opportunities(
         if chain is None:
             continue
         ticker_diagnostics = diagnostics_by_ticker.get(entry.ticker) if diagnostics_by_ticker is not None else None
+        ticker_on_generation_exception = (
+            (lambda strategy_tag, exc, _ticker=entry.ticker: on_generation_exception(_ticker, strategy_tag, exc))
+            if on_generation_exception is not None else None
+        )
         try:
             candidates = generate_candidates(
                 entry, chain, strategies, quant_filter, limits, portfolio, market_regime,
                 now=now, proposal_id_prefix=proposal_id_prefix, diagnostics=ticker_diagnostics,
+                on_generation_exception=ticker_on_generation_exception,
             )
         except Exception:  # noqa: BLE001 -- one ticker's screening failure isolates, never aborts the scan
             continue

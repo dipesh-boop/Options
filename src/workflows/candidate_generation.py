@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Callable
 
 from src.data.option_chain import OptionChain, OptionContract
 from src.data.option_chain import OptionRight as DataOptionRight
@@ -240,6 +241,7 @@ def generate_candidates(
     now: datetime,
     proposal_id_prefix: str = "scan",
     diagnostics: FunnelDiagnostics | None = None,
+    on_generation_exception: Callable[[str, Exception], None] | None = None,
 ) -> list[Candidate]:
     """One candidate at most per requested strategy for this ticker — the
     single best (closest-to-target-delta) eligible structure, not every
@@ -257,7 +259,25 @@ def generate_candidates(
     using values that decision already computed -- nothing recorded here
     is ever read back into this function's own control flow. See
     `src.workflows.candidate_funnel`'s module docstring for the full
-    decision-neutrality argument."""
+    decision-neutrality argument.
+
+    `on_generation_exception` (PAPER_TRADING_V1.5.13) is entirely
+    optional and purely additive, exactly like `diagnostics` above --
+    `None` (every call site before this step, and every official call
+    site after it) leaves this function byte-for-byte identical to
+    before this parameter existed. When supplied, it is called with
+    `(strategy_tag, exc)` at the exact same point `diagnostics
+    .record_generation_exception(strategy_tag, type(exc).__name__)` is
+    called below -- i.e. strictly AFTER a proposal-construction
+    exception has already been isolated to this one strategy attempt,
+    never read back into this function's own control flow, and never
+    changing which candidates are returned. Exists so an operator-facing
+    diagnostic tool (`scripts/run_validation_cycle.py --diagnostic-scan`)
+    can show a sanitized exception message beyond the bounded exception-
+    CLASS name `FunnelDiagnostics.record_generation_exception` itself is
+    deliberately limited to (see that method's own docstring for why it
+    never accepts the raw message) -- without changing
+    `FunnelDiagnostics`'s own persisted schema at all."""
     if diagnostics is not None:
         diagnostics.record_chain(
             contracts_seen=len(chain.contracts), stale=chain.freshness_status(now) == FreshnessStatus.STALE,
@@ -322,6 +342,8 @@ def generate_candidates(
             except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
                 if diagnostics is not None:
                     diagnostics.record_generation_exception("CASH_SECURED_PUT", type(exc).__name__)
+                if on_generation_exception is not None:
+                    on_generation_exception("CASH_SECURED_PUT", exc)
             else:
                 if diagnostics is not None:
                     diagnostics.record_construction("CASH_SECURED_PUT", success=True, reason=None)
@@ -358,6 +380,8 @@ def generate_candidates(
                 except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
                     if diagnostics is not None:
                         diagnostics.record_generation_exception("COVERED_CALL", type(exc).__name__)
+                    if on_generation_exception is not None:
+                        on_generation_exception("COVERED_CALL", exc)
                 else:
                     if diagnostics is not None:
                         diagnostics.record_construction("COVERED_CALL", success=True, reason=None)
@@ -407,6 +431,8 @@ def generate_candidates(
             except Exception as exc:  # noqa: BLE001 -- isolates to this one strategy attempt, never silently discarded
                 if diagnostics is not None:
                     diagnostics.record_generation_exception("PUT_CREDIT_SPREAD", type(exc).__name__)
+                if on_generation_exception is not None:
+                    on_generation_exception("PUT_CREDIT_SPREAD", exc)
             else:
                 if diagnostics is not None:
                     diagnostics.record_construction("PUT_CREDIT_SPREAD", success=True, reason=None)

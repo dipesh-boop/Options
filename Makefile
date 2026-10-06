@@ -1,4 +1,4 @@
-.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle validate-preflight confirm-candidate
+.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle validate-preflight diagnostic-scan confirm-candidate
 
 install:
 	pip install -r requirements.txt -r requirements-dev.txt
@@ -38,6 +38,15 @@ validate-cycle:
 # Mutates NO validation state.
 validate-preflight:
 	./scripts/run_validation_cycle.sh --preflight
+
+# PAPER_TRADING_V1.5.13: READ-ONLY diagnostic opportunity scan against
+# live Tradier production market data, using the exact same candidate
+# -> Quant -> Risk pipeline as an official cycle. Does NOT count as a
+# validation day and mutates NO validation/candidate/trade/account/
+# lifecycle state (zero-persistence by construction -- see
+# scripts/run_validation_cycle.py's own run_diagnostic_scan docstring).
+diagnostic-scan:
+	./scripts/run_validation_cycle.sh --diagnostic-scan
 
 # Confirms exactly one Review-Only new-position candidate. The ONLY
 # command that may open a real (simulated) PaperBroker position.

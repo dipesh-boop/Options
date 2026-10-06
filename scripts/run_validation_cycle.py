@@ -191,6 +191,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -216,6 +217,7 @@ from src.brokers.paper import PaperBroker  # noqa: E402
 from src.portfolio.account_state import SqlitePaperAccountStateStore, SqlitePortfolioStore  # noqa: E402
 from src.portfolio.market_session import evaluate_validation_cycle_eligibility  # noqa: E402
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
+from src.portfolio.opportunity_scan import scan_and_rank_opportunities  # noqa: E402
 from src.portfolio.orchestrator import OpportunityScanConfig, OuterCycleInputs, run_outer_cycle  # noqa: E402
 from src.portfolio.risk_data import apply_risk_data_wiring  # noqa: E402
 from src.portfolio.persistence import SqliteControlLoopStore  # noqa: E402
@@ -229,7 +231,9 @@ from src.validation.cohort import has_cohort_started  # noqa: E402
 from src.validation.protocol import ValidationConfigError, load_validation_config  # noqa: E402
 from src.validation.records import OpportunityRecord  # noqa: E402
 from src.validation.session import DailySnapshot, SqliteValidationStore  # noqa: E402
+from src.workflows.candidate_funnel import build_candidate_funnel  # noqa: E402
 from src.workflows.candidate_generation import QuantFilterConfig, candidate_eligible_strategies  # noqa: E402
+from src.workflows.funnel_diagnostics import FunnelDiagnostics  # noqa: E402
 
 
 def _line(label: str, value: object) -> None:
@@ -932,6 +936,316 @@ async def run_preflight() -> bool:
     return True
 
 
+_DIAGNOSTIC_BANNER = (
+    "DIAGNOSTIC SCAN ONLY -- NOT AN OFFICIAL VALIDATION CYCLE\n"
+    "NO VALIDATION STATE WILL BE MUTATED\n"
+    "RESULTS DO NOT COUNT TOWARD THE 90-DAY VALIDATION"
+)
+
+
+def _print_diagnostic_banner() -> None:
+    print(_DIAGNOSTIC_BANNER)
+
+
+def _sanitize_diagnostic_exception_message(exc: Exception) -> str:
+    """PAPER_TRADING_V1.5.13, `--diagnostic-scan` only: a short, bounded,
+    best-effort-redacted rendering of a generation exception's own
+    message, printed directly to the operator's terminal so the
+    diagnostic can show WHY a candidate failed construction beyond the
+    bare exception CLASS name `FunnelDiagnostics
+    .record_generation_exception` is deliberately limited to (see that
+    method's own docstring) -- never fed back into
+    `FunnelDiagnostics`/`CandidateFunnel`, never changing what an
+    official cycle persists or decides.
+
+    The only generation exception reachable through this codebase's own
+    strategy-construction code today is a Pydantic `ValidationError` on
+    `TradeProposal` field values (e.g. PAPER_TRADING_V1.5.12's
+    proposal_id-length defect) -- never a provider/auth payload -- but
+    this function applies defensive redaction regardless, so it never
+    assumes that stays true forever."""
+    message = str(exc).replace("\n", " ").replace("\r", " ")
+    message = re.sub(r"(?i)(bearer\s+)\S+", r"\1[REDACTED]", message)
+    message = re.sub(r"(?i)(authorization\s*[:=]\s*)\S+", r"\1[REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b([a-z0-9_-]*(?:token|secret|api[_-]?key)[a-z0-9_-]*\s*[:=]\s*)\S+", r"\1[REDACTED]", message,
+    )
+    message = " ".join(message.split())
+    if len(message) > 400:
+        message = message[:400] + "...[truncated]"
+    return message
+
+
+async def run_diagnostic_scan(*, now: datetime | None = None) -> bool:
+    """PAPER_TRADING_V1.5.13: an explicit, operator-facing, READ-ONLY
+    diagnostic (`--diagnostic-scan`) that runs the exact same
+    candidate -> Quant -> Risk pipeline the official cycle uses
+    (`scan_and_rank_opportunities`, called DIRECTLY here) against LIVE
+    Tradier production market data, so an operator can verify a
+    software fix (e.g. PAPER_TRADING_V1.5.12's proposal_id fix) without
+    running -- or counting as -- an official validation day.
+
+    **Never calls `run_outer_cycle`/`run_control_cycle`.** Both
+    unconditionally persist records (a `ControlCycleRecord`, lifecycle
+    positions, decision snapshots, alerts) even for an existing-
+    position-only evaluation -- there is no way to use either and stay
+    read-only. This function calls `scan_and_rank_opportunities`
+    directly instead: the exact same, unmodified pure function
+    `_run_opportunity_scan_stage` (`src.portfolio.orchestrator`) itself
+    calls, so this diagnostic's candidate/Quant/Risk decisions are
+    byte-identical to what the official cycle's own opportunity-scan
+    stage would produce against the same inputs -- never a second,
+    reimplemented screening algorithm.
+
+    **Zero-persistence by construction, not by convention.** This
+    function never imports or constructs `PaperBroker`,
+    `SqliteControlLoopStore`, `SqliteLifecycleStore`,
+    `SqliteCandidateReviewStore`, `SqliteIdempotencyStore`, or
+    `SqliteValidationStore` -- none of those names appear anywhere in
+    this function's body. The only Sqlite-backed store it touches at
+    all is `SqlitePortfolioStore`, and only via its read-only `.get()`
+    method -- `.save()` is never called on it, or on anything else,
+    anywhere in this function. There is therefore no code path inside
+    this function capable of writing a cycle record, a lifecycle
+    record, a daily snapshot, an alert, a candidate, an order, or a
+    fill, regardless of what the scan finds.
+
+    **Same Tradier-production preflight, same market-hours gate, same
+    order.** `verify_official_provider_is_tradier_production` first
+    (config-only, no network, no provider instance) -- diagnostic mode
+    refuses mock/sandbox/missing-token exactly like the official cycle.
+    Then `evaluate_validation_cycle_eligibility`, BEFORE the market-data
+    provider is ever constructed -- a closed gate means zero Tradier
+    calls, exactly like the official cycle's own gate-closed branch,
+    except this function never falls through to a lifecycle-only check:
+    diagnostic scope is new-position opportunity-scan diagnostics ONLY,
+    never position-lifecycle monitoring (that stays the official
+    cycle's job).
+
+    **Portfolio loaded READ-ONLY.** `SqlitePortfolioStore.get()`; for
+    the currently active cohort this already exists. If none exists yet
+    for this account, this function builds an in-memory `Portfolio`
+    from `config/validation.yaml`'s own `starting_capital.default_nav`
+    -- the exact value the official cycle's own bootstrap would use --
+    WITHOUT ever calling `.save()` on it, so a diagnostic run against a
+    fresh account can still exercise the real Risk Engine against a
+    realistic starting NAV without ever creating a persisted account.
+
+    **Same DTE-aware retrieval, same post-fetch evaluation timestamp,
+    same proposal_id_prefix.** Universe tickers are fetched via
+    `provider.get_option_chain_for_dte_window(min_dte=quant_filter
+    .min_dte, max_dte=quant_filter.max_dte, ...)` whenever the
+    configured provider implements `DteWindowOptionChainProvider`
+    (PAPER_TRADING_V1.5.6's own fix), never the provider's nearest-N
+    default. `evaluation_as_of` is captured only once every chain fetch
+    has completed (PAPER_TRADING_V1.5.7's own fix), so every
+    `TradeProposal` this scan builds satisfies its own `data_timestamp
+    <= timestamp` integrity check by construction. `proposal_id_prefix
+    ="validation-scan"` -- the exact, corrected, bare prefix
+    PAPER_TRADING_V1.5.12 fixed the official cycle to use, never the
+    redundantly-dated pre-V1.5.12 form.
+
+    **A surviving candidate is diagnostic-only.** If `scan_result.best`
+    is not `None`, it is printed for the operator's own inspection --
+    never saved as a `ReviewedCandidate`, never made confirmable, and no
+    `confirm_candidate.py` command is ever printed for it (unlike the
+    official cycle's own candidate output). There is no code path from
+    here to `PaperBroker.place_order`/`confirm_fill`/`confirm_candidate`.
+
+    Existing positions are read ONLY to feed Risk's own post-trade
+    exposure calculations (`underlying_exposure_pct`/`sector_exposure_pct`)
+    -- this function never fetches a position-only ticker's own chain
+    and never evaluates lifecycle for it; that stays the official
+    cycle's job.
+
+    `now` is `None` in every real invocation -- see
+    `run_validation_cycle`'s own docstring for why this parameter
+    exists (deterministic market-hours-gate testing only)."""
+    _print_diagnostic_banner()
+    print()
+
+    try:
+        ops = load_operations_config()
+        val_config = load_validation_config()
+        universe = load_universe()
+        configured_strategy_names = load_universe_strategies()
+    except (OperationsConfigError, ValidationConfigError) as exc:
+        print(f"FAIL: configuration error -- {exc}")
+        print()
+        _print_diagnostic_banner()
+        return False
+
+    try:
+        configured_strategies = tuple(StrategyType[name] for name in configured_strategy_names)
+    except KeyError as exc:
+        print(f"FAIL: configuration error -- config/universe.yaml lists an unknown strategy: {exc}")
+        print()
+        _print_diagnostic_banner()
+        return False
+
+    strategies = candidate_eligible_strategies(configured_strategies)
+    skipped = [s.value for s in configured_strategies if s not in strategies]
+    if skipped:
+        _line("strategies configured but not yet candidate-generation-eligible (skipped)", skipped)
+
+    limits = get_default_limits()
+
+    # Same official provider CONFIGURATION preflight -- read-only, no
+    # network call, no provider instance constructed.
+    try:
+        verify_official_provider_is_tradier_production()
+    except OfficialProviderPreflightError as exc:
+        print(f"FAIL: provider preflight -- {exc}")
+        print()
+        _print_diagnostic_banner()
+        return False
+    _line("provider preflight", "Tradier production market data configured")
+
+    now = now or datetime.now(timezone.utc)
+
+    # Same new-position market-hours gate the official cycle uses --
+    # evaluated BEFORE the market-data provider is constructed, so a
+    # closed gate makes zero Tradier calls. Diagnostic mode is new-
+    # position opportunity-scan diagnostics ONLY -- unlike the official
+    # cycle, it never falls through to a lifecycle-only check.
+    eligibility = evaluate_validation_cycle_eligibility(
+        now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
+    )
+    if not eligibility.validation_cycle_allowed:
+        _line("market-hours gate", f"new-position scan window closed -- {eligibility.block_reason}")
+        print(
+            "FAIL: new-position scan window closed -- diagnostic scan makes no market-data calls "
+            "while this window is closed."
+        )
+        print()
+        _print_diagnostic_banner()
+        return False
+    _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
+
+    # READ-ONLY portfolio load -- .save() is never called anywhere in
+    # this function, on this store or any other.
+    portfolio_store = SqlitePortfolioStore(ops.account_state_db_path)
+    portfolio = portfolio_store.get(ops.account_id)
+    if portfolio is None:
+        _line(
+            "no persisted portfolio for this account -- using an in-memory diagnostic portfolio (never saved)",
+            f"starting NAV ${val_config.default_starting_nav:,.2f}",
+        )
+        portfolio = Portfolio(
+            as_of=now, nav=val_config.default_starting_nav, cash=val_config.default_starting_nav,
+            peak_equity=val_config.default_starting_nav,
+        )
+    else:
+        _line("existing portfolio loaded read-only", f"{len(portfolio.positions)} open position(s), NAV ${portfolio.nav:,.2f}")
+
+    broker_capabilities = load_broker_capabilities("internal_paper")
+    quant_filter = QuantFilterConfig()
+
+    universe_tickers = tuple(e.ticker for e in universe)
+    fetch_results: dict[str, OptionChain | Exception] = {}
+    provider = get_configured_market_data_provider()
+    try:
+        for ticker in universe_tickers:
+            try:
+                if isinstance(provider, DteWindowOptionChainProvider):
+                    fetch_results[ticker] = await provider.get_option_chain_for_dte_window(
+                        ticker, min_dte=quant_filter.min_dte, max_dte=quant_filter.max_dte, as_of=now.date(),
+                    )
+                else:
+                    fetch_results[ticker] = await provider.get_option_chain(ticker)
+            except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the diagnostic scan
+                fetch_results[ticker] = exc
+    finally:
+        close = getattr(provider, "close", None)
+        if close is not None:
+            await close()
+
+    # Same PAPER_TRADING_V1.5.7 fix: captured only once every chain fetch
+    # above has completed, so every TradeProposal built from this scan
+    # satisfies its own data_timestamp <= timestamp integrity check by
+    # construction, never by chance.
+    evaluation_as_of = datetime.now(timezone.utc)
+    _line("evaluation timestamp (captured after market-data fetch)", evaluation_as_of.isoformat())
+
+    chains_by_ticker = {t: c for t, c in fetch_results.items() if isinstance(c, OptionChain)}
+    failed = [t for t, c in fetch_results.items() if isinstance(c, Exception)]
+    if failed:
+        _line("symbols failed this diagnostic scan (isolated, scan continues)", failed)
+
+    diagnostics_by_ticker = {t: FunnelDiagnostics(ticker=t) for t in universe_tickers}
+    sanitized_exceptions: list[tuple[str, str, str]] = []  # (ticker, strategy, sanitized message)
+
+    def _on_generation_exception(ticker: str, strategy: str, exc: Exception) -> None:
+        sanitized_exceptions.append((ticker, strategy, _sanitize_diagnostic_exception_message(exc)))
+
+    # The exact same pure function the official cycle's own
+    # _run_opportunity_scan_stage calls -- never run_outer_cycle/
+    # run_control_cycle (both of which unconditionally persist).
+    scan_result = scan_and_rank_opportunities(
+        list(universe), chains_by_ticker, list(strategies), quant_filter, limits, portfolio,
+        ops.default_market_regime, broker_capabilities, now=evaluation_as_of,
+        proposal_id_prefix="validation-scan", diagnostics_by_ticker=diagnostics_by_ticker,
+        on_generation_exception=_on_generation_exception,
+    )
+
+    # The exact same pure aggregator the official cycle's own
+    # collect_candidate_funnel=True path uses -- candidates_persisted is
+    # always 0 here, since this path never persists anything.
+    funnel = build_candidate_funnel(
+        cycle_id="diagnostic-scan-only", generated_at=evaluation_as_of,
+        universe_tickers=universe_tickers, chain_received_tickers=frozenset(chains_by_ticker.keys()),
+        diagnostics_by_ticker=diagnostics_by_ticker, scan_result=scan_result, candidates_persisted=0,
+    )
+
+    print()
+    _line("candidate funnel -- symbols scanned", funnel.symbols_requested)
+    _line("candidate funnel -- chains usable/failed", f"{funnel.option_chains_quality_passed}/{funnel.symbols_market_data_failed + funnel.option_chains_quality_failed}")
+    _line("candidate funnel -- contracts examined", funnel.contracts_seen)
+    _line("candidate funnel -- expirations seen/eligible/rejected", f"{funnel.expirations_seen}/{funnel.expirations_eligible}/{funnel.expirations_rejected}")
+    _line("candidate funnel -- strategy attempts/ineligible", f"{funnel.strategy_attempts}/{funnel.strategy_ineligible}")
+    _line("candidate funnel -- construction attempts/successes/rejections", f"{funnel.construction_attempts}/{funnel.construction_successes}/{funnel.construction_rejections}")
+    _line("candidate funnel -- generation exceptions", funnel.generation_exceptions)
+    for ticker, strategy, message in sanitized_exceptions:
+        _line(f"  generation exception detail -- {ticker}/{strategy}", message)
+    _line("candidate funnel -- quant evaluations/pass/reject", f"{funnel.quant_evaluations}/{funnel.quant_passed}/{funnel.quant_rejected}")
+    _line("candidate funnel -- risk evaluations/pass/reject", f"{funnel.risk_evaluations}/{funnel.risk_passed}/{funnel.risk_rejected}")
+    _line("candidate funnel -- candidates generated/ranked", f"{funnel.candidates_generated}/{funnel.candidates_ranked}")
+    if funnel.rejection_reasons:
+        _line("candidate funnel -- rejection reasons", ", ".join(f"{r.stage}:{r.reason}x{r.count}" for r in funnel.rejection_reasons))
+    for s in funnel.by_symbol:
+        _line(
+            f"  by-symbol -- {s.ticker}",
+            f"market_data_ok={s.market_data_successful}, chain_usable={s.chain_usable}, contracts={s.contracts_seen}, "
+            f"expirations_seen/eligible={s.expirations_seen}/{s.expirations_eligible}, "
+            f"strategy_attempts={s.strategy_attempts}, construction_successes={s.construction_successes}",
+        )
+    for s in funnel.by_strategy:
+        _line(
+            f"  by-strategy -- {s.strategy}",
+            f"attempts={s.attempts}, ineligible={s.ineligible}, construction={s.construction_successes}/{s.construction_rejections}, "
+            f"generation_exceptions={s.generation_exceptions}, quant={s.quant_passed}/{s.quant_rejected}, "
+            f"risk={s.risk_passed}/{s.risk_rejected}",
+        )
+
+    if scan_result.best is None:
+        _line("best candidate", f"none -- {scan_result.no_trade_reason}")
+    else:
+        best = scan_result.best
+        print()
+        print(f"  DIAGNOSTIC CANDIDATE SURVIVED QUANT/RISK (NOT PERSISTED, NOT CONFIRMABLE): {best.candidate.proposal.proposal_id}")
+        _line("  ticker/strategy", f"{best.candidate.proposal.ticker} / {best.candidate.proposal.strategy.value}")
+        _line("  proposal_id length", len(best.candidate.proposal.proposal_id))
+        _line("  risk decision", f"{best.risk_decision.value} -- {best.risk_reason}")
+        print(
+            "  This is a DIAGNOSTIC-ONLY observation -- no ReviewedCandidate was created, no confirmation\n"
+            "  command is available for it, and no PaperBroker order/fill can result from this path."
+        )
+
+    print()
+    _print_diagnostic_banner()
+    return True
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_validation_cycle.py",
@@ -942,12 +1256,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "see the module docstring for the full safety guarantees."
         ),
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--preflight",
         action="store_true",
         help=(
             "Run read-only readiness checks only (configuration, cohort existence, Tradier "
             "production provider configuration) and exit. Mutates NO validation state."
+        ),
+    )
+    group.add_argument(
+        "--diagnostic-scan",
+        action="store_true",
+        help=(
+            "PAPER_TRADING_V1.5.13: run a READ-ONLY diagnostic opportunity scan against live "
+            "Tradier production market data, using the exact same candidate -> Quant -> Risk "
+            "pipeline as an official cycle, WITHOUT counting as a validation day and WITHOUT "
+            "mutating any validation/candidate/trade/account/lifecycle state. For verifying a "
+            "software fix (e.g. the PAPER_TRADING_V1.5.12 proposal_id fix) against live data "
+            "after today's official cycle has already run. Mutually exclusive with --preflight."
         ),
     )
     return parser
@@ -967,6 +1294,14 @@ def main() -> int:
             ok = asyncio.run(run_preflight())
         except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly
             print(f"FAIL: preflight could not complete -- {exc!r}")
+            return 1
+        return 0 if ok else 1
+
+    if args.diagnostic_scan:
+        try:
+            ok = asyncio.run(run_diagnostic_scan())
+        except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly
+            print(f"FAIL: diagnostic scan could not complete -- {exc!r}")
             return 1
         return 0 if ok else 1
 
