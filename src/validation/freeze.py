@@ -493,6 +493,34 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # lifecycle/Tradier/Fidelity/human-confirmation/PaperBroker behavior,
 # and no part of the active validation cohort/database, was touched.
 # See STEP_23_13_FREEZE_REPORT.md.
+#
+# V1.5.13 ACCEPTANCE CORRECTION (still PAPER_TRADING_V1.5.13 -- the
+# operator had not yet accepted/installed the first V1.5.13 freeze):
+# an operator-requested audit found the first cut's "read-only by
+# construction" claim was not actually structural -- `run_diagnostic_
+# scan` loaded the portfolio via `SqlitePortfolioStore`, whose
+# `__init__` unconditionally runs `CREATE TABLE IF NOT EXISTS`, which
+# genuinely writes a missing database file/table into existence
+# (empirically confirmed: a 0-byte or nonexistent file becomes a
+# 12,288-byte file with the schema already created, by construction
+# alone, with zero rows ever written). The diagnostic was read-only
+# only because the real, already-used account_state.db already had
+# this table -- a fact about today's file, not a guarantee the code
+# enforced. Corrected by adding `src.portfolio.account_state
+# .load_portfolio_read_only`, which opens the database through
+# SQLite's own `mode=ro` URI connection option (enforced by SQLite at
+# the OS file-descriptor level, with `PRAGMA query_only = ON` set as
+# additional in-connection-memory defense in depth) and never creates
+# a directory, file, or table under any starting condition -- verified
+# by attempting an actual write through the same mode=ro mechanism and
+# confirming SQLite itself rejects it (`OperationalError: attempt to
+# write a readonly database`). `SqlitePortfolioStore` is no longer
+# referenced anywhere in `run_diagnostic_scan`'s body at all (confirmed
+# by its own acceptance test's source scan AND a stronger behavioral
+# test that makes `SqlitePortfolioStore.__init__` itself raise if ever
+# called). The official, no-argument `run_validation_cycle()` path
+# keeps using `SqlitePortfolioStore` exactly as before -- unchanged,
+# and proven so by a dedicated equivalence test.
 FREEZE_NAME = "PAPER_TRADING_V1.5.13"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
 MANIFEST_VERSION = "1.5.13"

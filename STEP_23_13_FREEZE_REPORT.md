@@ -405,3 +405,83 @@ report for hashes and push/tag results).
   message observability added here is diagnostic-print-only and does
   not change that persisted schema, per the task's own explicit scope
   guard.
+
+## Y. ACCEPTANCE CORRECTION — true read-only portfolio access
+
+Before the operator accepted/installed the first cut of this freeze
+(commit `07667b3`), an operator-requested audit found that its
+"read-only by construction" claim was not actually structural.
+
+**Finding.** `run_diagnostic_scan` loaded the portfolio via
+`SqlitePortfolioStore(ops.account_state_db_path).get(ops.account_id)`.
+`SqlitePortfolioStore.__init__` unconditionally runs `CREATE TABLE IF
+NOT EXISTS account_portfolio (...)`. Empirically verified: against a
+nonexistent path, construction creates the parent directory, creates
+a new 12,288-byte SQLite file, and creates the table inside it;
+against an existing file lacking the table, construction writes the
+schema into it (0 bytes -> 12,288 bytes). The diagnostic was read-only
+only because the real, already-used `account_state.db` happened to
+already have this table -- a fact about today's file, not a guarantee
+the code enforced.
+
+**Fix.** `src.portfolio.account_state.load_portfolio_read_only(db_path,
+account_id) -> Portfolio | None` -- a dedicated loader, read-only by
+construction, backed by a true SQLite URI `mode=ro` connection
+(`sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro",
+uri=True)`), which SQLite enforces at the OS file-descriptor level
+(opened `O_RDONLY`), not by caller discipline. `PRAGMA query_only =
+ON` is set immediately after connecting as additional in-connection
+defense in depth (a per-connection flag, not a database write --
+verified to leave the file byte-for-byte unchanged). It never calls
+`mkdir`, never issues `CREATE TABLE`, and never opens a write-capable
+connection under any starting condition. Three outcomes: `None` for
+every "nothing on record yet" case (missing file, missing table,
+missing account row -- all normal, never created or migrated by this
+function); a `Portfolio` when a row parses cleanly; or a new
+`PortfolioLoadError` raised (never a silent `None`) for a genuinely
+abnormal condition -- corrupt `portfolio_json`, or any sqlite error
+that isn't "doesn't exist yet" -- so corruption in real account data
+is never mistaken for "no portfolio," which would have understated
+risk/exposure instead of refusing to guess. `run_diagnostic_scan` now
+calls this helper exclusively and no longer references
+`SqlitePortfolioStore` anywhere in its body; a `PortfolioLoadError`
+fails the whole diagnostic closed (`FAIL`, banner, `return False`)
+rather than substituting a fresh empty-NAV portfolio. The official,
+no-argument `run_validation_cycle()` path keeps using
+`SqlitePortfolioStore` exactly as before, unchanged, proven by a
+dedicated equivalence test.
+
+**New/updated tests** (16 new tests across two files):
+- `tests/unit/portfolio/test_account_state_read_only.py` (9 tests,
+  items A-F): an existing initialized DB loads correctly and is left
+  byte-identical (including sibling journal/WAL files); a nonexistent
+  DB (and a nonexistent parent directory) returns `None` and creates
+  nothing; an existing DB missing the table returns `None` and stays
+  byte-identical with no schema initialized; an existing table missing
+  the account row returns `None` with no mutation; an attempted write
+  through the same `mode=ro` mechanism is rejected by SQLite itself
+  (`OperationalError: attempt to write a readonly database`, not a
+  source-inspection check) and leaves the file untouched; `PRAGMA
+  query_only = ON` is confirmed settable without mutating the file;
+  corrupt/invalid JSON and JSON-valid-but-schema-invalid rows both
+  raise `PortfolioLoadError` rather than returning `None`.
+- `tests/acceptance/test_diagnostic_scan_v1513.py` (+2 tests, items G
+  and I; the pre-existing item-G test was also strengthened):
+  `SqlitePortfolioStore.__init__` monkeypatched to raise proves the
+  diagnostic never constructs it at all (strictly stronger than the
+  prior test, which only monkeypatched `.save`); the static
+  negative-capability source scan now also forbids the bare name
+  `SqlitePortfolioStore`; and a new equivalence test proves the
+  official cycle still constructs `SqlitePortfolioStore` and persists
+  a `Portfolio` through it exactly as before.
+
+**Regression.** Full suite: 3845 passed (3834 + 11 new tests), 6
+skipped, 9 failed -- the identical, pre-existing date-rot failures,
+same count and identity as every prior V1.5.x release. `make
+verify-freeze`: `portfolio_module_hash`/`run_validation_cycle_script_
+hash` drifted as expected (the two files this correction touches);
+clean (`PAPER_TRADING_V1.5.13 / SOFTWARE FREEZE VERIFIED`) after
+regenerating the manifest. Version intentionally stays
+`PAPER_TRADING_V1.5.13`/`1.5.13` -- the first cut was never accepted
+or installed by the operator, so this corrects that same release
+rather than cutting a new one.

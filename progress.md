@@ -6792,3 +6792,78 @@ not touched; `data/options_agent.db` does not exist in this
 development sandbox and no test in this release wrote to any path
 resembling it. See `STEP_23_13_FREEZE_REPORT.md` for the full
 architectural trace and zero-persistence-by-construction argument.
+
+## Step 23.13 ACCEPTANCE CORRECTION -- true read-only portfolio access (still PAPER_TRADING_V1.5.13)
+
+**What was found.** Before the operator accepted/installed the first
+cut of V1.5.13 (commit `07667b3`), an operator-requested audit of its
+"read-only by construction" claim found it was not actually
+structural: `run_diagnostic_scan` loaded the portfolio via
+`SqlitePortfolioStore.get()`, but that class's `__init__`
+unconditionally runs `CREATE TABLE IF NOT EXISTS`, which empirically
+writes a missing database file/table into existence (a nonexistent
+path or an existing table-less file both become a 12,288-byte file
+with the schema created, by construction alone). The diagnostic's
+prior read-only behavior held only because the real, already-used
+`account_state.db` happened to already have this table -- a fact
+about today's file, not a guarantee the code enforced.
+
+**What was built.** `src.portfolio.account_state
+.load_portfolio_read_only(db_path, account_id) -> Portfolio | None`
+-- a dedicated loader, read-only by construction, backed by a true
+SQLite URI `mode=ro` connection
+(`sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro",
+uri=True)`), enforced by SQLite at the OS file-descriptor level
+(opened `O_RDONLY`), with `PRAGMA query_only = ON` set as additional
+in-connection defense in depth (verified to leave the file
+byte-for-byte unchanged). It never calls `mkdir`, never issues
+`CREATE TABLE`, and never opens a write-capable connection under any
+starting condition. It returns `None` for every "nothing on record
+yet" case (missing file, missing table, missing account row -- all
+normal, never created or migrated by this function), a `Portfolio`
+when a row parses cleanly, or raises the new `PortfolioLoadError`
+(never a silent `None`) for a genuinely abnormal condition -- corrupt
+`portfolio_json`, or any sqlite error that isn't "doesn't exist yet"
+-- so corruption in real account data is never mistaken for "no
+portfolio." `run_diagnostic_scan` now calls this helper exclusively
+and no longer references `SqlitePortfolioStore` anywhere in its body;
+a `PortfolioLoadError` fails the whole diagnostic closed rather than
+substituting a fresh empty-NAV portfolio. The official, no-argument
+`run_validation_cycle()` path keeps using `SqlitePortfolioStore`
+exactly as before, unchanged.
+
+**What was tested.** 16 new tests: `tests/unit/portfolio
+/test_account_state_read_only.py` (9 tests) proves an existing
+initialized DB loads correctly and is left byte-identical (including
+sibling journal/WAL files); a nonexistent DB/parent directory returns
+`None` and creates nothing; an existing DB missing the table returns
+`None`, stays byte-identical, and initializes no schema; an existing
+table missing the account row returns `None` with no mutation; an
+attempted write through the same `mode=ro` mechanism is rejected by
+SQLite itself (`OperationalError: attempt to write a readonly
+database`, not a source-inspection check) and leaves the file
+untouched; `PRAGMA query_only = ON` is confirmed settable without
+mutating the file; corrupt/invalid JSON and JSON-valid-but-
+schema-invalid rows both raise `PortfolioLoadError`.
+`tests/acceptance/test_diagnostic_scan_v1513.py` gained 2 tests and
+strengthened a third: `SqlitePortfolioStore.__init__` itself
+monkeypatched to raise proves the diagnostic never constructs it at
+all (strictly stronger than the prior test, which only monkeypatched
+`.save`); the static source scan now also forbids the bare name
+`SqlitePortfolioStore`; and a new equivalence test proves the official
+cycle still constructs `SqlitePortfolioStore` and persists a
+`Portfolio` through it exactly as before. Full suite: 3845 passed
+(3834 + 11 new), 6 skipped, 9 failed -- the identical pre-existing
+date-rot failures. `make verify-freeze` clean after regenerating the
+manifest (`portfolio_module_hash`/`run_validation_cycle_script_hash`
+drifted as expected, matching the two files touched).
+
+**What remains open.** Version intentionally stays
+`PAPER_TRADING_V1.5.13`/`1.5.13` -- the first cut was never accepted
+or installed by the operator, so this corrects that same release
+rather than cutting a new one. No risk/Quant/liquidity/DTE/universe/
+strategy/ranking/sizing/market-hours/lifecycle/Tradier/Fidelity/
+human-confirmation/PaperBroker change of any kind; the active cohort
+and its database were not touched; `data/options_agent.db` does not
+exist in this development sandbox. See `STEP_23_13_FREEZE_REPORT.md`
+§Y for the full audit finding and fix.
