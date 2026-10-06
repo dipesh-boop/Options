@@ -171,3 +171,85 @@ class SqlitePortfolioStore(PortfolioStore):
                 "SELECT portfolio_json FROM account_portfolio WHERE account_id = ?", (account_id,)
             ).fetchone()
         return Portfolio.model_validate_json(row[0]) if row is not None else None
+
+
+class PortfolioLoadError(RuntimeError):
+    """PAPER_TRADING_V1.5.13 correction: raised by `load_portfolio_read_only`
+    for a genuinely abnormal condition -- corrupt `portfolio_json`, or a
+    sqlite error that is neither "the file doesn't exist" nor "the table
+    doesn't exist" (e.g. a locked or malformed database file). Deliberately
+    distinct from that function's own `None` return (which means "no
+    portfolio on record yet," a normal, expected outcome) -- a caller must
+    never conflate the two, since silently treating corruption as "no
+    portfolio" would mean a diagnostic (or anything else using this loader)
+    quietly substitutes a fresh empty-NAV portfolio for a real one that
+    exists but can't be read, which is exactly the failure mode this
+    exception exists to prevent."""
+
+
+def load_portfolio_read_only(db_path: Path | str, account_id: str) -> Portfolio | None:
+    """A dedicated loader that is read-only by construction, not by
+    caller discipline -- unlike `SqlitePortfolioStore.__init__` (which
+    unconditionally runs `CREATE TABLE IF NOT EXISTS` and therefore CAN
+    write a real schema change into a database file or directory that
+    doesn't have it yet, confirmed by the PAPER_TRADING_V1.5.13 acceptance
+    audit), this function never creates a directory, never creates a
+    database file, never creates or alters a table, and never opens a
+    connection capable of writing at all.
+
+    It opens the database via SQLite's own `mode=ro` URI connection option
+    (`sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)`) -- a mode
+    SQLite enforces at the OS file-descriptor level (the file is opened
+    O_RDONLY), not merely a Python-level convention a future change to this
+    module could accidentally weaken. `PRAGMA query_only = ON` is set
+    immediately after connecting as pure in-connection-memory defense in
+    depth (it is a per-connection flag, not a database write -- verified
+    empirically to leave the file byte-for-byte unchanged); `mode=ro`
+    alone already makes any write attempt raise `sqlite3.OperationalError:
+    attempt to write a readonly database` (also verified empirically), so
+    this function would behave identically to the Risk/Quant pipeline even
+    without it.
+
+    Three outcomes:
+    - `None`: no portfolio is on record for `account_id` yet -- either
+      the database file doesn't exist, the `account_portfolio` table
+      doesn't exist, or the table exists but has no row for this account.
+      All three are normal, expected states for a never-before-used
+      account, never created or migrated by this function.
+    - a `Portfolio`: a row was found and its `portfolio_json` parses
+      cleanly.
+    - `PortfolioLoadError` raised: the database could not be read for a
+      reason OTHER than "doesn't exist yet" (a genuinely abnormal sqlite
+      error), or a row was found but its `portfolio_json` is corrupt --
+      fails closed rather than silently returning `None` and letting a
+      caller mistake real, unreadable account data for "no portfolio,"
+      which would understate risk/exposure instead of refusing to guess."""
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" in str(exc):
+            return None
+        raise PortfolioLoadError(f"could not open {db_path!r} read-only: {exc}") from exc
+
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        try:
+            row = conn.execute(
+                "SELECT portfolio_json FROM account_portfolio WHERE account_id = ?", (account_id,)
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise PortfolioLoadError(f"unexpected sqlite error reading {db_path!r}: {exc}") from exc
+    finally:
+        conn.close()
+
+    if row is None:
+        return None
+    try:
+        return Portfolio.model_validate_json(row[0])
+    except Exception as exc:  # noqa: BLE001 -- any parse/validation failure is corruption, fail closed
+        raise PortfolioLoadError(
+            f"corrupt portfolio_json for account {account_id!r} in {db_path!r}: {exc}"
+        ) from exc

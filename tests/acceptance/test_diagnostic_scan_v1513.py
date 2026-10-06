@@ -383,7 +383,7 @@ class TestDiagnosticSourceNeverReferencesForbiddenPersistence:
             # is safe for them.
             "SqliteControlLoopStore", "SqliteLifecycleStore",
             "SqliteCandidateReviewStore", "SqliteIdempotencyStore", "SqliteValidationStore",
-            "run_outer_cycle", "run_control_cycle",
+            "SqlitePortfolioStore", "run_outer_cycle", "run_control_cycle",
             # These two DO legitimately appear as plain prose inside this
             # function's own operator-facing print statements (explaining
             # that NEITHER happens) -- so the check below is deliberately
@@ -399,6 +399,34 @@ class TestDiagnosticNeverPersists:
     """Item G: the diagnostic never saves a portfolio, account state,
     candidate, cycle record, lifecycle record, validation snapshot, or
     cohort-progress change, and never places/confirms an order."""
+
+    async def test_sqliteportfoliostore_is_never_constructed_at_all(self, environment, monkeypatch):
+        """PAPER_TRADING_V1.5.13 acceptance correction, item G: the
+        diagnostic must not even CONSTRUCT `SqlitePortfolioStore` -- its
+        own `__init__` was found by this release's acceptance audit to
+        be capable of writing a missing database/table into existence
+        (`CREATE TABLE IF NOT EXISTS`, confirmed empirically to grow a
+        0-byte file to 12,288 bytes). Monkeypatching `.save` alone (the
+        pre-correction version of this test) was insufficient proof --
+        it never ruled out `__init__` itself writing. Monkeypatching
+        `__init__` to raise is the strongest available proof that the
+        diagnostic never instantiates this class at all."""
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1513_no_portfolio_store_construct", SCRIPT_PATH)
+        provider = _DteFakeProvider({"SPY": _spy_pcs_chain(now)})
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        from src.portfolio.account_state import SqlitePortfolioStore
+
+        def _construction_must_never_happen(self, db_path):
+            raise AssertionError("SqlitePortfolioStore must never be constructed by the diagnostic path")
+
+        monkeypatch.setattr(SqlitePortfolioStore, "__init__", _construction_must_never_happen)
+
+        ok = await cycle.run_diagnostic_scan(now=now)
+        assert ok is True  # if SqlitePortfolioStore(...) had been called, the monkeypatched raise would have propagated
 
     async def test_portfolio_store_save_is_never_actually_called(self, environment, monkeypatch):
         _tradier_configured(monkeypatch)
@@ -718,3 +746,43 @@ class TestOfficialBehaviorEquivalence:
         assert without_callback.best.candidate.proposal.proposal_id == with_callback.best.candidate.proposal.proposal_id
         assert without_callback.no_trade_reason == with_callback.no_trade_reason == None
         assert seen == [], "the new callback must never fire for a candidate that generates without error"
+
+
+# --------------------------------------------------------------- I: official cycle still uses SqlitePortfolioStore
+
+
+@pytest.mark.asyncio
+class TestOfficialCycleStillUsesSqlitePortfolioStoreUnchanged:
+    """Acceptance-correction item I: the official, no-argument
+    `run_validation_cycle()` path must keep bootstrapping/persisting
+    the portfolio through the existing, durable `SqlitePortfolioStore`
+    exactly as before -- the new read-only loader is diagnostic-only,
+    and must never be substituted into the official path's own
+    behavior merely to satisfy this release's safety guarantee."""
+
+    async def test_official_cycle_constructs_and_saves_through_sqliteportfoliostore(self, environment, monkeypatch):
+        _tradier_configured(monkeypatch)
+        cycle = _load_script_module("_v1513_official_still_sqlite", SCRIPT_PATH)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
+        monkeypatch.setattr(
+            cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED,
+        )
+
+        from src.portfolio.account_state import SqlitePortfolioStore
+
+        constructed = []
+        real_init = SqlitePortfolioStore.__init__
+
+        def _spy_init(self, db_path):
+            constructed.append(db_path)
+            return real_init(self, db_path)
+
+        monkeypatch.setattr(SqlitePortfolioStore, "__init__", _spy_init)
+
+        ok = await cycle.run_validation_cycle()
+        assert ok is True
+        assert len(constructed) >= 1, "the official cycle must still construct SqlitePortfolioStore exactly as before"
+
+        ops = operations_config_module.load_operations_config()
+        persisted = SqlitePortfolioStore(ops.account_state_db_path).get(ops.account_id)
+        assert persisted is not None, "the official cycle must still persist a Portfolio via SqlitePortfolioStore.save"

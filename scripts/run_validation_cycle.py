@@ -214,7 +214,12 @@ from src.lifecycle.policies_library import policies_for_strategy  # noqa: E402
 from src.llm.schemas import StrategyType  # noqa: E402
 from src.brokers.base import SqliteIdempotencyStore  # noqa: E402
 from src.brokers.paper import PaperBroker  # noqa: E402
-from src.portfolio.account_state import SqlitePaperAccountStateStore, SqlitePortfolioStore  # noqa: E402
+from src.portfolio.account_state import (  # noqa: E402
+    PortfolioLoadError,
+    SqlitePaperAccountStateStore,
+    SqlitePortfolioStore,
+    load_portfolio_read_only,
+)
 from src.portfolio.market_session import evaluate_validation_cycle_eligibility  # noqa: E402
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
 from src.portfolio.opportunity_scan import scan_and_rank_opportunities  # noqa: E402
@@ -1000,15 +1005,27 @@ async def run_diagnostic_scan(*, now: datetime | None = None) -> bool:
     **Zero-persistence by construction, not by convention.** This
     function never imports or constructs `PaperBroker`,
     `SqliteControlLoopStore`, `SqliteLifecycleStore`,
-    `SqliteCandidateReviewStore`, `SqliteIdempotencyStore`, or
-    `SqliteValidationStore` -- none of those names appear anywhere in
-    this function's body. The only Sqlite-backed store it touches at
-    all is `SqlitePortfolioStore`, and only via its read-only `.get()`
-    method -- `.save()` is never called on it, or on anything else,
-    anywhere in this function. There is therefore no code path inside
-    this function capable of writing a cycle record, a lifecycle
-    record, a daily snapshot, an alert, a candidate, an order, or a
-    fill, regardless of what the scan finds.
+    `SqliteCandidateReviewStore`, `SqliteIdempotencyStore`,
+    `SqliteValidationStore`, or `SqlitePortfolioStore` -- none of those
+    names appear anywhere in this function's body (confirmed by its own
+    acceptance test's source scan). PAPER_TRADING_V1.5.13's acceptance
+    audit found that `SqlitePortfolioStore.__init__` is NOT actually
+    read-only in general -- it unconditionally runs `CREATE TABLE IF
+    NOT EXISTS`, which genuinely writes a new database file/table into
+    existence when either is missing (verified empirically: a
+    nonexistent path or table goes from 0 to 12,288 bytes on
+    construction alone). "Read-only because the real account_state.db
+    already has this table" was a fact about today's file, not a
+    structural guarantee -- so this function now loads the portfolio
+    via `src.portfolio.account_state.load_portfolio_read_only` instead,
+    which opens the database through SQLite's own `mode=ro` URI
+    connection option (enforced by SQLite at the OS file-descriptor
+    level, not by caller discipline) and never creates a directory,
+    file, or table under any condition. There is therefore no code
+    path inside this function capable of writing a cycle record, a
+    lifecycle record, a daily snapshot, an alert, a candidate, an
+    order, a fill, or a portfolio database/table/row, regardless of
+    what the scan finds or what state the database starts in.
 
     **Same Tradier-production preflight, same market-hours gate, same
     order.** `verify_official_provider_is_tradier_production` first
@@ -1022,14 +1039,21 @@ async def run_diagnostic_scan(*, now: datetime | None = None) -> bool:
     never position-lifecycle monitoring (that stays the official
     cycle's job).
 
-    **Portfolio loaded READ-ONLY.** `SqlitePortfolioStore.get()`; for
-    the currently active cohort this already exists. If none exists yet
-    for this account, this function builds an in-memory `Portfolio`
-    from `config/validation.yaml`'s own `starting_capital.default_nav`
-    -- the exact value the official cycle's own bootstrap would use --
-    WITHOUT ever calling `.save()` on it, so a diagnostic run against a
-    fresh account can still exercise the real Risk Engine against a
-    realistic starting NAV without ever creating a persisted account.
+    **Portfolio loaded READ-ONLY, by construction.**
+    `load_portfolio_read_only(ops.account_state_db_path, ops.account_id)`
+    -- for the currently active cohort a portfolio already exists and
+    is returned as-is. `None` covers every "nothing on record yet"
+    case (missing database file, missing table, or missing account
+    row) -- in any of those cases this function builds an in-memory
+    `Portfolio` from `config/validation.yaml`'s own
+    `starting_capital.default_nav` (the exact value the official
+    cycle's own bootstrap would use), never persisted. A
+    `PortfolioLoadError` (a genuinely abnormal condition -- corrupt
+    `portfolio_json`, or a sqlite error that isn't "doesn't exist yet")
+    is NOT treated as "no portfolio" -- it fails the whole diagnostic
+    closed (`FAIL`, banner, `return False`) rather than silently
+    substituting a fresh empty-NAV portfolio for real account data this
+    function could not read.
 
     **Same DTE-aware retrieval, same post-fetch evaluation timestamp,
     same proposal_id_prefix.** Universe tickers are fetched via
@@ -1122,10 +1146,18 @@ async def run_diagnostic_scan(*, now: datetime | None = None) -> bool:
         return False
     _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
 
-    # READ-ONLY portfolio load -- .save() is never called anywhere in
-    # this function, on this store or any other.
-    portfolio_store = SqlitePortfolioStore(ops.account_state_db_path)
-    portfolio = portfolio_store.get(ops.account_id)
+    # READ-ONLY portfolio load, enforced by SQLite's own mode=ro URI
+    # connection -- SqlitePortfolioStore is never constructed here (its
+    # own CREATE TABLE IF NOT EXISTS can genuinely write a missing
+    # database/table into existence; see this function's own docstring
+    # and PAPER_TRADING_V1.5.13's acceptance audit).
+    try:
+        portfolio = load_portfolio_read_only(ops.account_state_db_path, ops.account_id)
+    except PortfolioLoadError as exc:
+        print(f"FAIL: could not read portfolio state read-only -- {exc}")
+        print()
+        _print_diagnostic_banner()
+        return False
     if portfolio is None:
         _line(
             "no persisted portfolio for this account -- using an in-memory diagnostic portfolio (never saved)",
