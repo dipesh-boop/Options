@@ -257,6 +257,114 @@ class TestProposalIdsAreUniqueAcrossScanRunsRegressionSY001:
         assert NOW.date().isoformat() in candidates[0].proposal.proposal_id
 
 
+class TestProposalIdLengthRegressionV1512:
+    """PAPER_TRADING_V1.5.12: before this fix,
+    `scripts/run_validation_cycle.py` supplied `generate_candidates` a
+    `proposal_id_prefix` that ALREADY carried today's date
+    (`f"validation-scan-{date}"`), double-encoding it on top of
+    `_next_id()`'s own, independent `now.date().isoformat()` append. A
+    realistic multi-leg PUT_CREDIT_SPREAD id (ETF ticker + two strikes)
+    then exceeded `TradeProposal.proposal_id`'s `max_length=64` and
+    failed every such candidate with a Pydantic `ValidationError`
+    before it ever reached Quant/Risk -- exactly the 2026-10-06
+    incident. These tests use the CORRECTED, bare production prefix
+    (`"validation-scan"`) with realistic SPY-sized strikes to prove the
+    fix, while re-confirming every SY-001 uniqueness/idempotency
+    guarantee `_next_id()` already provides still holds under that
+    corrected prefix."""
+
+    _PREFIX = "validation-scan"  # the corrected, bare prefix scripts/run_validation_cycle.py now supplies
+
+    @staticmethod
+    def _realistic_spy_pcs_chain(as_of: datetime = NOW):
+        # SPY-realistic strikes/prices, not the 90-100 range the rest of
+        # this file's fixtures use -- this is the exact shape that pushed
+        # a PUT_CREDIT_SPREAD id past max_length=64 under the old,
+        # double-dated prefix.
+        return make_chain(
+            [
+                make_put(600.0, -0.20, bid=4.95, ask=5.05, symbol="SPY"),
+                make_put(595.0, -0.10, bid=2.95, ask=3.05, symbol="SPY"),
+            ],
+            symbol="SPY", price=605.0, timestamp=as_of,
+        )
+
+    def test_realistic_pcs_with_corrected_prefix_produces_a_valid_proposal(self):
+        # Items A-C: a PUT_CREDIT_SPREAD generated with the corrected
+        # bare prefix and realistic ETF strikes constructs without
+        # raising, its proposal_id fits within max_length=64, and the
+        # scan date is present -- exactly once, per the existing SY-001
+        # contract.
+        candidates = generate_candidates(
+            UniverseEntry("SPY", "ETF"), self._realistic_spy_pcs_chain(), [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        assert len(candidates) == 1
+        proposal = candidates[0].proposal
+        assert len(proposal.legs) == 2
+        assert len(proposal.proposal_id) <= 64
+        today_iso = NOW.date().isoformat()
+        assert today_iso in proposal.proposal_id
+        assert proposal.proposal_id.count(today_iso) == 1, (
+            "the scan date must appear exactly once -- the corrected prefix must not "
+            "reintroduce a second, redundant date encoding"
+        )
+
+    def test_same_ticker_strike_two_scan_dates_still_differ_under_corrected_prefix(self):
+        # Item D: same ticker/strike on two different scan dates must
+        # still produce different proposal IDs under the corrected prefix.
+        day_two_now = datetime(NOW.year, NOW.month, NOW.day + 1, NOW.hour, tzinfo=timezone.utc)
+        day_one = generate_candidates(
+            UniverseEntry("SPY", "ETF"), self._realistic_spy_pcs_chain(NOW), [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        day_two = generate_candidates(
+            UniverseEntry("SPY", "ETF"), self._realistic_spy_pcs_chain(day_two_now), [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=day_two_now, proposal_id_prefix=self._PREFIX,
+        )
+        assert len(day_one) == 1 and len(day_two) == 1
+        assert day_one[0].proposal.proposal_id != day_two[0].proposal.proposal_id, (
+            "proposal_id collided across two different scan runs for the same ticker/strikes"
+        )
+
+    def test_multiple_candidates_in_the_same_scan_remain_unique_under_corrected_prefix(self):
+        # Item E: multiple candidates generated in the same scan (CSP +
+        # PCS on the same realistic SPY chain) remain unique, and each
+        # still fits within max_length=64, under the corrected prefix.
+        candidates = generate_candidates(
+            UniverseEntry("SPY", "ETF"), self._realistic_spy_pcs_chain(),
+            [StrategyType.CASH_SECURED_PUT, StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        ids = [c.proposal.proposal_id for c in candidates]
+        assert len(ids) == 2
+        assert len(ids) == len(set(ids))
+        for proposal_id in ids:
+            assert len(proposal_id) <= 64
+
+    def test_old_double_dated_prefix_reproduces_the_october_6_incident(self):
+        """Reproduction, not a synthetic edge case: the OLD, double-dated
+        prefix format (`f"validation-scan-{date}"`, what
+        `scripts/run_validation_cycle.py` supplied before this fix) still
+        fails this exact realistic PUT_CREDIT_SPREAD scenario with a
+        Pydantic ValidationError -- `generate_candidates` isolates the
+        failure (never raises, per its own documented contract -- see
+        `TestGenerationExceptionObservabilityV157`), so the proof is a
+        recorded `generation_exception` diagnostic event and zero
+        PUT_CREDIT_SPREAD candidates, exactly as observed in production."""
+        from src.workflows.funnel_diagnostics import FunnelDiagnostics
+
+        old_style_prefix = f"validation-scan-{NOW.date().isoformat()}"
+        diag = FunnelDiagnostics(ticker="SPY")
+        candidates = generate_candidates(
+            UniverseEntry("SPY", "ETF"), self._realistic_spy_pcs_chain(), [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW,
+            proposal_id_prefix=old_style_prefix, diagnostics=diag,
+        )
+        assert candidates == []
+        assert ("PUT_CREDIT_SPREAD", "generation_exception", "ValidationError") in diag.strategy_events
+
+
 class TestGeneratedProposalsAreValid:
     def test_thesis_and_risk_thesis_are_populated_and_non_generic(self):
         chain = default_pcs_chain()

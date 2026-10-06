@@ -765,7 +765,17 @@ async def run_validation_cycle(*, now: datetime | None = None) -> bool:
         opportunity_scan=OpportunityScanConfig(
             universe=universe, chains_by_ticker=chains_by_ticker, strategies=list(strategies),
             quant_filter=quant_filter, market_regime=ops.default_market_regime,
-            broker_capabilities=broker_capabilities, proposal_id_prefix=f"validation-scan-{now.date().isoformat()}",
+            # PAPER_TRADING_V1.5.12: do NOT re-add the scan date here --
+            # `generate_candidates`'s own `_next_id()` already encodes
+            # `now.date().isoformat()` into every proposal_id it builds
+            # (see that function's SY-001 comment). Supplying a prefix
+            # that ALSO carries the date double-counted it, pushing a
+            # realistic multi-leg PUT_CREDIT_SPREAD id (ticker + two
+            # strikes) past TradeProposal.proposal_id's max_length=64
+            # and failing every such candidate with a Pydantic
+            # ValidationError before it ever reached Quant/Risk -- see
+            # STEP_23_12_FREEZE_REPORT.md for the full root-cause trace.
+            broker_capabilities=broker_capabilities, proposal_id_prefix="validation-scan",
             # PAPER_TRADING_V1.5.5, Step 4: observability-only -- this
             # collects the candidate funnel for THIS cycle's
             # `ControlCycleRecord` but changes nothing about which

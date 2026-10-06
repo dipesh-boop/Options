@@ -41,6 +41,6 @@ validate-preflight:
 
 # Confirms exactly one Review-Only new-position candidate. The ONLY
 # command that may open a real (simulated) PaperBroker position.
-# Usage: make confirm-candidate ID=validation-scan-2026-09-22-SPY-...
+# Usage: make confirm-candidate ID=validation-scan-SPY-2026-09-22-csp-2026-10-15-600-1
 confirm-candidate:
 	./scripts/confirm_candidate.sh "$(ID)"
