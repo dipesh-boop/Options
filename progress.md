@@ -6680,3 +6680,115 @@ cohort (`paper-trading-v1.4.3-validation-2026-09-22`) and its database
 were not touched. See `STEP_23_12_FREEZE_REPORT.md` for the full
 root-cause trace, exact before/after proposal-id character counts,
 and the complete SY-001 protection argument.
+
+## Step 23.13 -- PAPER_TRADING_V1.5.13 (Read-Only Live Diagnostic Opportunity Scan)
+
+**What was built.** An explicit `--diagnostic-scan` mode on
+`scripts/run_validation_cycle.py`, so an operator can verify a
+software fix (immediately: V1.5.12's proposal-id fix) against LIVE
+Tradier production market data and the real candidate -> Quant -> Risk
+pipeline, WITHOUT running -- or counting as -- an official validation
+day, and WITHOUT any possibility of mutating validation/candidate/
+trade/account/lifecycle/control-loop state. `run_diagnostic_scan()` is
+read-only by construction, not convention: it calls
+`src.portfolio.opportunity_scan.scan_and_rank_opportunities` DIRECTLY
+(the exact pure function the official cycle's own
+`_run_opportunity_scan_stage` calls) and never `run_outer_cycle`/
+`run_control_cycle` at all, both of which were confirmed by source
+inspection to unconditionally persist a `ControlCycleRecord`,
+lifecycle positions, decision snapshots, and alerts. The only
+Sqlite-backed store it touches at all is `SqlitePortfolioStore`, used
+exclusively through its read-only `.get()` -- `.save()` is never
+called on it or anything else in the function. It runs the same
+Tradier-production preflight and market-hours gate, in the same
+order, before any provider is constructed (a closed gate makes zero
+Tradier calls); the same DTE-aware chain retrieval
+(`get_option_chain_for_dte_window`); the same post-fetch
+`evaluation_as_of` capture (preserving the V1.5.7 fix); and the same
+`proposal_id_prefix="validation-scan"` (preserving the V1.5.12 fix). A
+surviving candidate is printed for the operator's own inspection only
+-- never saved as a `ReviewedCandidate`, never made confirmable, no
+`confirm_candidate.py` command is ever printed, and there is no code
+path to `PaperBroker.place_order`/`confirm_fill`/`confirm_candidate`.
+If no persisted portfolio exists yet for the account, an in-memory one
+is built from `config/validation.yaml`'s own starting NAV and never
+saved (for the active cohort, a portfolio already exists and is loaded
+read-only). `generate_candidates`/`scan_and_rank_opportunities` both
+gained one new, purely optional, additive `on_generation_exception`
+callback parameter (`None` at every official call site) so the
+diagnostic can print a SANITIZED exception message/root validation
+reason on a generation failure (redacting bearer tokens, auth headers,
+and token/secret/api-key-shaped values) without touching
+`FunnelDiagnostics`/`CandidateFunnel`'s own persisted schema, which by
+design still records only the bounded exception class. `--preflight`
+and `--diagnostic-scan` are mutually exclusive CLI flags; the
+no-argument default path is completely unchanged.
+
+**What was tested.** A new 23-test acceptance suite
+(`tests/acceptance/test_diagnostic_scan_v1513.py`) covers every item of
+the task's A-O checklist: `--help`/`--preflight` never run the
+diagnostic and mutate nothing; `--diagnostic-scan` dispatches only to
+`run_diagnostic_scan`, mutually exclusive with `--preflight`; the
+official default path is unchanged; the diagnostic refuses mock/
+sandbox/missing-token and accepts Tradier production; a closed
+market-hours gate makes zero provider calls and zero persistence,
+while an open gate fetches and cleanly closes the provider; a
+source-level `ast`-based negative-capability scan (docstring stripped,
+since the docstring itself names the forbidden symbols to document
+their absence) proves no forbidden store/broker/function reference
+exists in the function body, reinforced by a behavioral test that
+monkeypatches `SqlitePortfolioStore.save` to raise if ever called and
+proves it never fires even with a surviving candidate; the operational
+DB file's SHA-256 is byte-identical before/after a run with the table
+pre-seeded (a true write-free no-op, not merely "table didn't need
+creating"); the real V1.5.12 double-dated-prefix defect is proven
+fixed via the diagnostic path itself (zero generation exceptions, no
+`ValidationError` text, exactly one scan date in the id, length <=
+64); a spy-wrapped `scan_and_rank_opportunities` proves the diagnostic
+calls the real, unmodified pipeline directly and never
+`run_outer_cycle`; DTE-window calls use the configured `[20, 45]`
+bounds, never the provider's nearest-N default; a provider that stamps
+chains with the real instant at fetch time (mirroring
+`test_opportunity_evaluation_timestamp.py`'s own pattern) still
+produces a valid candidate under the post-fetch timestamp fix; a
+surviving candidate is printed but never persisted and never printed
+with a `confirm_candidate.py` command; two diagnostic runs never
+create the official cycle's own record and never block it from running
+normally afterward; and `scan_and_rank_opportunities` called with and
+without the new `on_generation_exception` callback produces
+byte-identical scan results, with the callback never firing for an
+error-free candidate. The new PUT_CREDIT_SPREAD test fixture (590/587
+strikes) was deliberately chosen and verified directly against the
+real Quant/Risk pipeline to clear with a genuinely positive
+risk-adjusted return (not merely construct cleanly) -- a shallower
+600/595 spread at the same spot/IV/DTE reproduces the proposal-id fix
+fine but prices to a negative risk-adjusted return and correctly never
+becomes `best`, which is real economics, not a fixture bug. Full
+suite: 3834 passed (3811 baseline + this release's 23 new tests), 6
+skipped, 9 failed -- the identical 9 pre-existing date-rot failures
+known since V1.5.7 through V1.5.12, same node IDs, same root cause.
+Zero new failures. `make verify-freeze` against the regenerated
+`PAPER_TRADING_V1.5.13` manifest: every check passes (the
+`portfolio_module_hash`/`run_validation_cycle_script_hash` drift
+reported before regeneration was expected, matching exactly the two
+production files this release touches).
+
+**What remains open.** The human operator must now run the first real
+`--diagnostic-scan` against live Tradier production manually, as
+explicitly instructed -- no production Tradier call of any kind
+occurred during this release's development. The 9 known date-rot test
+failures remain, by design. Diagnostics for a schema-validation
+generation exception still record only the bounded exception-class
+name in the official, persisted `FunnelDiagnostics`/`CandidateFunnel`
+schema; the new sanitized-message observability is diagnostic-print-
+only and does not change that schema, per the task's own explicit
+scope guard. No risk/Quant/liquidity/DTE/universe/strategy/ranking/
+sizing/market-hours/lifecycle/Tradier/Fidelity/human-confirmation/
+PaperBroker change of any kind, and `TradeProposal.proposal_id`'s
+`max_length=64`, `_next_id()`'s uniqueness scheme, and the V1.5.12
+`proposal_id_prefix` fix were not touched. The active cohort
+(`paper-trading-v1.4.3-validation-2026-09-22`) and its database were
+not touched; `data/options_agent.db` does not exist in this
+development sandbox and no test in this release wrote to any path
+resembling it. See `STEP_23_13_FREEZE_REPORT.md` for the full
+architectural trace and zero-persistence-by-construction argument.

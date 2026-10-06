@@ -454,9 +454,48 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Fidelity/human-confirmation/PaperBroker behavior, and the active
 # validation cohort/database were not touched. See
 # STEP_23_12_FREEZE_REPORT.md.
-FREEZE_NAME = "PAPER_TRADING_V1.5.12"
+#
+# PAPER_TRADING_V1.5.13 (Read-Only Live Diagnostic Opportunity Scan):
+# adds an explicit `--diagnostic-scan` mode to `scripts
+# .run_validation_cycle` so an operator can verify a software fix (e.g.
+# V1.5.12's proposal-id fix) against LIVE Tradier production market
+# data and the real candidate -> Quant -> Risk pipeline, WITHOUT
+# running -- or counting as -- an official validation day. Zero-
+# persistence by construction, not convention: `run_diagnostic_scan`
+# calls `src.portfolio.opportunity_scan.scan_and_rank_opportunities`
+# DIRECTLY (the same pure function the official cycle's own
+# `_run_opportunity_scan_stage` calls) and never `run_outer_cycle`/
+# `run_control_cycle` (both unconditionally persist a `ControlCycleRecord`
+# and lifecycle/decision/alert records even for an existing-position-
+# only evaluation). The only Sqlite-backed store it touches at all is
+# `SqlitePortfolioStore`, and only via its read-only `.get()` -- no
+# `.save()` call exists anywhere in the function, on that store or any
+# other; if no portfolio is on record yet, an in-memory one is built
+# from `config/validation.yaml`'s own starting NAV and never saved.
+# Same Tradier-production preflight and market-hours gate, in the same
+# order, before any provider is constructed; same DTE-aware chain
+# retrieval; same post-fetch `evaluation_as_of` capture (preserving the
+# V1.5.7 fix); same `proposal_id_prefix="validation-scan"` (preserving
+# the V1.5.12 fix). A surviving candidate is printed for the operator's
+# own inspection only -- never saved as a `ReviewedCandidate`, never
+# made confirmable, no `confirm_candidate.py` command is ever printed
+# for it, and there is no code path from this function to
+# `PaperBroker.place_order`/`confirm_fill`/`confirm_candidate`.
+# `src.workflows.candidate_generation.generate_candidates` and
+# `scan_and_rank_opportunities` both additionally gained a purely
+# optional, additive `on_generation_exception` callback parameter
+# (`None` at every official call site, proven behavior-neutral by
+# dedicated equivalence tests) so the diagnostic can report a
+# sanitized exception message/root validation reason on a generation
+# failure without touching `FunnelDiagnostics`'s own persisted schema
+# (which, by design, still records only the exception class). No Risk/
+# Quant/liquidity/DTE/universe/strategy/ranking/sizing/market-hours/
+# lifecycle/Tradier/Fidelity/human-confirmation/PaperBroker behavior,
+# and no part of the active validation cohort/database, was touched.
+# See STEP_23_13_FREEZE_REPORT.md.
+FREEZE_NAME = "PAPER_TRADING_V1.5.13"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.12"
+MANIFEST_VERSION = "1.5.13"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
