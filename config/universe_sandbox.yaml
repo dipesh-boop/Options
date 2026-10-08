@@ -1,0 +1,65 @@
+# PAPER_TRADING_V1.5.15: the Expanded-Universe Sandbox's own research
+# universe -- loaded ONLY by `scripts/run_sandbox_cycle.py`/
+# `scripts/init_expanded_universe_sandbox.py`
+# (src.data.universe.load_universe/load_universe_strategies, pointed at
+# THIS file's path explicitly, via
+# src.portfolio.sandbox_identity.SANDBOX_UNIVERSE_CONFIG_PATH).
+#
+# This file is completely separate from `config/universe.yaml`, the
+# OFFICIAL active validation universe (SPY, QQQ) that
+# `scripts/run_validation_cycle.py`'s default, state-mutating path
+# reads. Nothing in this repository ever copies, merges, or falls back
+# between the two files -- the sandbox cannot activate any of these
+# tickers for the official cycle, and the official cycle never reads
+# this file.
+#
+# These 12 tickers come directly from the PAPER_TRADING_V1.5.14 read-
+# only feasibility study's own research universe
+# (config/universe_feasibility.yaml) -- the same 12 symbols, never a
+# superset or subset chosen in this step. No symbol is added or removed
+# based on a single day's correlation/opportunity observation; see
+# UNIVERSE_EXPANSION_ACTIVATION_PLAN.md and
+# STEP_23_14_FREEZE_REPORT.md for that study's own findings.
+#
+# `strategies` intentionally mirrors config/universe.yaml's own current
+# list exactly -- PAPER_TRADING_V1.5.15 tests UNIVERSE BREADTH only, one
+# variable at a time, never universe + strategy breadth together. Even
+# if a future edit to this file listed a strategy beyond these three,
+# `src.workflows.candidate_generation.candidate_eligible_strategies`
+# (the same filter the official cycle and the V1.5.13/V1.5.14 read-only
+# paths all already apply) would silently narrow it back to only the
+# strategies that actually have candidate-generation logic implemented
+# today -- this is a structural backstop, not merely a convention
+# documented here.
+
+tickers:
+  - ticker: SPY
+    sector: ETF
+  - ticker: QQQ
+    sector: ETF
+  - ticker: IWM
+    sector: ETF
+  - ticker: DIA
+    sector: ETF
+  - ticker: AAPL
+    sector: Technology
+  - ticker: MSFT
+    sector: Technology
+  - ticker: NVDA
+    sector: Technology
+  - ticker: AMZN
+    sector: Consumer Discretionary
+  - ticker: META
+    sector: Technology
+  - ticker: GOOGL
+    sector: Technology
+  - ticker: JPM
+    sector: Financials
+  - ticker: XOM
+    sector: Energy
+
+strategies:
+  - CASH_SECURED_PUT
+  - COVERED_CALL
+  - PUT_CREDIT_SPREAD
+strategies_env: OPTIONS_AGENT_UNIVERSE_SANDBOX_STRATEGIES
