@@ -153,6 +153,76 @@ def _print_banner() -> None:
     print(_BANNER)
 
 
+def _print_ranked_candidate_audit(scan) -> None:
+    """PAPER_TRADING_V1.5.15, Section H observability: durably prints
+    (captured by whatever the operator redirects this script's own
+    stdout to, the exact same convention this script's candidate-
+    funnel block below already uses) every candidate the opportunity
+    scan actually ranked this cycle -- not merely the single `best`
+    one -- so an operator can answer "why did this candidate not
+    become a trade" without re-running live market data.
+
+    **Purely additive, read-only observation of data `scan_and_rank_
+    opportunities` (`src.portfolio.opportunity_scan`, completely
+    unmodified) already computes and returns on `OpportunityScanResult
+    .scanned` every cycle, for both this sandbox and the official
+    cycle alike -- neither path has ever persisted or printed this
+    per-candidate detail before now. This function changes NONE of
+    that computation: no scoring formula, no hurdle, no Risk Engine
+    rule. Deliberately does NOT re-run `evaluate_trade_proposal` per
+    candidate to also recover `approved_order.estimated_credit_debit`
+    for display (unlike the single `best` candidate above, which this
+    script already reprices once to build its durable
+    `ReviewedCandidate`) -- doing that for every scanned candidate on
+    every cycle would mean extra Risk Engine calls purely for display.
+    `max_profit`/`max_loss`/`capital_required`/`risk_adjusted_return`/
+    `risk_reason` already answer "why did this candidate not become a
+    trade" without it.
+
+    **Sandbox-only, print-based, not a new persistence layer.** This
+    codebase's own validation/candidate-review stores are keyed
+    one-row-per-candidate-id (`ReviewedCandidate`) or one-row-per-
+    cohort-day (`DailySnapshot`) -- neither shape fits "every ranked
+    candidate from every cycle," and inventing a new durable table for
+    it would be the kind of shared-architecture change this release's
+    own task specification explicitly says to avoid rather than risk
+    contaminating the official path with. Print output, captured in
+    whatever log file the operator already redirects this script's
+    stdout to (the same convention the candidate-funnel diagnostics
+    below already rely on), is this release's deliberate, narrower
+    choice -- documented explicitly, never silently assumed."""
+    if scan is None:
+        return
+    if not scan.scanned:
+        _line("ranked candidate audit", "no candidate reached ranking this cycle")
+        return
+
+    _line("ranked candidate audit -- candidates ranked this cycle", len(scan.scanned))
+    ranked = sorted(
+        scan.scanned, key=lambda c: (c.risk_adjusted_return is None, -(c.risk_adjusted_return or 0.0)),
+    )
+    for rank, sc in enumerate(ranked, start=1):
+        proposal = sc.candidate.proposal
+        legs_summary = ", ".join(f"{leg.side.value} {leg.right.value} {leg.strike}" for leg in proposal.legs)
+        qa = sc.quantitative_analysis
+        is_best = scan.best is not None and sc.candidate.proposal.proposal_id == scan.best.candidate.proposal.proposal_id
+        print(
+            f"  #{rank}{' (SELECTED)' if is_best else ''}: {proposal.ticker} {proposal.strategy.value} "
+            f"exp={proposal.expiration.isoformat()} legs=[{legs_summary}]"
+        )
+        if qa is not None:
+            print(
+                f"      max_profit=${qa.max_profit:,.2f} max_loss=${qa.max_loss:,.2f} "
+                f"capital_required=${qa.capital_required:,.2f} "
+                f"risk_adjusted_return={sc.risk_adjusted_return if sc.risk_adjusted_return is not None else 'n/a'}"
+            )
+        else:
+            print("      quant pricing did not succeed for this candidate -- no economics available")
+        print(f"      risk_decision={sc.risk_decision.value} reason={sc.risk_reason}")
+    if scan.no_trade_reason is not None:
+        print(f"  NO-TRADE HURDLE: {scan.no_trade_reason}")
+
+
 async def run_sandbox_cycle(*, now: datetime | None = None) -> bool:
     """Mirrors `scripts.run_validation_cycle.run_validation_cycle`'s own
     structure and safety ordering exactly, with sandbox identity/
@@ -409,6 +479,8 @@ async def run_sandbox_cycle(*, now: datetime | None = None) -> bool:
             review_store.save_candidate(candidate)
             print(f"\nNEW SANDBOX CANDIDATE AWAITING HUMAN REVIEW: {candidate_id}")
             print(f"  To authorize (PaperBroker simulation only, never live): python scripts/confirm_sandbox_candidate.py {candidate_id}")
+
+    _print_ranked_candidate_audit(scan)
 
     funnel = result.candidate_funnel
     if funnel is not None:
