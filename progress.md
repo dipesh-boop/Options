@@ -6867,3 +6867,118 @@ human-confirmation/PaperBroker change of any kind; the active cohort
 and its database were not touched; `data/options_agent.db` does not
 exist in this development sandbox. See `STEP_23_13_FREEZE_REPORT.md`
 §Y for the full audit finding and fix.
+
+## Step 23.14 -- PAPER_TRADING_V1.5.14 (Controlled Universe Expansion + Read-Only Feasibility Study)
+
+**What was built.** `--universe-feasibility`, a READ-ONLY research
+study extending V1.5.13's exact zero-persistence architecture
+(`load_portfolio_read_only`, the same Tradier-production preflight
+and market-hours gate before any provider is constructed, the same
+`scan_and_rank_opportunities` call with `proposal_id_prefix=
+"validation-scan"`, the same post-fetch `evaluation_as_of`
+discipline) across a WIDER 12-symbol research universe
+(`config/universe_feasibility.yaml`: SPY, QQQ, IWM, DIA, AAPL, MSFT,
+NVDA, AMZN, META, GOOGL, JPM, XOM) than the official active universe
+(`config/universe.yaml`, still SPY/QQQ only, unchanged), so the
+operator can decide, from real Tradier production data, whether and
+how to expand the official universe -- without activating anything.
+Tests ONE variable at a time: the research universe's strategy list
+is narrowed through the SAME `candidate_eligible_strategies` filter
+the official cycle already uses (CASH_SECURED_PUT/COVERED_CALL/
+PUT_CREDIT_SPREAD only), structurally preventing strategy breadth
+from being tested alongside universe breadth. A new pure module,
+`src.workflows.universe_feasibility`, provides per-symbol
+diagnostics, observational ranked-candidate economics (never
+persisted, never confirmable), aggregate reporting, and a
+deterministic STRONG/ACCEPTABLE/WEAK/UNSUITABLE suitability
+classification based solely on chain/DTE/construction/ranking facts
+-- every function is synchronous, pure, and independently unit-tested
+with zero event loop, sqlite file, or network dependency. A read-only
+correlation/diversification summary is built from a side-channel
+call to the existing, unmodified `src.portfolio.risk_data
+.resolve_price_history_for_correlation` (date-intersection alignment,
+fail-closed on insufficient observations) -- never fed into the
+`Portfolio` object Quant/Risk actually evaluate candidates against,
+and `config/operations.yaml`'s `risk_data_wiring.enabled` flag is
+never read or toggled. The expected Tradier request budget for a
+12-symbol run (108, worst case) is computed deterministically and
+printed before any network call, reusing the existing rate-limiter
+architecture (`may_proceed`) for actual protection rather than
+building a new one. `UNIVERSE_EXPANSION_ACTIVATION_PLAN.md` documents
+the future, human-approved Phase A -> Phase B universe-expansion
+mechanism (using the existing `ExperimentVersion` content-addressed
+identity infrastructure) without creating that record or editing
+`config/universe.yaml` now. Item J's optional ranked-candidate
+observability improvement for the OFFICIAL, persisted
+`CandidateFunnel` was explicitly deferred (would touch the shared,
+frozen aggregator `build_candidate_funnel` also used by the V1.5.13
+diagnostic, for a feature outside this release's primary scope) --
+the new feasibility-specific module already provides the equivalent
+detail for the research path without that risk.
+
+**What was tested.** `tests/unit/workflows/test_universe_feasibility.py`
+(19 tests): research-universe loading never touches `config/
+universe.yaml`'s bytes; per-symbol diagnostics are complete,
+deterministic, and reconcile exactly with aggregate totals;
+ranked-candidate `would_have_been_selected` matches `scan_result.best`
+by identity, never re-derived; all four suitability classifications
+have dedicated branch tests plus a determinism check; the expected
+request-count calculator is tested for the real 12-symbol/6-expiration
+case, zero symbols, and negative-input rejection.
+`tests/acceptance/test_universe_feasibility_v1514.py` (25 tests):
+`--help` documents the new flag with zero mutation; an unknown
+argument and mutual exclusivity with `--diagnostic-scan` both fail
+cleanly; dispatch invokes only the new function; a closed market-hours
+gate makes zero provider calls and zero DB mutation; mock/sandbox/
+missing-token are refused and Tradier production is accepted; a
+static `ast`-based source scan forbids `SqlitePortfolioStore` and
+every execution-path name (`PaperBroker(`, `place_order(`,
+`confirm_fill(`, `confirm_candidate(`) anywhere in the function body,
+reinforced by a behavioral test that makes `SqlitePortfolioStore
+.__init__` itself raise if ever called; the operational DB's SHA-256
+is byte-identical before/after a full 12-symbol run with the table
+pre-seeded; zero candidate-review/idempotency/control-cycle records
+are created; a spy-wrapped `scan_and_rank_opportunities` proves the
+real pipeline is called directly with the real prefix; DTE-window
+calls use `(20, 45)` for every one of the 12 symbols; the post-fetch
+timestamp discipline is re-proven with a provider that stamps chains
+with the real instant at fetch time; the real, unmodified official
+cycle and `--diagnostic-scan` both still run correctly afterward,
+with `config/universe.yaml`'s bytes hashed unchanged; two feasibility
+runs never block the official cycle from running normally after. A
+self-review against the task's own item-by-item test list added two
+more dedicated test classes: `TestCorrelationMethodology` (item O --
+real `resolve_price_history_for_correlation` date-intersection
+behavior against a sufficient/insufficient-history mix, and a
+high-correlation pair at the configured threshold) and
+`TestRateLimitSafety` (item P -- the real `TradierRateLimitError`
+injected for a subset and for all 12 symbols, proving per-symbol
+isolation and a clean, zero-mutation completion either way). Writing
+these surfaced that the shared fake-provider fixture only inherited
+`DteWindowOptionChainProvider`, not `HistoricalDataProvider`, so
+`isinstance(provider, HistoricalDataProvider)` was always `False` and
+the correlation branch had never actually run in any test despite
+`get_bars` being implemented -- fixed by making the fixture inherit
+both ABCs, matching production's own `TradierMarketDataProvider`
+declaration (test-fixture-only fix, zero production code changed).
+Combined with the full pre-existing suite: 3889 passed (3845 + 44
+new), 6 skipped, 9 failed -- the identical pre-existing date-rot
+failures, same node IDs, same root cause. Zero new failures. `make
+verify-freeze` clean against the regenerated `PAPER_TRADING_V1.5.14`
+manifest.
+
+**What remains open.** Item J (ranked-candidate observability on the
+official, persisted funnel) deferred -- see
+`STEP_23_14_FREEZE_REPORT.md` §R. The 9 known date-rot failures
+remain, by design. No risk/Quant/liquidity/DTE/no-trade-hurdle/
+ranking/sizing/market-hours/lifecycle/Tradier/Fidelity/human-
+confirmation/PaperBroker change of any kind; `config/universe.yaml`
+(SPY, QQQ) and the active strategy set were not touched; the active
+cohort (`paper-trading-v1.4.3-validation-2026-09-22`), its NAV, cash,
+positions, completed trades, and validation-day count were not
+touched; `data/options_agent.db` does not exist in this development
+sandbox and no test wrote to any path resembling it. The human
+operator must now run the first real `--universe-feasibility` study
+against live Tradier production manually -- no production Tradier
+call of any kind occurred during this release's development. See
+`STEP_23_14_FREEZE_REPORT.md` for the full architectural trace.

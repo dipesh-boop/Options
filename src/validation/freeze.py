@@ -521,9 +521,56 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # called). The official, no-argument `run_validation_cycle()` path
 # keeps using `SqlitePortfolioStore` exactly as before -- unchanged,
 # and proven so by a dedicated equivalence test.
-FREEZE_NAME = "PAPER_TRADING_V1.5.13"
+#
+# PAPER_TRADING_V1.5.14 (Controlled Universe Expansion + Read-Only
+# Feasibility Study): adds `--universe-feasibility`, a READ-ONLY
+# research study that runs the exact same candidate -> Quant -> Risk
+# pipeline as the official cycle over a WIDER 12-symbol research
+# universe (`config/universe_feasibility.yaml`: SPY, QQQ, IWM, DIA,
+# AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, XOM) than the official
+# active universe (`config/universe.yaml`, still SPY/QQQ only,
+# unchanged by this release), so an operator can decide, from real
+# Tradier production data, whether and how to expand the official
+# universe -- without activating anything. Reuses V1.5.13's exact
+# zero-persistence architecture: `load_portfolio_read_only` (never
+# `SqlitePortfolioStore`), the same Tradier-production preflight and
+# market-hours gate before any provider is constructed, the same
+# `scan_and_rank_opportunities` call with `proposal_id_prefix=
+# "validation-scan"`, and the same post-fetch `evaluation_as_of`
+# discipline. Tests ONE variable (universe breadth) at a time: the
+# research universe's strategy list is narrowed through the same
+# `candidate_eligible_strategies` filter the official cycle already
+# uses, which only allows `CASH_SECURED_PUT`/`COVERED_CALL`/
+# `PUT_CREDIT_SPREAD` today -- structurally, not merely by convention,
+# preventing this study from ever testing strategy breadth alongside
+# universe breadth. Adds a new, pure, independently-unit-tested module
+# (`src.workflows.universe_feasibility`) for per-symbol diagnostics,
+# ranked-candidate economics (observational only -- never persisted,
+# never confirmable), aggregate reporting, and a deterministic
+# STRONG/ACCEPTABLE/WEAK/UNSUITABLE suitability classification based
+# solely on chain/DTE/construction/ranking facts, never on market
+# direction or a fabricated performance claim. A read-only correlation/
+# diversification summary is built from a side-channel call to the
+# existing `src.portfolio.risk_data.resolve_price_history_for_
+# correlation` (date-intersection alignment, fail-closed on
+# insufficient observations, unchanged) -- never fed into the
+# `Portfolio` object Quant/Risk actually evaluate candidates against,
+# and `config/operations.yaml`'s `risk_data_wiring.enabled` flag is
+# never read or toggled by this path. `UNIVERSE_EXPANSION_ACTIVATION_
+# PLAN.md` documents the future, human-approved Phase A -> Phase B
+# universe-expansion mechanism (using the existing `ExperimentVersion`
+# content-addressed identity infrastructure) without creating that
+# record or editing `config/universe.yaml` now. The additive,
+# OFFICIAL-funnel ranked-candidate-observability improvement item J's
+# task description permitted ("if this can be added safely... If it
+# requires risky persistence/schema changes, defer it") was DEFERRED --
+# see STEP_23_14_FREEZE_REPORT.md for why. No risk/Quant/liquidity/DTE/
+# no-trade-hurdle/ranking/sizing/market-hours/lifecycle/Tradier/
+# Fidelity/human-confirmation/PaperBroker behavior, and no part of the
+# active validation cohort/database, was touched.
+FREEZE_NAME = "PAPER_TRADING_V1.5.14"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.13"
+MANIFEST_VERSION = "1.5.14"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
