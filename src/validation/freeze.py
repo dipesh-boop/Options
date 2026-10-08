@@ -594,12 +594,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # read back into structural classification). Zero changes to
 # `TradierMarketDataProvider`'s own semantics, retry policy, DTE
 # retrieval, or canonical timestamps -- see STEP_23_14_FREEZE_REPORT
-# .md §AA for the full trace. Version intentionally stays
-# PAPER_TRADING_V1.5.14 -- this corrects, rather than supersedes with
-# a new number, a freeze the operator never accepted.
-FREEZE_NAME = "PAPER_TRADING_V1.5.14"
+# .md §AA for the full trace.
+#
+# PAPER_TRADING_V1.5.15: adds the strictly-isolated Expanded-Universe
+# Sandbox (src/portfolio/sandbox_guard.py, sandbox_identity.py,
+# cycle_helpers.py; scripts/init_expanded_universe_sandbox.py,
+# run_sandbox_cycle.py, confirm_sandbox_candidate.py,
+# sandbox_status.py; config/universe_sandbox.yaml) -- a parallel
+# research environment that reuses the official cohort's exact Quant/
+# Risk/DTE/liquidity/sizing/ranking/no-trade standards against a wider
+# 12-symbol universe, to observe whether universe breadth alone
+# produces more naturally-qualifying candidates. See
+# STEP_23_15_FREEZE_REPORT.md for the full trace. The official cohort
+# (`paper-trading-v1.4.3-validation-2026-09-22`), `config/universe.yaml`
+# (SPY, QQQ), and every risk/Quant/ranking/DTE/strategy-activation rule
+# are unchanged -- confirmed by this same freeze manifest showing no
+# drift anywhere outside the new sandbox files and the mechanical
+# `cycle_helpers.py` extraction (itself a pure, regression-tested move
+# of existing logic, not a behavior change).
+FREEZE_NAME = "PAPER_TRADING_V1.5.15"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.14"
+MANIFEST_VERSION = "1.5.15"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

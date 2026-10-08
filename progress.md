@@ -7060,3 +7060,132 @@ does not separately distinguish a genuine provider failure from
 insufficient history (both collapse to `INSUFFICIENT_HISTORY`, matching
 `resolve_price_history_for_correlation`'s own existing contract),
 since separating them would require changing that shared function.
+
+## Step 23.15 -- PAPER_TRADING_V1.5.15 (Expanded-Universe Sandbox)
+
+**Why.** Observe whether universe breadth alone -- the ONLY
+experimental variable -- lets a wider 12-symbol universe (the same
+set as the V1.5.14 feasibility study) naturally exercise the complete
+paper-trading lifecycle end-to-end, without touching the official
+SPY/QQQ cohort, its database, or any shared Quant/Risk/ranking logic.
+
+**What was built.** A strictly isolated, parallel research environment:
+`src/portfolio/sandbox_guard.py` (canonical, `Path.resolve()`-based
+rejection of any alias of the official database, checked at the start
+of every sandbox entry point, before any config is loaded or store
+constructed), `src/portfolio/sandbox_identity.py` (hardwired Python
+constants for the sandbox's cohort/account/database/manifest/cycle-id-
+prefix identity -- deliberately not a YAML file an operator could
+mistype into aliasing the official path; reads `config/operations.yaml`
+read-only for genuinely shared production-rule knobs via pydantic
+`model_copy`), `config/universe_sandbox.yaml` (SPY, QQQ, IWM, DIA,
+AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, XOM -- the V1.5.14 study's
+own set, unchanged), `scripts/init_expanded_universe_sandbox.py`
+(idempotent metadata/state initializer; never contacts Tradier; fails
+closed on an incompatible existing sandbox rather than resetting it),
+`scripts/run_sandbox_cycle.py` (daily cycle runner mirroring
+`run_validation_cycle.py`'s structure/safety ordering, reusing the
+identical Risk Engine/`run_outer_cycle`/`PaperBroker`/candidate-review
+machinery with sandbox identity substituted; `sandbox-validation-`
+cycle-id namespace, never colliding with the official `validation-`
+one; adds a purely additive, sandbox-only ranked-candidate audit print
+block so an operator can see every candidate the scan ranked --
+ticker/strategy/expiration/legs/max-profit/max-loss/capital-required/
+risk-adjusted-return/risk-reason -- not merely the one selected
+candidate, answering "why didn't this become a trade" without
+changing the scoring formula, the hurdle, or persisting a new shared
+table), `scripts/confirm_sandbox_candidate.py` (thin wrapper around
+the completely unmodified `src.review.confirmation.confirm_candidate`;
+adds a sandbox-specific pre-check layer -- cohort, cycle namespace,
+awaiting-human state -- before that function is ever called; requires
+an explicit candidate id, no zero-argument or "latest" shortcut), and
+`scripts/sandbox_status.py` (strictly read-only; checks file
+existence before touching any config/store; once the database exists,
+reads it exclusively via a `mode=ro` SQLite connection, never via any
+`Sqlite*Store` constructor, whose own `CREATE TABLE IF NOT EXISTS`
+can write a missing table into existence).
+
+`src/portfolio/cycle_helpers.py` (new file) extracts four helpers
+(`line`, `expire_stale_candidates`, `fetch_existing_position_chain`,
+`run_lifecycle_only_safety_check`) mechanically out of
+`scripts/run_validation_cycle.py` so both the official and sandbox
+runners share them, rather than duplicating a second trading-engine
+implementation. `run_lifecycle_only_safety_check` gained one new
+parameter, `cycle_id_prefix` (default `"validation"`, unchanged for
+the official call site) and now takes `provider` as a required,
+caller-supplied argument rather than constructing its own internally
+-- the second change is a bug fix for a regression the FIRST version
+of this extraction introduced: constructing the provider inside the
+shared helper silently broke every existing test that monkeypatches
+the *script's* own `get_configured_market_data_provider` reference
+(Python resolves a bare name against the function's OWN defining
+module, not the caller's), because the helper's module-level import
+was a second, independent copy of that reference. Caught by a full-
+suite regression run (32 failures against a 9-failure baseline) before
+this step's own freeze; fixed by making `provider` explicit and adding
+a dedicated test proving the caller-supplied fake is what actually
+gets used and that `cycle_helpers.py` never imports the provider
+factory at all.
+
+**What was tested.** `tests/acceptance/test_sandbox_isolation.py` (new,
+37 tests) -- the full Section-27 A-L safety/isolation suite: official-
+database rejection (exact path, relative/dot-slash/redundant-segment
+aliases) and guard-ordering (every sandbox entry point refuses to load
+or run against an official-path alias, before any store is touched)
+for the initializer, cycle runner, confirmation wrapper, and status
+command; official-database byte-fingerprint immutability across a
+full init-cycle-status lifecycle (captured at test-module-collection
+time, so the assertion holds whether or not the official database
+happens to already exist in the environment); sandbox account/cycle-
+id-namespace/candidate-review isolation from the official cohort;
+PaperBroker-only execution (no Tradier/IBKR/Fidelity execution class
+referenced in any sandbox script); human-confirmation requirement (a
+cycle alone never produces a fill; no zero-argument confirm shortcut);
+cross-cohort and cross-cycle-namespace confirmation rejection (a
+foreign-cohort or foreign-namespace candidate seeded directly into the
+sandbox store is refused by the wrapper's own pre-check layer before
+`confirm_candidate` is ever reached; the OFFICIAL `confirm_candidate.py`,
+pointed at its own separate database, cannot even load a sandbox
+candidate id); idempotent initialization (a second run is a no-op; an
+incompatible existing sandbox fails closed); restart persistence (a
+fresh store reconstruction reads back identical cohort/manifest data);
+official-runner regression proof (the official daily cycle, run in the
+same process immediately after a full sandbox lifecycle, still
+produces exactly one `AWAITING_HUMAN` candidate and zero fills);
+sandbox/official universe-content exactness (the real
+`config/universe_sandbox.yaml` has exactly the 12 required tickers;
+the real `config/universe.yaml` is still SPY/QQQ only); and the
+`cycle_helpers` provider-injection regression test described above.
+Full suite: 3970 passed (3933 + 37 new), 6 skipped, 9 failed -- the
+identical known date-rot failures, same node IDs, zero new failures.
+`make verify-freeze` clean against the regenerated `PAPER_TRADING_V1.5.15`
+manifest.
+
+**Pre-freeze audit.** A dedicated 25-item read-only architecture/
+security audit (official-DB reachability, path-alias bypass, env-var
+redirection, real-broker instantiation from any sandbox entry point,
+auto-confirmation, cross-path candidate confirmation, status/
+initializer mutation, cycle-id collision, dashboard leakage, and
+whether `config/universe.yaml`/`risk_limits.yaml`/`validation.yaml`/
+Quant/Risk/ranking/DTE/strategy-activation semantics changed) passed
+every item, backed by `git diff` against the V1.5.14 baseline showing
+the only `src/` change outside three brand-new sandbox files is the
+mechanical, regression-tested `cycle_helpers.py` extraction, and that
+`src/risk/`, `src/quant/`, `src/strategies/`, `src/workflows/`, and
+every `config/*.yaml` file besides the two new sandbox-only additions
+are completely untouched.
+
+**What remains open.** The operator has not yet run
+`scripts/init_expanded_universe_sandbox.py`, `scripts/run_sandbox_cycle.py`,
+or `scripts/confirm_sandbox_candidate.py` against real Tradier
+production data on their own machine -- per this step's own
+development constraints, no real sandbox database was initialized, no
+real market-data cycle was run, and no real candidate was created or
+confirmed during development; everything above was verified against
+temporary databases and fake providers only. The ranked-candidate
+audit (Section H observability) is print-only, captured by whatever
+log file the operator redirects this script's stdout to -- not a new
+durable table -- a deliberate, narrower choice flagged explicitly
+rather than risk a shared-architecture change to the official cycle's
+own persistence shape. A dashboard view for the sandbox was not built
+(CLI-only, per this release's own scope).
