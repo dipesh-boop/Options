@@ -54,3 +54,41 @@ strategies:
   - COVERED_CALL
   - PUT_CREDIT_SPREAD
 strategies_env: OPTIONS_AGENT_UNIVERSE_FEASIBILITY_STRATEGIES
+
+# PAPER_TRADING_V1.5.14 acceptance correction: conservative, sequential
+# batching/headroom policy for --universe-feasibility's two Tradier-
+# request phases (option-chain opportunity scan, then correlation/
+# history). Every number here is a POLICY choice (same *_env-override
+# convention every other config file in this repository establishes),
+# never a Tradier plan assumption -- the study decides whether to
+# proceed using ONLY the provider's own observed response-header state
+# (src.data.rate_limiter.RateLimitState), never a hardcoded figure like
+# "120/minute". See src.workflows.universe_feasibility
+# .has_sufficient_observed_headroom and
+# scripts/run_validation_cycle.py::run_universe_feasibility_study's own
+# docstring for the exact bootstrap/stop-before-exhaustion mechanics.
+rate_limit_safety:
+  # How many symbols' worth of option-chain requests to attempt before
+  # re-checking observed rate-limit headroom. Deliberately small and
+  # sequential -- never aggressive concurrency. The FIRST batch always
+  # proceeds (there is nothing observed yet to check against); from the
+  # second batch onward, the study only continues if the provider's own
+  # last-observed response headers show enough reserved headroom for
+  # the next batch's worst-case logical request count.
+  batch_size: 3
+  batch_size_env: OPTIONS_AGENT_FEASIBILITY_BATCH_SIZE
+  # Fraction of the provider's own reported TOTAL allowance
+  # (RateLimitState.allowed, never a hardcoded number) reserved as a
+  # safety margin for other concurrent consumers of the same real
+  # Tradier-account-wide budget (the official cycle, a dashboard-
+  # triggered run, a second --diagnostic-scan) that this process cannot
+  # see or coordinate with, before the opportunity-scan phase may start
+  # its next batch.
+  reserved_headroom_pct: 0.20
+  reserved_headroom_pct_env: OPTIONS_AGENT_FEASIBILITY_RESERVED_HEADROOM_PCT
+  # Same idea, applied before the correlation phase begins at all (a
+  # separate, larger reserve -- correlation is the lower-priority,
+  # P5_BACKGROUND_RESEARCH phase, and is the first thing this study
+  # gives up when headroom is tight).
+  correlation_reserved_headroom_pct: 0.30
+  correlation_reserved_headroom_pct_env: OPTIONS_AGENT_FEASIBILITY_CORRELATION_RESERVED_HEADROOM_PCT

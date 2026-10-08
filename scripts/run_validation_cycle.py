@@ -240,11 +240,20 @@ from src.workflows.candidate_funnel import build_candidate_funnel  # noqa: E402
 from src.workflows.candidate_generation import QuantFilterConfig, candidate_eligible_strategies  # noqa: E402
 from src.workflows.funnel_diagnostics import FunnelDiagnostics  # noqa: E402
 from src.workflows.universe_feasibility import (  # noqa: E402
+    RateLimitSafetyConfigError,
+    SkipReason,
     build_aggregate_feasibility_report,
     build_candidate_feasibility_details,
+    build_correlation_feasibility_summary,
     build_symbol_feasibility_summaries,
-    classify_ticker_suitability,
+    classify_opportunity_today,
+    classify_structural_suitability,
+    expected_correlation_request_count,
+    expected_opportunity_scan_request_count,
     expected_tradier_request_count,
+    has_sufficient_observed_headroom,
+    load_rate_limit_safety_config,
+    usable_request_headroom,
 )
 from src.quant.correlations import flag_highly_correlated_pairs  # noqa: E402
 
@@ -1375,6 +1384,58 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     `confirm_candidate.py` command is ever printed for any of them,
     exactly like `run_diagnostic_scan`'s own single best candidate.
 
+    **V1.5.14 acceptance correction -- conservative, sequential,
+    budget-aware fetching across TWO separately-budgeted phases.**
+    Neither this change, nor anything else in this function, touches
+    `TradierMarketDataProvider`'s own production semantics, retry
+    policy, DTE retrieval, or canonical timestamps -- those remain
+    exactly as frozen for the official cycle; only how MANY symbols
+    this STUDY asks for, and in what order, changed.
+
+    Phase 1 (option-chain opportunity scan) fetches `universe_tickers`
+    in small, strictly sequential batches of
+    `config/universe_feasibility.yaml`'s own `rate_limit_safety.
+    batch_size` (default 3) -- never aggressive concurrency. The FIRST
+    batch always proceeds (the provider's `rate_limit_state` starts
+    `None`; there is nothing observed yet to check against -- this is
+    the exact, documented bootstrap: allow only enough initial work to
+    obtain real response headers, then decide every subsequent batch
+    from what was actually observed, never from an assumed plan
+    allowance). Before every batch AFTER the first,
+    `has_sufficient_observed_headroom` checks the provider's own last-
+    observed `rate_limit_state` against that batch's worst-case logical
+    request count, reserving `rate_limit_safety.reserved_headroom_pct`
+    of the TOTAL allowance as a margin for other concurrent consumers
+    of the same real, Tradier-account-wide budget (the official cycle,
+    a dashboard-triggered run, a second `--diagnostic-scan`) that this
+    process cannot see. If headroom is ever insufficient, the phase
+    stops BEFORE that batch starts -- every ticker in it, and every
+    ticker not yet reached, is marked SKIPPED (never attempted, never
+    counted against this run's own successful/failed-chain tally) and
+    reported with `StructuralSuitability.NOT_EVALUATED` /
+    `SkipReason.RATE_LIMIT_HEADROOM` -- never silently reclassified as
+    a market-data failure or an UNSUITABLE ticker. A `TradierRateLimit
+    Error` mid-symbol (the provider's own existing retries already
+    exhausted) is isolated to that one symbol exactly like any other
+    fetch failure -- this orchestration layer never adds a SECOND,
+    outer retry on top of the provider's own.
+
+    Phase 2 (correlation/history) begins only AFTER phase 1 completes
+    or stops, and only for tickers phase 1 actually ATTEMPTED (a
+    skipped ticker never gets a correlation attempt either -- it is
+    NOT_EVALUATED overall). Its own pre-flight check
+    (`rate_limit_safety.correlation_reserved_headroom_pct`, a larger
+    reserve -- correlation is this study's lowest-priority phase)
+    decides how many of those attempted tickers current headroom can
+    still support; it may run for all of them, a subset (`usable_
+    request_headroom`-based, never an outer retry here either), or
+    none. A ticker phase 2 deliberately never asked about is
+    `CorrelationSymbolStatus.SKIPPED_BUDGET` -- reported separately
+    from, and never conflated with, `INSUFFICIENT_HISTORY` (a ticker
+    phase 2 DID ask about, via the unmodified `resolve_price_history_
+    for_correlation`, whose own per-ticker fetch did not yield enough
+    aligned observations).
+
     `now` is `None` in every real invocation -- see
     `run_diagnostic_scan`'s own docstring for why this parameter exists
     (deterministic market-hours-gate testing only)."""
@@ -1386,7 +1447,8 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
         val_config = load_validation_config()
         feasibility_universe = load_universe(_FEASIBILITY_UNIVERSE_CONFIG_PATH)
         configured_strategy_names = load_universe_strategies(_FEASIBILITY_UNIVERSE_CONFIG_PATH)
-    except (OperationsConfigError, ValidationConfigError, UniverseConfigError) as exc:
+        safety_config = load_rate_limit_safety_config(_FEASIBILITY_UNIVERSE_CONFIG_PATH)
+    except (OperationsConfigError, ValidationConfigError, UniverseConfigError, RateLimitSafetyConfigError) as exc:
         print(f"FAIL: configuration error -- {exc}")
         print()
         _print_feasibility_banner()
@@ -1457,40 +1519,100 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     universe_tickers = tuple(e.ticker for e in feasibility_universe)
     max_expirations = _DEFAULT_TRADIER_MAX_EXPIRATIONS
     _line(
-        "expected Tradier request budget (upper bound, this run)",
+        "expected Tradier request budget (LOGICAL requests before retries, worst case, this run)",
         expected_tradier_request_count(num_symbols=len(universe_tickers), max_expirations=max_expirations),
+    )
+    _line(
+        "  -- option-scan phase (logical, before retries)",
+        expected_opportunity_scan_request_count(num_symbols=len(universe_tickers), max_expirations=max_expirations),
+    )
+    _line(
+        "  -- correlation phase (logical, before retries)",
+        expected_correlation_request_count(num_symbols=len(universe_tickers)),
+    )
+    _line(
+        "  -- actual outbound HTTP attempts can exceed this",
+        "provider-level retries (up to 3 attempts per logical request on a transient failure/429) are not counted above",
+    )
+    _line(
+        "batching policy (batch size / opportunity-scan reserve / correlation reserve)",
+        f"{safety_config.batch_size} / {safety_config.reserved_headroom_pct:.0%} / {safety_config.correlation_reserved_headroom_pct:.0%}",
     )
 
     fetch_results: dict[str, OptionChain | Exception] = {}
+    evaluated_tickers: list[str] = []
+    skipped_tickers: list[str] = []
+    skip_reason: SkipReason | None = None
     provider = get_configured_market_data_provider()
     price_history: dict[str, list[float]] = {}
+    correlation_attempted: tuple[str, ...] = ()
+    correlation_skipped: tuple[str, ...] = ()
     try:
         max_expirations = getattr(getattr(provider, "_config", None), "max_expirations", max_expirations)
-        for ticker in universe_tickers:
-            try:
-                if isinstance(provider, DteWindowOptionChainProvider):
-                    fetch_results[ticker] = await provider.get_option_chain_for_dte_window(
-                        ticker, min_dte=quant_filter.min_dte, max_dte=quant_filter.max_dte, as_of=now.date(),
-                    )
-                else:
-                    fetch_results[ticker] = await provider.get_option_chain(ticker)
-            except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the feasibility study
-                fetch_results[ticker] = exc
 
-        # Item H: read-only correlation summary. Deliberately a side
-        # channel -- resolve_price_history_for_correlation never
-        # mutates `portfolio`, never sets `portfolio.risk_data_required`,
-        # and is called regardless of `risk_data_wiring.enabled` (this
+        # Phase 1: option-chain opportunity scan, in small, strictly
+        # sequential batches, with a stop-BEFORE-starting-the-next-
+        # batch check driven ONLY by the provider's own observed
+        # rate_limit_state -- see this function's own docstring for the
+        # full bootstrap/stop-before-exhaustion reasoning.
+        remaining = list(universe_tickers)
+        while remaining:
+            batch = remaining[: safety_config.batch_size]
+            observed_state = getattr(provider, "rate_limit_state", None)
+            projected = expected_opportunity_scan_request_count(num_symbols=len(batch), max_expirations=max_expirations)
+            if not has_sufficient_observed_headroom(
+                observed_state, projected_requests=projected, reserved_headroom_pct=safety_config.reserved_headroom_pct,
+            ):
+                skipped_tickers.extend(remaining)
+                skip_reason = SkipReason.RATE_LIMIT_HEADROOM
+                break
+            remaining = remaining[safety_config.batch_size :]
+
+            for ticker in batch:
+                evaluated_tickers.append(ticker)
+                try:
+                    if isinstance(provider, DteWindowOptionChainProvider):
+                        fetch_results[ticker] = await provider.get_option_chain_for_dte_window(
+                            ticker, min_dte=quant_filter.min_dte, max_dte=quant_filter.max_dte, as_of=now.date(),
+                        )
+                    else:
+                        fetch_results[ticker] = await provider.get_option_chain(ticker)
+                except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the feasibility study; never retried a second time at this layer
+                    fetch_results[ticker] = exc
+
+        if skipped_tickers:
+            _line(
+                "opportunity-scan phase stopped early -- observed rate-limit headroom insufficient for the next batch",
+                f"{len(skipped_tickers)} symbol(s) skipped (NOT_EVALUATED, never UNSUITABLE): {skipped_tickers}",
+            )
+
+        # Phase 2: correlation/history, a SEPARATE budget check, AFTER
+        # phase 1 completes or stops, and ONLY for tickers phase 1
+        # actually attempted. Deliberately a side channel --
+        # resolve_price_history_for_correlation never mutates
+        # `portfolio`, never sets `portfolio.risk_data_required`, and
+        # is called regardless of `risk_data_wiring.enabled` (this
         # study reports on correlation; it never activates risk-data
         # wiring for the real Quant/Risk evaluation below).
-        if isinstance(provider, HistoricalDataProvider):
-            try:
-                price_history = await resolve_price_history_for_correlation(
-                    frozenset(universe_tickers), historical_provider=provider, now=now,
-                    lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
-                )
-            except Exception:  # noqa: BLE001 - correlation is observational; never aborts the study
-                price_history = {}
+        if isinstance(provider, HistoricalDataProvider) and evaluated_tickers:
+            observed_state = getattr(provider, "rate_limit_state", None)
+            headroom = usable_request_headroom(observed_state, reserved_headroom_pct=safety_config.correlation_reserved_headroom_pct)
+            if headroom is None:
+                affordable = len(evaluated_tickers)
+            else:
+                affordable = min(len(evaluated_tickers), headroom // max(1, expected_correlation_request_count(num_symbols=1)))
+            correlation_attempted = tuple(evaluated_tickers[:affordable])
+            correlation_skipped = tuple(evaluated_tickers[affordable:])
+            if correlation_attempted:
+                try:
+                    price_history = await resolve_price_history_for_correlation(
+                        frozenset(correlation_attempted), historical_provider=provider, now=now,
+                        lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
+                    )
+                except Exception:  # noqa: BLE001 - correlation is observational; never aborts the study
+                    price_history = {}
+            if correlation_skipped:
+                _line("correlation phase: skipped due to rate-limit headroom", list(correlation_skipped))
     finally:
         close = getattr(provider, "close", None)
         if close is not None:
@@ -1504,7 +1626,7 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     if failed:
         _line("symbols failed this feasibility study (isolated, study continues)", failed)
 
-    diagnostics_by_ticker = {t: FunnelDiagnostics(ticker=t) for t in universe_tickers}
+    diagnostics_by_ticker = {t: FunnelDiagnostics(ticker=t) for t in evaluated_tickers}
     sanitized_exceptions: list[tuple[str, str, str]] = []
 
     def _on_generation_exception(ticker: str, strategy: str, exc: Exception) -> None:
@@ -1518,20 +1640,30 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     )
 
     symbol_summaries = build_symbol_feasibility_summaries(
-        universe_tickers=universe_tickers, chain_received_tickers=frozenset(chains_by_ticker.keys()),
+        evaluated_tickers=tuple(evaluated_tickers), chain_received_tickers=frozenset(chains_by_ticker.keys()),
         diagnostics_by_ticker=diagnostics_by_ticker, scan_result=scan_result,
     )
     candidate_details = build_candidate_feasibility_details(scan_result)
     aggregate = build_aggregate_feasibility_report(
-        universe_tickers=universe_tickers, chain_received_tickers=frozenset(chains_by_ticker.keys()),
-        symbol_summaries=symbol_summaries, scan_result=scan_result,
+        symbols_requested=len(universe_tickers), symbol_summaries=symbol_summaries,
+        chain_received_tickers=frozenset(chains_by_ticker.keys()), scan_result=scan_result,
+        skipped_tickers=tuple(skipped_tickers), skip_reason=skip_reason,
+    )
+    correlation_summary = build_correlation_feasibility_summary(
+        correlation_attempted_tickers=correlation_attempted, correlation_skipped_tickers=correlation_skipped,
+        price_history=price_history,
+        high_correlation_pairs=tuple(
+            (p.symbol_a, p.symbol_b, p.correlation)
+            for p in (flag_highly_correlated_pairs(price_history, threshold=limits.high_correlation_threshold) if len(price_history) >= 2 else [])
+        ),
     )
 
     print()
     print("  PER-SYMBOL DIAGNOSTICS")
     for s in symbol_summaries:
-        classification = classify_ticker_suitability(s)
-        print(f"  -- {s.ticker} -- suitability: {classification.value}")
+        structural = classify_structural_suitability(s)
+        opportunity = classify_opportunity_today(s)
+        print(f"  -- {s.ticker} -- structural_suitability: {structural.value} -- opportunity_today: {opportunity.value}")
         _line("    market-data success/chain usable", f"{s.market_data_successful}/{s.chain_usable}")
         _line("    contracts examined", s.contracts_seen)
         _line("    expirations seen/eligible/rejected", f"{s.expirations_seen}/{s.expirations_eligible}/{s.expirations_rejected}")
@@ -1540,10 +1672,12 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
         _line("    generation exceptions", s.generation_exceptions)
         _line("    quant evaluations/passes/rejects", f"{s.quant_evaluations}/{s.quant_passed}/{s.quant_rejected}")
         _line("    risk evaluations/passes/rejects", f"{s.risk_evaluations}/{s.risk_passed}/{s.risk_rejected}")
-        _line("    ranked candidates", s.ranked_candidates)
+        _line("    ranked candidates / clearing no-trade hurdle", f"{s.ranked_candidates}/{s.ranked_candidates_clearing_hurdle}")
         _line("    selected candidate (observational only)", s.selected_candidate_proposal_id or "none")
         if s.dominant_rejection_reasons:
             _line("    dominant rejection reasons", ", ".join(s.dominant_rejection_reasons))
+    for ticker in skipped_tickers:
+        print(f"  -- {ticker} -- structural_suitability: NOT_EVALUATED -- skip_reason: {skip_reason.value if skip_reason else 'unknown'}")
     for ticker, strategy, message in sanitized_exceptions:
         _line(f"  generation exception detail -- {ticker}/{strategy}", message)
 
@@ -1562,7 +1696,11 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     print()
     print("  AGGREGATE FEASIBILITY REPORT")
     _line("  symbols requested", aggregate.symbols_requested)
-    _line("  successful/failed chains", f"{aggregate.successful_chains}/{aggregate.failed_chains}")
+    _line("  symbols evaluated/skipped", f"{aggregate.symbols_evaluated}/{aggregate.symbols_skipped}")
+    if aggregate.skipped_tickers:
+        _line("  skipped tickers (NOT_EVALUATED, never UNSUITABLE)", aggregate.skipped_tickers)
+        _line("  skip reason", aggregate.skip_reason.value if aggregate.skip_reason else "unknown")
+    _line("  successful/failed chains (among evaluated symbols only)", f"{aggregate.successful_chains}/{aggregate.failed_chains}")
     _line("  total contracts examined", aggregate.total_contracts_examined)
     _line("  total eligible expirations", aggregate.total_eligible_expirations)
     _line("  total strategy attempts", aggregate.total_strategy_attempts)
@@ -1570,29 +1708,37 @@ async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool
     _line("  total quant passed", aggregate.total_quant_passed)
     _line("  total risk passed", aggregate.total_risk_passed)
     _line("  total ranked candidates", aggregate.total_ranked_candidates)
-    _line("  total candidates that would clear the no-trade hurdle", aggregate.total_would_clear_no_trade_hurdle)
+    _line("  total candidates that would clear the no-trade hurdle (observational -- never preferred for the permanent universe on this basis alone)", aggregate.total_would_clear_no_trade_hurdle)
     _line("  by-strategy ranked counts", aggregate.by_strategy)
     _line("  by-ticker ranked counts", aggregate.by_ticker_ranked)
+    _line("  structural suitability counts (STRONG/ACCEPTABLE/WEAK/UNSUITABLE/NOT_EVALUATED)", aggregate.structural_suitability_counts)
+    _line("  opportunity-today progression counts (observational only)", aggregate.opportunity_today_counts)
     if aggregate.top_construction_bottlenecks:
         _line("  top construction bottlenecks", aggregate.top_construction_bottlenecks)
     if aggregate.top_quant_rejection_reasons:
         _line("  top quant rejection reasons", aggregate.top_quant_rejection_reasons)
     if aggregate.top_risk_rejection_reasons:
         _line("  top risk rejection reasons", aggregate.top_risk_rejection_reasons)
+    print(
+        "  PERMANENT-UNIVERSE GUIDANCE: driven primarily by structural suitability and "
+        "diversification/correlation (below) -- never by whether one day's candidate happened to "
+        "rank or clear the no-trade hurdle."
+    )
 
     print()
     print("  CORRELATION / DIVERSIFICATION ANALYSIS (READ-ONLY RESEARCH OUTPUT -- risk_data_wiring unchanged)")
-    sufficient = tuple(sorted(price_history.keys()))
-    insufficient = tuple(sorted(set(universe_tickers) - set(price_history.keys())))
-    _line("  symbols with sufficient history", sufficient)
-    _line("  symbols with insufficient history", insufficient)
-    if len(price_history) >= 2:
-        pairs = flag_highly_correlated_pairs(price_history, threshold=limits.high_correlation_threshold)
-        if pairs:
-            for p in pairs:
-                _line("  high-correlation pair", f"{p.symbol_a}/{p.symbol_b} = {p.correlation:.2f}")
-        else:
-            _line("  high-correlation pairs", "none at or above the configured threshold")
+    _line("  symbols with sufficient history", correlation_summary.symbols_with_sufficient_history)
+    _line("  symbols with insufficient history", correlation_summary.symbols_with_insufficient_history)
+    if correlation_summary.symbols_skipped_budget:
+        _line(
+            "  symbols skipped due to rate-limit headroom (never misclassified as insufficient history)",
+            correlation_summary.symbols_skipped_budget,
+        )
+    if correlation_summary.high_correlation_pairs:
+        for symbol_a, symbol_b, correlation in correlation_summary.high_correlation_pairs:
+            _line("  high-correlation pair", f"{symbol_a}/{symbol_b} = {correlation:.2f}")
+    elif len(correlation_summary.symbols_with_sufficient_history) >= 2:
+        _line("  high-correlation pairs", "none at or above the configured threshold")
     else:
         _line("  high-correlation pairs", "not computable -- fewer than 2 symbols had sufficient aligned history")
 

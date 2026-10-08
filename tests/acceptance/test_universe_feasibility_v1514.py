@@ -17,6 +17,7 @@ import ast
 import hashlib
 import inspect
 import sys
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from src.data.historical import HistoricalBar, HistoricalDataProvider
 from src.data.option_chain import OptionChain, OptionContract, OptionRight
 from src.data.provider import DteWindowOptionChainProvider, DteWindowSelectionDiagnostics
 from src.data.quotes import UnderlyingQuote
+from src.data.rate_limiter import RateLimitState
 from src.portfolio.market_session import MarketSessionState, ValidationCycleEligibility
 from tests.acceptance.test_diagnostic_scan_v1513 import _body_source_without_docstring
 from tests.acceptance.test_review_only_daily_cycle import (
@@ -118,15 +120,29 @@ class _FeasibilityFakeProvider(HistoricalDataProvider, DteWindowOptionChainProvi
         self.closed = True
 
 
-def _write_feasibility_universe_override(environment_path: Path, *, tickers: tuple[str, ...] = FEASIBILITY_TICKERS) -> None:
+def _write_feasibility_universe_override(
+    environment_path: Path, *, tickers: tuple[str, ...] = FEASIBILITY_TICKERS,
+    batch_size: int = 3, reserved_headroom_pct: float = 0.20, correlation_reserved_headroom_pct: float = 0.30,
+) -> None:
     """Points `_FEASIBILITY_UNIVERSE_CONFIG_PATH` at a temp file for a
     test -- never the real `config/universe_feasibility.yaml` or
-    `config/universe.yaml`."""
+    `config/universe.yaml`. Includes the V1.5.14 acceptance-correction
+    `rate_limit_safety` section every real `--universe-feasibility` run
+    now requires (`load_rate_limit_safety_config` fails closed without
+    it)."""
     import yaml
 
     path = environment_path / "universe_feasibility.yaml"
     path.write_text(
-        yaml.safe_dump({"tickers": [{"ticker": t, "sector": "ETF"} for t in tickers], "strategies": ["PUT_CREDIT_SPREAD"]})
+        yaml.safe_dump({
+            "tickers": [{"ticker": t, "sector": "ETF"} for t in tickers],
+            "strategies": ["PUT_CREDIT_SPREAD"],
+            "rate_limit_safety": {
+                "batch_size": batch_size,
+                "reserved_headroom_pct": reserved_headroom_pct,
+                "correlation_reserved_headroom_pct": correlation_reserved_headroom_pct,
+            },
+        })
     )
     return path
 
@@ -751,3 +767,286 @@ class TestRepeatedFeasibilityNeverBlocksOfficialCycle:
         monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: FakeMarketDataProvider())
         ok = await cycle.run_validation_cycle()
         assert ok is True
+
+
+# --------------------------------------------------------------- V1.5.14 acceptance correction:
+# batching / bootstrap / stop-before-exhaustion / correlation-phase budgeting
+
+
+class _BudgetAwareFakeProvider(_FeasibilityFakeProvider):
+    """Exposes a settable `rate_limit_state` attribute (absent from the
+    plain `_FeasibilityFakeProvider`) so these tests can simulate the
+    provider's own observed header state becoming known partway
+    through a run -- exactly like the real `TradierMarketDataProvider`
+    updating `self._rate_limit_state` from every response's headers.
+    `state_after_call`, if given, is applied AFTER every
+    `get_option_chain_for_dte_window`/`get_bars` call -- the orchestration
+    layer's bootstrap case (`rate_limit_state=None`) is exercised for
+    every call before the first one completes."""
+
+    def __init__(self, chain_by_ticker, *, state_after_call: RateLimitState | None = None):
+        super().__init__(chain_by_ticker)
+        self.rate_limit_state: RateLimitState | None = None
+        self._state_after_call = state_after_call
+        self.dte_window_call_order: list[str] = []
+
+    async def get_option_chain_for_dte_window(self, symbol, *, min_dte, max_dte, as_of, diagnostics=None):
+        self.dte_window_call_order.append(symbol)
+        result = await super().get_option_chain_for_dte_window(symbol, min_dte=min_dte, max_dte=max_dte, as_of=as_of, diagnostics=diagnostics)
+        if self._state_after_call is not None:
+            self.rate_limit_state = self._state_after_call
+        return result
+
+    async def get_bars(self, symbol, start, end):
+        result = await super().get_bars(symbol, start, end)
+        if self._state_after_call is not None:
+            self.rate_limit_state = self._state_after_call
+        return result
+
+
+def _state(*, allowed: float, available: float) -> RateLimitState:
+    return RateLimitState(allowed=allowed, used=allowed - available, available=available, reset_at=None, observed_at=datetime.now(timezone.utc))
+
+
+class TestBatchingBootstrap:
+    """Item 2 of the acceptance-correction report: the study never
+    assumes the account has its full allowance available -- the FIRST
+    batch always proceeds (nothing observed yet), and every batch after
+    that decides from what was actually observed."""
+
+    @pytest.mark.asyncio
+    async def test_first_batch_proceeds_with_unknown_state_then_decides_from_observed_state(self, environment, monkeypatch):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_bootstrap", SCRIPT_PATH)
+        # Tight state observed only AFTER the first batch's calls --
+        # insufficient for a second batch of 3 symbols at max_expirations=6
+        # (projected cost 42; reserve 20% of 100 = 20; usable = 10-20 -> 0).
+        tight_state = _state(allowed=100, available=10)
+        _write_feasibility_universe_override(environment, tickers=FEASIBILITY_TICKERS, batch_size=3, reserved_headroom_pct=0.20)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(FEASIBILITY_TICKERS, now), state_after_call=tight_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        ok = await cycle.run_universe_feasibility_study(now=now)
+        assert ok is True, "insufficient headroom for a LATER batch must stop cleanly, never fail the whole study"
+        # Batch 1 (SPY, QQQ, IWM) always proceeds -- state was None for
+        # every one of ITS calls (state only becomes tight_state AFTER
+        # each call completes, so the pre-batch-2 check is the first to
+        # see it).
+        assert set(provider.dte_window_call_order) == {"SPY", "QQQ", "IWM"}
+
+
+class TestStopBeforeExhaustion:
+    """Items 3/4: adequate headroom lets batching continue safely;
+    insufficient headroom stops BEFORE the next batch, and the
+    remaining symbols are NOT_EVALUATED, never UNSUITABLE, and never
+    silently converted into a market-data failure."""
+
+    @pytest.mark.asyncio
+    async def test_ample_headroom_completes_every_batch(self, environment, monkeypatch):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_ample_headroom", SCRIPT_PATH)
+        ample_state = _state(allowed=10_000, available=9_000)
+        _write_feasibility_universe_override(environment, tickers=FEASIBILITY_TICKERS, batch_size=3, reserved_headroom_pct=0.20)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(FEASIBILITY_TICKERS, now), state_after_call=ample_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        assert await cycle.run_universe_feasibility_study(now=now) is True
+        assert set(provider.dte_window_call_order) == set(FEASIBILITY_TICKERS)
+
+    @pytest.mark.asyncio
+    async def test_insufficient_headroom_stops_before_next_batch_remaining_symbols_not_evaluated(self, environment, monkeypatch, capsys):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_stop_before_exhaustion", SCRIPT_PATH)
+        tight_state = _state(allowed=100, available=10)  # insufficient for a second batch of 3 at max_expirations=6
+        _write_feasibility_universe_override(environment, tickers=FEASIBILITY_TICKERS, batch_size=3, reserved_headroom_pct=0.20)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(FEASIBILITY_TICKERS, now), state_after_call=tight_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        ok = await cycle.run_universe_feasibility_study(now=now)
+        assert ok is True
+        out = capsys.readouterr().out
+
+        evaluated = set(provider.dte_window_call_order)
+        skipped = set(FEASIBILITY_TICKERS) - evaluated
+        assert evaluated == {"SPY", "QQQ", "IWM"}, "only the first batch (before headroom was known to be tight) should run"
+        assert skipped, "the remaining batches must be skipped, not attempted"
+
+        for ticker in skipped:
+            assert f"{ticker} -- structural_suitability: NOT_EVALUATED" in out
+            assert f"{ticker} -- structural_suitability: UNSUITABLE" not in out
+        assert "symbol(s) skipped" in out
+        assert "RATE_LIMIT_HEADROOM" in out
+
+    @pytest.mark.asyncio
+    async def test_insufficient_headroom_makes_zero_db_mutation(self, environment, monkeypatch):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_stop_zero_mutation", SCRIPT_PATH)
+        tight_state = _state(allowed=100, available=10)
+        _write_feasibility_universe_override(environment, tickers=FEASIBILITY_TICKERS, batch_size=3, reserved_headroom_pct=0.20)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(FEASIBILITY_TICKERS, now), state_after_call=tight_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        ops = operations_config_module.load_operations_config()
+        from src.portfolio.account_state import SqlitePortfolioStore
+
+        SqlitePortfolioStore(ops.account_state_db_path)
+        db_path = Path(ops.account_state_db_path)
+        before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+        assert await cycle.run_universe_feasibility_study(now=now) is True
+
+        after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        assert before == after
+
+
+class TestCorrelationPhaseBudgeting:
+    """Item 6: the correlation phase begins only after phase 1
+    completes or stops, checks headroom SEPARATELY (its own, larger
+    reserve), and a budget-skip is reported distinctly from a genuine
+    insufficient-history finding."""
+
+    @pytest.mark.asyncio
+    async def test_correlation_fully_skipped_when_headroom_is_exhausted(self, environment, monkeypatch, capsys):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_correlation_fully_skipped", SCRIPT_PATH)
+        tickers = ("SPY", "QQQ", "IWM")
+        exhausted_state = _state(allowed=100, available=10)  # reserve 30% of 100=30; usable=10-30 -> 0
+        _write_feasibility_universe_override(environment, tickers=tickers, batch_size=3, correlation_reserved_headroom_pct=0.30)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(tickers, now), state_after_call=exhausted_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        ok = await cycle.run_universe_feasibility_study(now=now)
+        assert ok is True
+        out = capsys.readouterr().out
+
+        assert provider.get_bars_calls == [], "zero correlation requests should be attempted when headroom is exhausted"
+        skipped_line = next(line for line in out.splitlines() if "symbols skipped due to rate-limit headroom" in line)
+        for t in tickers:
+            assert t in skipped_line
+        assert "correlation phase: skipped due to rate-limit headroom" in out
+
+    @pytest.mark.asyncio
+    async def test_correlation_partially_completes_when_headroom_is_partial(self, environment, monkeypatch, capsys):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_correlation_partial", SCRIPT_PATH)
+        tickers = ("SPY", "QQQ", "IWM")
+        # allowed=10, correlation_reserved_headroom_pct=0.3 -> reserve 3;
+        # available=5 -> usable=2 -- exactly 2 of the 3 evaluated tickers
+        # affordable, 1 must be SKIPPED_BUDGET.
+        partial_state = _state(allowed=10, available=5)
+        _write_feasibility_universe_override(environment, tickers=tickers, batch_size=3, correlation_reserved_headroom_pct=0.30)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(tickers, now), state_after_call=partial_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        ok = await cycle.run_universe_feasibility_study(now=now)
+        assert ok is True
+        out = capsys.readouterr().out
+
+        assert len(provider.get_bars_calls) == 2, "exactly the affordable number of correlation requests should be attempted"
+        assert "correlation phase: skipped due to rate-limit headroom" in out
+
+    @pytest.mark.asyncio
+    async def test_budget_skip_never_reported_as_insufficient_history(self, environment, monkeypatch, capsys):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_correlation_distinct_status", SCRIPT_PATH)
+        tickers = ("SPY", "QQQ", "IWM")
+        exhausted_state = _state(allowed=100, available=10)
+        _write_feasibility_universe_override(environment, tickers=tickers, batch_size=3, correlation_reserved_headroom_pct=0.30)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _BudgetAwareFakeProvider(_chains_for(tickers, now), state_after_call=exhausted_state)
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        assert await cycle.run_universe_feasibility_study(now=now) is True
+        out = capsys.readouterr().out
+        insufficient_line = next(line for line in out.splitlines() if "symbols with insufficient history" in line)
+        for t in tickers:
+            assert t not in insufficient_line, "a budget-skipped symbol must never appear in the insufficient-history line"
+
+
+class TestRateLimitErrorIsolationNeverRetriedAtOrchestrationLayer:
+    """Item 5: a TradierRateLimitError mid-symbol is isolated to that
+    one symbol, and the orchestration layer never adds a SECOND, outer
+    retry loop on top of the provider's own (exactly one fetch attempt
+    per symbol at this layer, success or failure)."""
+
+    @pytest.mark.asyncio
+    async def test_exactly_one_fetch_attempt_per_symbol_even_on_failure(self, environment, monkeypatch):
+        _tradier_configured(monkeypatch)
+        now = datetime.now(timezone.utc)
+        cycle = _load_script_module("_v1514_no_outer_retry", SCRIPT_PATH)
+        tickers = ("SPY", "QQQ", "IWM")
+        _write_feasibility_universe_override(environment, tickers=tickers)
+        monkeypatch.setattr(cycle, "_FEASIBILITY_UNIVERSE_CONFIG_PATH", environment / "universe_feasibility.yaml")
+        provider = _RateLimitedProvider(_chains_for(tickers, now), frozenset({"QQQ"}))
+        monkeypatch.setattr(cycle, "get_configured_market_data_provider", lambda: provider)
+        monkeypatch.setattr(cycle, "evaluate_validation_cycle_eligibility", lambda now, **kw: _ALLOWED)
+
+        assert await cycle.run_universe_feasibility_study(now=now) is True
+        call_counts = Counter(c[0] for c in provider.dte_window_calls)
+        assert call_counts == {"SPY": 1, "QQQ": 1, "IWM": 1}, "each symbol must be attempted exactly once at this layer"
+
+
+class TestRequestFormulaMatchesInstrumentedRealProvider:
+    """Item 1 of the acceptance-correction report: the corrected
+    formula must match the REAL `TradierMarketDataProvider`'s own
+    request pattern, not just this test file's own simplified fake --
+    verified here against a fake HTTP client (never a real network
+    call), counting every outbound call `TradierMarketDataProvider`
+    itself makes for one symbol's `get_option_chain_for_dte_window`."""
+
+    @pytest.mark.asyncio
+    async def test_one_symbol_six_expirations_matches_the_real_provider_exactly(self):
+        from src.data.tradier_provider import TradierConfig, TradierMarketDataProvider
+        from src.workflows.universe_feasibility import expected_opportunity_scan_request_count
+
+        class _FakeHttpResponse:
+            def __init__(self, path, params):
+                self.status_code = 200
+                self.headers = {"X-Ratelimit-Allowed": "120", "X-Ratelimit-Used": "1", "X-Ratelimit-Available": "119"}
+                self._path, self._params = path, params
+
+            def json(self):
+                if "quotes" in self._path:
+                    return {"quotes": {"quote": {"symbol": self._params["symbols"], "bid": 100, "ask": 101, "last": 100.5, "volume": 1000}}}
+                if "expirations" in self._path:
+                    base = date(2026, 11, 1)
+                    return {"expirations": {"date": [(base + timedelta(days=4 * i)).isoformat() for i in range(10)]}}
+                if "chains" in self._path:
+                    return {"options": {"option": []}}
+                return {}
+
+        class _FakeHttpClient:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+
+            async def get(self, path, params=None):
+                self.calls.append((path, dict(params or {})))
+                return _FakeHttpResponse(path, params or {})
+
+        client = _FakeHttpClient()
+        provider = TradierMarketDataProvider(TradierConfig(token="fake-token-for-tests-only"), http_client=client)
+
+        await provider.get_option_chain_for_dte_window("SPY", min_dte=0, max_dte=100, as_of=date(2026, 10, 8))
+
+        expected = expected_opportunity_scan_request_count(num_symbols=1, max_expirations=provider._config.max_expirations)
+        assert len(client.calls) == expected == 14
