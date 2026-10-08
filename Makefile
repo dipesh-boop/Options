@@ -1,4 +1,4 @@
-.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle validate-preflight diagnostic-scan confirm-candidate
+.PHONY: run install test backup restore verify-freeze freeze-manifest validate-cycle validate-preflight diagnostic-scan universe-feasibility confirm-candidate
 
 install:
 	pip install -r requirements.txt -r requirements-dev.txt
@@ -47,6 +47,18 @@ validate-preflight:
 # scripts/run_validation_cycle.py's own run_diagnostic_scan docstring).
 diagnostic-scan:
 	./scripts/run_validation_cycle.sh --diagnostic-scan
+
+# PAPER_TRADING_V1.5.14: READ-ONLY universe-breadth feasibility study
+# against live Tradier production market data, over a wider 12-symbol
+# research universe (config/universe_feasibility.yaml) than the
+# official active universe (SPY, QQQ). Does NOT count as a validation
+# day, does NOT persist any candidate, and does NOT activate the
+# expanded universe for the official cycle -- zero-persistence by
+# construction, same architecture as `diagnostic-scan` -- see
+# scripts/run_validation_cycle.py's own run_universe_feasibility_study
+# docstring.
+universe-feasibility:
+	./scripts/run_validation_cycle.sh --universe-feasibility
 
 # Confirms exactly one Review-Only new-position candidate. The ONLY
 # command that may open a real (simulated) PaperBroker position.

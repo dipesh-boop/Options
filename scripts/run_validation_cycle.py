@@ -208,7 +208,7 @@ from src.data.historical import HistoricalDataProvider  # noqa: E402
 from src.data.market_calendar import EASTERN, is_market_open, is_trading_day  # noqa: E402
 from src.data.option_chain import OptionChain, merge_option_chains  # noqa: E402
 from src.data.provider import DteWindowOptionChainProvider, DteWindowSelectionDiagnostics  # noqa: E402
-from src.data.universe import load_universe, load_universe_strategies  # noqa: E402
+from src.data.universe import UniverseConfigError, load_universe, load_universe_strategies  # noqa: E402
 from src.lifecycle.persistence import SqliteLifecycleStore  # noqa: E402
 from src.lifecycle.policies_library import policies_for_strategy  # noqa: E402
 from src.llm.schemas import StrategyType  # noqa: E402
@@ -224,7 +224,7 @@ from src.portfolio.market_session import evaluate_validation_cycle_eligibility  
 from src.portfolio.operations_config import OperationsConfigError, load_operations_config  # noqa: E402
 from src.portfolio.opportunity_scan import scan_and_rank_opportunities  # noqa: E402
 from src.portfolio.orchestrator import OpportunityScanConfig, OuterCycleInputs, run_outer_cycle  # noqa: E402
-from src.portfolio.risk_data import apply_risk_data_wiring  # noqa: E402
+from src.portfolio.risk_data import apply_risk_data_wiring, resolve_price_history_for_correlation  # noqa: E402
 from src.portfolio.persistence import SqliteControlLoopStore  # noqa: E402
 from src.review.candidates import CandidateStatus, ReviewedCandidate, SqliteCandidateReviewStore  # noqa: E402
 from src.risk.broker_constraints import load_broker_capabilities  # noqa: E402
@@ -239,6 +239,14 @@ from src.validation.session import DailySnapshot, SqliteValidationStore  # noqa:
 from src.workflows.candidate_funnel import build_candidate_funnel  # noqa: E402
 from src.workflows.candidate_generation import QuantFilterConfig, candidate_eligible_strategies  # noqa: E402
 from src.workflows.funnel_diagnostics import FunnelDiagnostics  # noqa: E402
+from src.workflows.universe_feasibility import (  # noqa: E402
+    build_aggregate_feasibility_report,
+    build_candidate_feasibility_details,
+    build_symbol_feasibility_summaries,
+    classify_ticker_suitability,
+    expected_tradier_request_count,
+)
+from src.quant.correlations import flag_highly_correlated_pairs  # noqa: E402
 
 
 def _line(label: str, value: object) -> None:
@@ -1278,6 +1286,321 @@ async def run_diagnostic_scan(*, now: datetime | None = None) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# PAPER_TRADING_V1.5.14: --universe-feasibility
+# ---------------------------------------------------------------------------
+
+_FEASIBILITY_BANNER = (
+    "UNIVERSE FEASIBILITY STUDY ONLY\n"
+    "NOT AN OFFICIAL VALIDATION CYCLE\n"
+    "NO VALIDATION STATE WILL BE MUTATED\n"
+    "NO CANDIDATE WILL BE PERSISTED\n"
+    "NO ORDER OR FILL CAN OCCUR"
+)
+
+_FEASIBILITY_UNIVERSE_CONFIG_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "universe_feasibility.yaml"
+)
+
+_DEFAULT_TRADIER_MAX_EXPIRATIONS = 6  # TradierConfig.max_expirations's own default -- see src.data.tradier_provider
+
+
+def _print_feasibility_banner() -> None:
+    print(_FEASIBILITY_BANNER)
+
+
+async def run_universe_feasibility_study(*, now: datetime | None = None) -> bool:
+    """PAPER_TRADING_V1.5.14: a READ-ONLY, operator-facing research study
+    (`--universe-feasibility`) that runs the exact same candidate ->
+    Quant -> Risk pipeline the official cycle and the V1.5.13 diagnostic
+    both use, against a WIDER research universe
+    (`config/universe_feasibility.yaml`, 12 tickers) than the official
+    active universe (`config/universe.yaml`, SPY/QQQ) -- so an operator
+    can decide, from real data, whether and how to expand the official
+    universe, WITHOUT running or counting as an official validation day
+    and WITHOUT activating anything.
+
+    **Zero-persistence by construction -- same architecture as
+    `run_diagnostic_scan`, extended to more symbols plus a read-only
+    correlation summary, never anything that writes.** This function
+    never imports or constructs `PaperBroker`, `SqlitePortfolioStore`,
+    `SqliteControlLoopStore`, `SqliteLifecycleStore`,
+    `SqliteCandidateReviewStore`, `SqliteIdempotencyStore`,
+    `SqliteValidationStore`, or `ReviewedCandidate` -- none of those
+    names appear anywhere in this function's body. The portfolio is
+    loaded exclusively via `load_portfolio_read_only` (PAPER_TRADING_
+    V1.5.13's own true-read-only SQLite `mode=ro` loader) -- a
+    `PortfolioLoadError` fails this study closed exactly like it does
+    for `run_diagnostic_scan`, never silently substituting a fresh
+    portfolio for unreadable real account data. `config/universe.yaml`
+    (the OFFICIAL universe) and `config/operations.yaml`'s
+    `risk_data_wiring.enabled` flag are never read, written, or
+    toggled by this function -- the correlation summary below is built
+    entirely from a side-channel, read-only call to
+    `resolve_price_history_for_correlation` (never `apply_risk_data_
+    wiring`/`apply_correlation_wiring`, which would attach the result
+    to the `Portfolio` object Quant/Risk actually evaluate candidates
+    against) -- the official active cohort's real Risk/Quant behavior
+    for these candidates is therefore byte-for-byte what it already is
+    today, correlation-wiring-disabled, exactly matching the official
+    cycle's own current behavior.
+
+    **Same Tradier-production preflight, same market-hours gate, same
+    order, as `run_diagnostic_scan`/`run_validation_cycle`.** A closed
+    gate makes zero Tradier calls (the provider is never constructed)
+    and zero database writes.
+
+    **Same production pipeline, same strategy restriction.**
+    `load_universe`/`load_universe_strategies` are called with
+    `config/universe_feasibility.yaml`'s own path -- never falling back
+    to, merging with, or writing `config/universe.yaml`. The resulting
+    strategy list is narrowed through the exact same
+    `candidate_eligible_strategies` filter the official cycle and the
+    diagnostic both already use, which only ever allows
+    `CASH_SECURED_PUT`/`COVERED_CALL`/`PUT_CREDIT_SPREAD` today --
+    structurally, not merely by convention, preventing this study from
+    ever testing strategy breadth alongside universe breadth. Candidate
+    generation, Quant, Risk, ranking, and the no-trade hurdle are the
+    exact same, unmodified `scan_and_rank_opportunities` call
+    `run_diagnostic_scan` itself uses, with `proposal_id_prefix=
+    "validation-scan"` and `evaluation_as_of` captured strictly after
+    the whole market-data fetch loop completes (the same V1.5.7
+    discipline) -- never a reimplemented or loosened screen.
+
+    **A surviving candidate is observational only.** Every candidate
+    that reaches Risk APPROVE/RESIZE is printed with sanitized
+    economics (`src.workflows.universe_feasibility
+    .build_candidate_feasibility_details`) -- never saved as a
+    `ReviewedCandidate`, never made confirmable, and no
+    `confirm_candidate.py` command is ever printed for any of them,
+    exactly like `run_diagnostic_scan`'s own single best candidate.
+
+    `now` is `None` in every real invocation -- see
+    `run_diagnostic_scan`'s own docstring for why this parameter exists
+    (deterministic market-hours-gate testing only)."""
+    _print_feasibility_banner()
+    print()
+
+    try:
+        ops = load_operations_config()
+        val_config = load_validation_config()
+        feasibility_universe = load_universe(_FEASIBILITY_UNIVERSE_CONFIG_PATH)
+        configured_strategy_names = load_universe_strategies(_FEASIBILITY_UNIVERSE_CONFIG_PATH)
+    except (OperationsConfigError, ValidationConfigError, UniverseConfigError) as exc:
+        print(f"FAIL: configuration error -- {exc}")
+        print()
+        _print_feasibility_banner()
+        return False
+
+    try:
+        configured_strategies = tuple(StrategyType[name] for name in configured_strategy_names)
+    except KeyError as exc:
+        print(f"FAIL: configuration error -- config/universe_feasibility.yaml lists an unknown strategy: {exc}")
+        print()
+        _print_feasibility_banner()
+        return False
+
+    strategies = candidate_eligible_strategies(configured_strategies)
+    skipped = [s.value for s in configured_strategies if s not in strategies]
+    if skipped:
+        _line("strategies configured but not yet candidate-generation-eligible (skipped)", skipped)
+
+    limits = get_default_limits()
+
+    try:
+        verify_official_provider_is_tradier_production()
+    except OfficialProviderPreflightError as exc:
+        print(f"FAIL: provider preflight -- {exc}")
+        print()
+        _print_feasibility_banner()
+        return False
+    _line("provider preflight", "Tradier production market data configured")
+
+    now = now or datetime.now(timezone.utc)
+
+    eligibility = evaluate_validation_cycle_eligibility(
+        now, scan_open_buffer_minutes=ops.scan_open_buffer_minutes, scan_close_buffer_minutes=ops.scan_close_buffer_minutes,
+    )
+    if not eligibility.validation_cycle_allowed:
+        _line("market-hours gate", f"new-position scan window closed -- {eligibility.block_reason}")
+        print(
+            "FAIL: new-position scan window closed -- the feasibility study makes no market-data calls "
+            "while this window is closed."
+        )
+        print()
+        _print_feasibility_banner()
+        return False
+    _line("market-hours gate", f"{eligibility.market_session_state.value} -- new-position scan window open")
+
+    try:
+        portfolio = load_portfolio_read_only(ops.account_state_db_path, ops.account_id)
+    except PortfolioLoadError as exc:
+        print(f"FAIL: could not read portfolio state read-only -- {exc}")
+        print()
+        _print_feasibility_banner()
+        return False
+    if portfolio is None:
+        _line(
+            "no persisted portfolio for this account -- using an in-memory diagnostic portfolio (never saved)",
+            f"starting NAV ${val_config.default_starting_nav:,.2f}",
+        )
+        portfolio = Portfolio(
+            as_of=now, nav=val_config.default_starting_nav, cash=val_config.default_starting_nav,
+            peak_equity=val_config.default_starting_nav,
+        )
+    else:
+        _line("existing portfolio loaded read-only", f"{len(portfolio.positions)} open position(s), NAV ${portfolio.nav:,.2f}")
+
+    broker_capabilities = load_broker_capabilities("internal_paper")
+    quant_filter = QuantFilterConfig()
+
+    universe_tickers = tuple(e.ticker for e in feasibility_universe)
+    max_expirations = _DEFAULT_TRADIER_MAX_EXPIRATIONS
+    _line(
+        "expected Tradier request budget (upper bound, this run)",
+        expected_tradier_request_count(num_symbols=len(universe_tickers), max_expirations=max_expirations),
+    )
+
+    fetch_results: dict[str, OptionChain | Exception] = {}
+    provider = get_configured_market_data_provider()
+    price_history: dict[str, list[float]] = {}
+    try:
+        max_expirations = getattr(getattr(provider, "_config", None), "max_expirations", max_expirations)
+        for ticker in universe_tickers:
+            try:
+                if isinstance(provider, DteWindowOptionChainProvider):
+                    fetch_results[ticker] = await provider.get_option_chain_for_dte_window(
+                        ticker, min_dte=quant_filter.min_dte, max_dte=quant_filter.max_dte, as_of=now.date(),
+                    )
+                else:
+                    fetch_results[ticker] = await provider.get_option_chain(ticker)
+            except Exception as exc:  # noqa: BLE001 - one bad symbol never aborts the feasibility study
+                fetch_results[ticker] = exc
+
+        # Item H: read-only correlation summary. Deliberately a side
+        # channel -- resolve_price_history_for_correlation never
+        # mutates `portfolio`, never sets `portfolio.risk_data_required`,
+        # and is called regardless of `risk_data_wiring.enabled` (this
+        # study reports on correlation; it never activates risk-data
+        # wiring for the real Quant/Risk evaluation below).
+        if isinstance(provider, HistoricalDataProvider):
+            try:
+                price_history = await resolve_price_history_for_correlation(
+                    frozenset(universe_tickers), historical_provider=provider, now=now,
+                    lookback_days=ops.correlation_lookback_days, min_observations=ops.min_correlation_observations,
+                )
+            except Exception:  # noqa: BLE001 - correlation is observational; never aborts the study
+                price_history = {}
+    finally:
+        close = getattr(provider, "close", None)
+        if close is not None:
+            await close()
+
+    evaluation_as_of = datetime.now(timezone.utc)
+    _line("evaluation timestamp (captured after market-data fetch)", evaluation_as_of.isoformat())
+
+    chains_by_ticker = {t: c for t, c in fetch_results.items() if isinstance(c, OptionChain)}
+    failed = [t for t, c in fetch_results.items() if isinstance(c, Exception)]
+    if failed:
+        _line("symbols failed this feasibility study (isolated, study continues)", failed)
+
+    diagnostics_by_ticker = {t: FunnelDiagnostics(ticker=t) for t in universe_tickers}
+    sanitized_exceptions: list[tuple[str, str, str]] = []
+
+    def _on_generation_exception(ticker: str, strategy: str, exc: Exception) -> None:
+        sanitized_exceptions.append((ticker, strategy, _sanitize_diagnostic_exception_message(exc)))
+
+    scan_result = scan_and_rank_opportunities(
+        list(feasibility_universe), chains_by_ticker, list(strategies), quant_filter, limits, portfolio,
+        ops.default_market_regime, broker_capabilities, now=evaluation_as_of,
+        proposal_id_prefix="validation-scan", diagnostics_by_ticker=diagnostics_by_ticker,
+        on_generation_exception=_on_generation_exception,
+    )
+
+    symbol_summaries = build_symbol_feasibility_summaries(
+        universe_tickers=universe_tickers, chain_received_tickers=frozenset(chains_by_ticker.keys()),
+        diagnostics_by_ticker=diagnostics_by_ticker, scan_result=scan_result,
+    )
+    candidate_details = build_candidate_feasibility_details(scan_result)
+    aggregate = build_aggregate_feasibility_report(
+        universe_tickers=universe_tickers, chain_received_tickers=frozenset(chains_by_ticker.keys()),
+        symbol_summaries=symbol_summaries, scan_result=scan_result,
+    )
+
+    print()
+    print("  PER-SYMBOL DIAGNOSTICS")
+    for s in symbol_summaries:
+        classification = classify_ticker_suitability(s)
+        print(f"  -- {s.ticker} -- suitability: {classification.value}")
+        _line("    market-data success/chain usable", f"{s.market_data_successful}/{s.chain_usable}")
+        _line("    contracts examined", s.contracts_seen)
+        _line("    expirations seen/eligible/rejected", f"{s.expirations_seen}/{s.expirations_eligible}/{s.expirations_rejected}")
+        _line("    strategy attempts", s.strategy_attempts)
+        _line("    construction attempts/successes/rejections", f"{s.construction_attempts}/{s.construction_successes}/{s.construction_rejections}")
+        _line("    generation exceptions", s.generation_exceptions)
+        _line("    quant evaluations/passes/rejects", f"{s.quant_evaluations}/{s.quant_passed}/{s.quant_rejected}")
+        _line("    risk evaluations/passes/rejects", f"{s.risk_evaluations}/{s.risk_passed}/{s.risk_rejected}")
+        _line("    ranked candidates", s.ranked_candidates)
+        _line("    selected candidate (observational only)", s.selected_candidate_proposal_id or "none")
+        if s.dominant_rejection_reasons:
+            _line("    dominant rejection reasons", ", ".join(s.dominant_rejection_reasons))
+    for ticker, strategy, message in sanitized_exceptions:
+        _line(f"  generation exception detail -- {ticker}/{strategy}", message)
+
+    print()
+    print("  RANKED-CANDIDATE ECONOMICS (OBSERVATIONAL ONLY -- NOT PERSISTED, NOT CONFIRMABLE)")
+    for d in candidate_details:
+        marker = " <== WOULD HAVE BEEN SELECTED" if d.would_have_been_selected else ""
+        print(f"  -- {d.ticker} / {d.strategy} / exp {d.expiration} (DTE {d.dte}){marker}")
+        _line("    legs (right/strike/side)", list(zip(d.leg_rights, d.leg_strikes, d.leg_sides)))
+        _line("    target entry", d.target_entry)
+        _line("    max profit/max loss/capital required", f"{d.max_profit}/{d.max_loss}/{d.capital_required}")
+        _line("    contracts requested", d.contracts_requested)
+        _line("    risk decision", d.risk_decision)
+        _line("    risk-adjusted return vs. no-trade hurdle", f"{d.risk_adjusted_return}/{d.no_trade_hurdle}")
+
+    print()
+    print("  AGGREGATE FEASIBILITY REPORT")
+    _line("  symbols requested", aggregate.symbols_requested)
+    _line("  successful/failed chains", f"{aggregate.successful_chains}/{aggregate.failed_chains}")
+    _line("  total contracts examined", aggregate.total_contracts_examined)
+    _line("  total eligible expirations", aggregate.total_eligible_expirations)
+    _line("  total strategy attempts", aggregate.total_strategy_attempts)
+    _line("  total construction attempts/successes", f"{aggregate.total_construction_attempts}/{aggregate.total_construction_successes}")
+    _line("  total quant passed", aggregate.total_quant_passed)
+    _line("  total risk passed", aggregate.total_risk_passed)
+    _line("  total ranked candidates", aggregate.total_ranked_candidates)
+    _line("  total candidates that would clear the no-trade hurdle", aggregate.total_would_clear_no_trade_hurdle)
+    _line("  by-strategy ranked counts", aggregate.by_strategy)
+    _line("  by-ticker ranked counts", aggregate.by_ticker_ranked)
+    if aggregate.top_construction_bottlenecks:
+        _line("  top construction bottlenecks", aggregate.top_construction_bottlenecks)
+    if aggregate.top_quant_rejection_reasons:
+        _line("  top quant rejection reasons", aggregate.top_quant_rejection_reasons)
+    if aggregate.top_risk_rejection_reasons:
+        _line("  top risk rejection reasons", aggregate.top_risk_rejection_reasons)
+
+    print()
+    print("  CORRELATION / DIVERSIFICATION ANALYSIS (READ-ONLY RESEARCH OUTPUT -- risk_data_wiring unchanged)")
+    sufficient = tuple(sorted(price_history.keys()))
+    insufficient = tuple(sorted(set(universe_tickers) - set(price_history.keys())))
+    _line("  symbols with sufficient history", sufficient)
+    _line("  symbols with insufficient history", insufficient)
+    if len(price_history) >= 2:
+        pairs = flag_highly_correlated_pairs(price_history, threshold=limits.high_correlation_threshold)
+        if pairs:
+            for p in pairs:
+                _line("  high-correlation pair", f"{p.symbol_a}/{p.symbol_b} = {p.correlation:.2f}")
+        else:
+            _line("  high-correlation pairs", "none at or above the configured threshold")
+    else:
+        _line("  high-correlation pairs", "not computable -- fewer than 2 symbols had sufficient aligned history")
+
+    print()
+    _print_feasibility_banner()
+    return True
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_validation_cycle.py",
@@ -1309,6 +1632,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "after today's official cycle has already run. Mutually exclusive with --preflight."
         ),
     )
+    group.add_argument(
+        "--universe-feasibility",
+        action="store_true",
+        help=(
+            "PAPER_TRADING_V1.5.14: run a READ-ONLY feasibility study of a WIDER research "
+            "universe (config/universe_feasibility.yaml, 12 tickers) against live Tradier "
+            "production market data, using the exact same candidate -> Quant -> Risk pipeline "
+            "as an official cycle, WITHOUT counting as a validation day, WITHOUT persisting any "
+            "candidate, and WITHOUT activating the expanded universe for the official cycle. "
+            "Mutually exclusive with --preflight/--diagnostic-scan."
+        ),
+    )
     return parser
 
 
@@ -1334,6 +1669,14 @@ def main() -> int:
             ok = asyncio.run(run_diagnostic_scan())
         except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly
             print(f"FAIL: diagnostic scan could not complete -- {exc!r}")
+            return 1
+        return 0 if ok else 1
+
+    if args.universe_feasibility:
+        try:
+            ok = asyncio.run(run_universe_feasibility_study())
+        except Exception as exc:  # noqa: BLE001 - a genuinely systemic failure, reported plainly
+            print(f"FAIL: universe feasibility study could not complete -- {exc!r}")
             return 1
         return 0 if ok else 1
 
