@@ -1,10 +1,10 @@
 {
   "manifest_version": "1.5.14",
   "freeze_name": "PAPER_TRADING_V1.5.14",
-  "freeze_timestamp": "2026-10-08T14:58:52.721236Z",
-  "git_commit": "35e29d1ffd965e56361657186c2269f8b1a17a69",
+  "freeze_timestamp": "2026-10-08T16:19:45.954357Z",
+  "git_commit": "009c752f949d6999f02012d4ba1165721b431f42",
   "git_branch": "claude/options-trading-agent-2b4yi8",
-  "repository_state": "dirty (12 uncommitted change(s))",
+  "repository_state": "dirty (9 uncommitted change(s))",
   "python_version": "3.11.15 (CPython)",
   "dependency_requirements_hash": "1065c8854d1b7464e7c09a94990b555cbaeaada575f7e101f6da762dab78cf78",
   "strategy_library_version": "481376ddbac87cbfad83b0b351b3f12d34a98072b67214835ac4c3bac287bc78",
@@ -108,7 +108,7 @@
   "orchestrator_cannot_bypass_risk_or_lifecycle": true,
   "opportunity_scan_never_outranks_risk_monitoring": true,
   "review_module_hash": "461729f1243ae0d9d84e2f246b71d02a3eaf43a485df9dee089f65a796ba9cd9",
-  "run_validation_cycle_script_hash": "bc0d4be79ed8a777d50ad4b23fbc80eb8d5cbd6b4c4f47ae187c77d2bc543731",
+  "run_validation_cycle_script_hash": "3fb58483f4c89b088be4d4a7838de0208b290b10f4987ebe0719ef5d140ff6a5",
   "confirm_candidate_script_hash": "7f46f9618d9a8a91a8f60a05e82ef21d0835b1bdc95c57ca97fc9ac7cf846f3f",
   "daily_cycle_never_calls_place_order": true,
   "review_only_path_never_imports_llm": true,
@@ -174,5 +174,5 @@
   "live_trading_enabled": false,
   "automatic_fidelity_execution": false,
   "validation_cohort_started": false,
-  "manifest_hash": "ca751c6d61608343bd33e2f6d1e744fd28ed5fffee4f7dd8c8f979bc64aa54ac"
+  "manifest_hash": "7d0f53e97ae3cecb706a2eb34205e5651d1f77993be87dc337113922e45e48f1"
 }

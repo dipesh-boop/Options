@@ -312,6 +312,166 @@ report for hashes and push/tag results).
 - lower the no-trade hurdle or increase risk-per-trade
 - enable live trading
 
+## AA. V1.5.14 ACCEPTANCE CORRECTION (supersedes the original 009c752 freeze)
+
+**The operator never accepted or installed the original 009c752
+freeze.** A pre-acceptance audit of it found two acceptance-blocking
+issues, both corrected here, in place, on top of 009c752 -- no history
+rewritten, no force-push, a corrective implementation commit followed
+by a new freeze commit.
+
+**1. Corrected request-budget formula.** The audit proved
+`expected_tradier_request_count`'s original formula undercounted the
+real worst case by `num_symbols * max_expirations` requests, because
+it assumed `TradierMarketDataProvider.get_option_chain_for_expiration`
+costs 1 request per selected expiration. It actually costs 2 -- that
+method re-fetches the underlying quote internally before fetching the
+chain itself. Verified both by reading `src.data.tradier_provider`'s
+source and by instrumenting the REAL `TradierMarketDataProvider`
+against a fake HTTP client (`TestRequestFormulaMatchesInstrumentedRealProvider`
+in the acceptance suite): one symbol, 6 expirations, 14 real outbound
+calls, not 7. The corrected formula (`3 + 2*max_expirations` per
+symbol) is now split into `expected_opportunity_scan_request_count`
+and `expected_correlation_request_count` (summed by
+`expected_tradier_request_count`), all explicitly documented as
+LOGICAL-request counts BEFORE provider-level retries (up to 3 real
+outbound attempts per logical request on a transient failure/429) --
+never claimed as a guaranteed ceiling on actual network traffic. For
+12 symbols/6 expirations: **180**, not 108.
+
+**2. Conservative, sequential, budget-aware fetching -- never a burst.**
+`src.workflows.universe_feasibility.usable_request_headroom`/
+`has_sufficient_observed_headroom` are new, pure, synchronous functions
+that decide -- using ONLY the provider's own observed
+`RateLimitState.allowed`/`.available` (sourced exclusively from real
+response headers; never a hardcoded figure such as "120/minute") --
+whether the study may safely begin its NEXT batch or phase. New
+`config/universe_feasibility.yaml` section `rate_limit_safety`
+(`batch_size: 3`, `reserved_headroom_pct: 0.20`,
+`correlation_reserved_headroom_pct: 0.30`, each with its own `*_env`
+override) drives this. Mechanics, implemented in
+`run_universe_feasibility_study`:
+- **Phase 1 (option-chain opportunity scan)**: strictly sequential
+  batches of `batch_size` symbols. The FIRST batch always proceeds
+  (`rate_limit_state` starts `None` -- nothing observed yet; this IS
+  the documented bootstrap: allow only enough initial work to obtain
+  real response headers, then decide every subsequent batch from what
+  was actually observed). Before every later batch, if observed
+  headroom is insufficient for that batch's worst-case logical
+  request count, the phase stops BEFORE that batch starts. Every
+  ticker in a stopped/un-reached batch is `SkipReason
+  .RATE_LIMIT_HEADROOM`-skipped -- never attempted, never counted
+  against `failed_chains`, and reported with `StructuralSuitability
+  .NOT_EVALUATED`, never `UNSUITABLE` (a budget decision is never
+  misrepresented as a data-quality finding).
+- **A `TradierRateLimitError` mid-symbol** (the provider's own
+  existing retries already exhausted) is isolated to that one symbol
+  exactly like any other fetch failure -- verified
+  (`TestRateLimitErrorIsolationNeverRetriedAtOrchestrationLayer`) that
+  this orchestration layer makes EXACTLY one fetch attempt per symbol,
+  success or failure, never a second, outer retry loop on top of the
+  provider's own.
+- **Phase 2 (correlation/history)** begins only AFTER phase 1
+  completes or stops, and only for tickers phase 1 actually attempted.
+  Its own, separate, larger-reserve headroom check
+  (`correlation_reserved_headroom_pct`) decides how many of those
+  attempted tickers current headroom can still support -- all of
+  them, a subset (partial completion), or none. A ticker phase 2
+  deliberately never asked about is `CorrelationSymbolStatus
+  .SKIPPED_BUDGET`, reported SEPARATELY from, and never conflated
+  with, `INSUFFICIENT_HISTORY` (a ticker phase 2 DID ask about, whose
+  own fetch via the unmodified `resolve_price_history_for_correlation`
+  did not yield enough aligned observations).
+- **Zero changes to shared Tradier provider behavior.** The redundant
+  quote re-fetch inside `get_option_chain_for_expiration` that CAUSES
+  the higher true request cost is deliberately left alone --
+  optimizing it away would change production semantics the official
+  cycle also depends on, and is explicitly out of scope for this
+  correction (flagged as the recommended target fix for a SEPARATE,
+  dedicated change). `TradierMarketDataProvider`'s retry policy, DTE
+  retrieval, and canonical timestamps are all untouched; `git diff`
+  confirms zero lines changed in `src/data/tradier_provider.py`
+  anywhere in this correction.
+
+**3. Structural suitability vs. today's opportunity -- split into two
+independent, observational fields.** The audit found
+`classify_ticker_suitability`'s STRONG tier required
+`ranked_candidates > 0`, a today's-market fact (today's IV/strikes/
+portfolio-exposure-dependent Quant+Risk outcome), not a structural
+property of the ticker. Replaced with:
+- **`StructuralSuitability`** (`STRONG`/`ACCEPTABLE`/`WEAK`/
+  `UNSUITABLE`/`NOT_EVALUATED`), computed by
+  `classify_structural_suitability`, reading ONLY chain/DTE/
+  construction facts -- NEVER Quant pass/fail, Risk pass/fail, ranking
+  score, or the no-trade hurdle. Deliberately uses `strategy_attempts`
+  (at most 3 -- one per configured strategy actually attempted for
+  this ticker) as STRONG's denominator, NEVER `construction_attempts`
+  (which the audit's own follow-up correctly flagged as unsafe: it
+  scales with how many DTE-eligible expirations
+  `candidate_generation.py`'s own best-of-all-expirations search
+  internally examined while looking for the single best candidate per
+  strategy, not with how many independent strategy ideas were tried --
+  a liquid, reliable ticker with 6 eligible expirations can rack up 5
+  `construction_rejected` events and still have found an excellent
+  candidate on the 6th). `NOT_EVALUATED` is never returned by the
+  classifier itself -- it is assigned directly by the orchestration
+  layer for a ticker this run skipped for budget reasons.
+- **`OpportunityToday`** (`NONE`/`CONSTRUCTED`/`QUANT_PASS`/
+  `RISK_PASS`/`RANKED`/`CLEARED_HURDLE`), computed by
+  `classify_opportunity_today`, purely observational, reusing a new
+  per-symbol `ranked_candidates_clearing_hurdle` field (the same
+  `risk_adjusted_return > no_trade_hurdle` comparison the aggregate
+  report's `total_would_clear_no_trade_hurdle` already made, now also
+  surfaced per-symbol) -- NEVER read back into `StructuralSuitability`
+  or any other decision. `RISK_PASS` and `RANKED` are kept as
+  genuinely separable levels (not a manufactured distinction):
+  `ScannedCandidate.risk_adjusted_return` can be `None` for an
+  otherwise Risk-approved candidate whenever `capital_required <= 0`
+  or the economics are unpriced.
+- Both fields are now printed per-symbol and tallied in the aggregate
+  report (`structural_suitability_counts`/`opportunity_today_counts`),
+  with an explicit printed line stating permanent-universe guidance is
+  driven primarily by structural suitability and diversification, NOT
+  by whether one day's candidate happened to rank or clear the hurdle.
+
+**4. Correlation status, three-way.** `CorrelationFeasibilitySummary`
+now carries `symbols_with_sufficient_history`/
+`symbols_with_insufficient_history`/`symbols_skipped_budget`
+separately -- `symbols_skipped_budget` is decided ENTIRELY by the
+orchestration layer's own pre-flight ticket subset chosen BEFORE
+calling the unmodified `resolve_price_history_for_correlation`, never
+inferred after the fact from an absence in its return value (which
+cannot itself distinguish "too few observations" from "the fetch
+failed" -- a `PROVIDER_FAILURE` fourth status was considered and
+explicitly NOT added, since doing so would require changing that
+shared function's own internal exception handling, out of scope here).
+
+**5. Test coverage.** `tests/unit/workflows/test_universe_feasibility.py`:
+**54 passed** (up from 19) -- corrected-formula assertions, headroom/
+bootstrap behavior (including a dedicated "never reads a hardcoded
+plan allowance" test), structural/opportunity classification branch
+tests (including the exact construction_attempts-vs-strategy_attempts
+scenario the audit flagged), correlation-status disjointness.
+`tests/acceptance/test_universe_feasibility_v1514.py`: **34 passed**
+(up from 25) -- bootstrap-then-observed-state batching, ample-headroom
+completion, stop-before-exhaustion with `NOT_EVALUATED`
+reporting/zero-DB-mutation, correlation full-skip/partial-completion/
+distinct-status, exactly-one-fetch-attempt-per-symbol (no outer
+retry), and the instrumented-real-provider formula-match test. Full
+suite: **3933 passed, 6 skipped, 9 failed** -- the identical known
+9 date-rot node IDs (§V above), zero new failures. `make verify-freeze`:
+`PAPER_TRADING_V1.5.14 / SOFTWARE FREEZE VERIFIED`, clean on the first
+run after manifest regeneration.
+
+**6. Confirmed unchanged by this correction** (re-verified via
+`git diff` against the entire correction): `config/universe.yaml`
+(SPY, QQQ), the active strategy set, `src/risk/`, `src/quant/`,
+`src/strategies/`, `src/data/tradier_provider.py`,
+`src/workflows/candidate_generation.py`,
+`src/portfolio/opportunity_scan.py` -- zero lines changed in any of
+them. The official no-argument cycle and `--diagnostic-scan` continue
+to pass their own existing, unmodified acceptance tests unchanged.
+
 ## Z. Remaining limitations
 
 - The human operator must now run the first real

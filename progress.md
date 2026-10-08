@@ -6982,3 +6982,81 @@ operator must now run the first real `--universe-feasibility` study
 against live Tradier production manually -- no production Tradier
 call of any kind occurred during this release's development. See
 `STEP_23_14_FREEZE_REPORT.md` for the full architectural trace.
+
+## Step 23.14 acceptance correction -- PAPER_TRADING_V1.5.14 (request-budget safety + structural suitability)
+
+**Why.** The operator never accepted or installed the original
+009c752 freeze. A pre-acceptance audit found the request-budget
+estimate was a genuine undercount, and the suitability classification
+conflated structural chain quality with today's Quant/Risk outcome.
+Both are corrected here, on top of 009c752 -- no history rewritten.
+
+**What was built.** Corrected `expected_opportunity_scan_request_count`/
+`expected_correlation_request_count` (summed by
+`expected_tradier_request_count`) to the real worst case --
+`TradierMarketDataProvider.get_option_chain_for_expiration` costs 2
+requests per selected expiration (a redundant internal quote re-fetch
+plus the chain fetch itself), not 1; for 12 symbols/6 expirations the
+corrected logical-request worst case is 180, not 108 -- verified both
+by source reading and by instrumenting the real provider against a
+fake HTTP client. New, pure `usable_request_headroom`/
+`has_sufficient_observed_headroom` functions decide, using ONLY the
+provider's own observed `RateLimitState` (never a hardcoded plan
+figure), whether the study may begin its next batch/phase. New
+`config/universe_feasibility.yaml` section `rate_limit_safety`
+(`batch_size: 3`, `reserved_headroom_pct: 0.20`,
+`correlation_reserved_headroom_pct: 0.30`) drives conservative,
+strictly sequential batching for the option-chain phase (the first
+batch always proceeds -- nothing observed yet; every later batch
+checks observed headroom first, stopping BEFORE a batch it can't
+safely afford) and a SEPARATE, budget-checked correlation phase
+(skippable entirely or partially, after phase 1 completes or stops,
+for tickers phase 1 actually attempted). A skipped ticker is
+`SkipReason.RATE_LIMIT_HEADROOM`/`StructuralSuitability.NOT_EVALUATED`
+-- never `UNSUITABLE`, never folded into `failed_chains`. A
+`TradierRateLimitError` mid-symbol is isolated to that one symbol with
+exactly one fetch attempt at this layer -- never a second, outer
+retry on top of the provider's own. `classify_ticker_suitability` is
+replaced by two independent, observational fields:
+`classify_structural_suitability` (chain/DTE/construction facts ONLY
+-- deliberately keyed on `strategy_attempts`, never the inflated
+`construction_attempts`, as STRONG's denominator) and
+`classify_opportunity_today` (Quant/Risk/ranking/no-trade-hurdle
+progression, reusing a new per-symbol `ranked_candidates_clearing_
+hurdle` field) -- the latter never read back into the former.
+`CorrelationFeasibilitySummary` now separately reports sufficient-
+history/insufficient-history/skipped-budget tickers, the skip decided
+entirely by the orchestration layer's own pre-flight ticket subset,
+never inferred from an absence in the correlation result. Zero changes
+to `TradierMarketDataProvider`'s own semantics, retry policy, DTE
+retrieval, or canonical timestamps -- the redundant quote re-fetch
+that causes the higher true cost is deliberately left alone, flagged
+as a separate, dedicated follow-up.
+
+**What was tested.** `tests/unit/workflows/test_universe_feasibility.py`:
+54 passed (up from 19) -- corrected-formula assertions; headroom/
+bootstrap tests including "never reads a hardcoded plan allowance";
+structural/opportunity classification branch tests including the
+exact construction_attempts-vs-strategy_attempts scenario the audit
+flagged; correlation-status disjointness.
+`tests/acceptance/test_universe_feasibility_v1514.py`: 34 passed (up
+from 25) -- bootstrap-then-observed-state batching, ample-headroom
+completion, stop-before-exhaustion with NOT_EVALUATED reporting and
+zero DB mutation, correlation full-skip/partial-completion/distinct-
+status, exactly-one-fetch-attempt-per-symbol, and an instrumented-
+real-provider formula-match test. Full suite: 3933 passed (3845 + 88
+new), 6 skipped, 9 failed -- the identical known date-rot failures,
+same node IDs, same root cause. Zero new failures. `make verify-freeze`
+clean against the regenerated `PAPER_TRADING_V1.5.14` manifest.
+
+**What remains open.** Same as the original V1.5.14 entry above (item
+J deferred, 9 known date-rot failures, operator must run the first
+real study manually) plus: the redundant quote re-fetch inside
+`get_option_chain_for_expiration` (the root cause of the higher true
+request cost) remains unoptimized, by design, pending a separate,
+dedicated review since it touches shared, frozen production provider
+code the official cycle also depends on; `CorrelationSymbolStatus`
+does not separately distinguish a genuine provider failure from
+insufficient history (both collapse to `INSUFFICIENT_HISTORY`, matching
+`resolve_price_history_for_correlation`'s own existing contract),
+since separating them would require changing that shared function.

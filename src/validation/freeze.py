@@ -568,6 +568,35 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # no-trade-hurdle/ranking/sizing/market-hours/lifecycle/Tradier/
 # Fidelity/human-confirmation/PaperBroker behavior, and no part of the
 # active validation cohort/database, was touched.
+#
+# PAPER_TRADING_V1.5.14 ACCEPTANCE CORRECTION (pre-acceptance -- the
+# operator never installed the freeze this superseded): a request-
+# budget audit proved `expected_tradier_request_count` undercounted
+# the real worst case (`TradierMarketDataProvider.get_option_chain_
+# for_expiration` costs 2 requests per selected expiration, not 1 --
+# a redundant internal quote re-fetch plus the chain fetch), and that
+# the suitability classification conflated structural chain quality
+# with today's Quant/Risk outcome. Corrected: the formula (12 symbols/
+# 6 expirations is now 180, not 108, split into separately-budgeted
+# opportunity-scan/correlation phase estimates); conservative,
+# strictly sequential batching (`config/universe_feasibility.yaml`'s
+# new `rate_limit_safety` section) that decides every batch/phase
+# from ONLY the provider's own observed `RateLimitState` (never a
+# hardcoded plan allowance), stopping BEFORE a batch it can't safely
+# afford and marking the rest `NOT_EVALUATED` (never `UNSUITABLE`,
+# never folded into a market-data-failure count); a separately-
+# budgeted correlation phase distinguishing a budget skip from
+# genuine insufficient history; and a clean split of the suitability
+# classification into `StructuralSuitability` (chain/DTE/construction
+# facts only, keyed on `strategy_attempts` rather than the inflated
+# `construction_attempts`) and `OpportunityToday` (the Quant/Risk/
+# ranking/no-trade-hurdle progression, purely observational, never
+# read back into structural classification). Zero changes to
+# `TradierMarketDataProvider`'s own semantics, retry policy, DTE
+# retrieval, or canonical timestamps -- see STEP_23_14_FREEZE_REPORT
+# .md §AA for the full trace. Version intentionally stays
+# PAPER_TRADING_V1.5.14 -- this corrects, rather than supersedes with
+# a new number, a freeze the operator never accepted.
 FREEZE_NAME = "PAPER_TRADING_V1.5.14"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
 MANIFEST_VERSION = "1.5.14"
