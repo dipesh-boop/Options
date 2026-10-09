@@ -154,13 +154,25 @@ def _print_banner() -> None:
 
 
 def _print_ranked_candidate_audit(scan) -> None:
-    """PAPER_TRADING_V1.5.15, Section H observability: durably prints
+    """PAPER_TRADING_V1.5.16, Section H observability: durably prints
     (captured by whatever the operator redirects this script's own
     stdout to, the exact same convention this script's candidate-
     funnel block below already uses) every candidate the opportunity
-    scan actually ranked this cycle -- not merely the single `best`
-    one -- so an operator can answer "why did this candidate not
-    become a trade" without re-running live market data.
+    scan actually scanned/evaluated this cycle -- not merely the
+    single `best` one -- so an operator can answer "why did this
+    candidate not become a trade" without re-running live market data.
+
+    **PAPER_TRADING_V1.5.16 wording fix**: this prints `scan.scanned`
+    (every Quant-evaluated candidate this cycle, including every
+    candidate the Risk Engine rejected) -- a materially different,
+    larger population than the persisted funnel's own
+    `candidates_ranked` field (`src.workflows.candidate_funnel`),
+    which counts only the Risk-approved subset with a valid ranking
+    score. Describing `scan.scanned`/`len(scan.scanned)` as "ranked"
+    anywhere in this function's output collided with that term and
+    was corrected to "scanned"/"evaluated" console wording only --
+    the underlying data, filtering, ranking, and selection below are
+    completely unchanged.
 
     **Purely additive, read-only observation of data `scan_and_rank_
     opportunities` (`src.portfolio.opportunity_scan`, completely
@@ -194,10 +206,10 @@ def _print_ranked_candidate_audit(scan) -> None:
     if scan is None:
         return
     if not scan.scanned:
-        _line("ranked candidate audit", "no candidate reached ranking this cycle")
+        _line("candidate evaluation audit", "no candidate was scanned/evaluated this cycle")
         return
 
-    _line("ranked candidate audit -- candidates ranked this cycle", len(scan.scanned))
+    _line("candidate evaluation audit -- candidates scanned/evaluated this cycle", len(scan.scanned))
     ranked = sorted(
         scan.scanned, key=lambda c: (c.risk_adjusted_return is None, -(c.risk_adjusted_return or 0.0)),
     )
@@ -437,7 +449,7 @@ async def run_sandbox_cycle(*, now: datetime | None = None) -> bool:
         opportunity_scan=OpportunityScanConfig(
             universe=universe, chains_by_ticker=chains_by_ticker, strategies=list(strategies),
             quant_filter=quant_filter, market_regime=ops.default_market_regime,
-            broker_capabilities=broker_capabilities, proposal_id_prefix="sandbox-validation-scan",
+            broker_capabilities=broker_capabilities, proposal_id_prefix="sbx-scan",
             collect_candidate_funnel=True, evaluation_as_of=evaluation_as_of,
         ),
     )

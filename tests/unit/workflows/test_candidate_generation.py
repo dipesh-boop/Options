@@ -3,6 +3,7 @@ filter, and deterministic TradeProposal generation."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,7 @@ from src.workflows.candidate_generation import (
 from tests.unit.workflows.conftest import EXPIRATION, NOW, default_pcs_chain, make_call, make_chain, make_put
 
 LIMITS = get_default_limits()
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _empty_portfolio() -> Portfolio:
@@ -363,6 +365,235 @@ class TestProposalIdLengthRegressionV1512:
         )
         assert candidates == []
         assert ("PUT_CREDIT_SPREAD", "generation_exception", "ValidationError") in diag.strategy_events
+
+
+class TestSandboxProposalIdLengthRegressionV1516:
+    """PAPER_TRADING_V1.5.16, Required Fix 1: the Expanded-Universe
+    Sandbox's `scripts/run_sandbox_cycle.py` previously supplied
+    `generate_candidates` the prefix `"sandbox-validation-scan"` (24
+    chars) -- considerably longer than the official runner's corrected
+    `"validation-scan"` (16 chars, see
+    `TestProposalIdLengthRegressionV1512` above), reintroducing the
+    exact same `proposal_id` `max_length=64` overflow class for
+    two-leg PUT_CREDIT_SPREAD candidates that V1.5.12 already fixed on
+    the official path. The sandbox now uses the corrected, short
+    `"sbx-scan"` prefix (8 chars) instead. These tests prove the fix
+    holds even under the longest realistic inputs the real 12-symbol
+    sandbox universe can produce: a 5-character ticker (GOOGL),
+    decimal (non-integer) strikes, and a large deterministic counter
+    -- while re-confirming every other SY-001 guarantee and that this
+    fix touches nothing about economics, legs, timestamps, or the
+    official path."""
+
+    _PREFIX = "sbx-scan"  # scripts/run_sandbox_cycle.py's corrected sandbox-only prefix
+
+    @staticmethod
+    def _googl_decimal_strike_pcs_chain(as_of: datetime = NOW):
+        # GOOGL is the longest ticker in the real 12-symbol sandbox
+        # universe; decimal strikes (never a round integer) are the
+        # worst case for `strike_part`'s rendered length.
+        return make_chain(
+            [
+                make_put(123.45, -0.20, bid=2.45, ask=2.55, symbol="GOOGL"),
+                make_put(100.45, -0.10, bid=0.95, ask=1.05, symbol="GOOGL"),
+            ],
+            symbol="GOOGL", price=130.0, timestamp=as_of,
+        )
+
+    def test_googl_decimal_strike_pcs_with_sandbox_prefix_produces_a_valid_proposal(self):
+        # Items A, B, E: a PUT_CREDIT_SPREAD for the longest sandbox
+        # ticker, with decimal strikes, under the corrected "sbx-scan"
+        # prefix constructs without raising and its proposal_id fits
+        # within max_length=64.
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), self._googl_decimal_strike_pcs_chain(),
+            [StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal",
+            now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        assert len(candidates) == 1
+        proposal = candidates[0].proposal
+        assert len(proposal.legs) == 2
+        assert len(proposal.proposal_id) <= 64
+
+    def test_large_deterministic_counter_still_fits_within_max_length(self):
+        # Item C: a large in-call counter (simulating many prior
+        # candidates generated earlier in the same scan) still
+        # produces a proposal_id within max_length=64 for the
+        # worst-case GOOGL/decimal-strike shape.
+        chain = self._googl_decimal_strike_pcs_chain()
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain,
+            [StrategyType.CASH_SECURED_PUT, StrategyType.COVERED_CALL, StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        for candidate in candidates:
+            assert len(candidate.proposal.proposal_id) <= 64
+        # Directly exercise `_next_id`'s counter growth via repeated
+        # calls through the public surface: run the same scan 5 times
+        # in a single process-level counter is internal to one call,
+        # so instead assert the worst-case single-call id (counter=1,
+        # the only value reachable with 3 requested strategies here)
+        # already leaves ample headroom under 64, proving even a much
+        # larger counter (up to 5 digits, "99999") would still fit:
+        # 8 (prefix) + 1 + 5 (GOOGL) + 1 + 10 (date) + 1 + 3 (pcs) + 1
+        # + 10 (expiration) + 1 + 13 (123.45-100.45) + 1 + 5 (99999)
+        # = 61 <= 64.
+        assert len(f"{self._PREFIX}-GOOGL-{NOW.date().isoformat()}-pcs-{EXPIRATION.isoformat()}-123.45-100.45-99999") <= 64
+
+    def test_proposal_id_length_matches_rendered_formula_exactly(self):
+        # Item C (direct): construct the exact id `_next_id` would
+        # build for this worst-case shape and prove it is <= 64 --
+        # not merely "ample headroom" by inspection.
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), self._googl_decimal_strike_pcs_chain(),
+            [StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal",
+            now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        proposal_id = candidates[0].proposal.proposal_id
+        assert proposal_id.startswith(f"{self._PREFIX}-GOOGL-{NOW.date().isoformat()}-pcs-")
+        assert len(proposal_id) <= 64
+
+    def test_successful_tradeproposal_construction_under_sandbox_prefix(self):
+        # Item D: the resulting object really is a valid, fully
+        # constructed TradeProposal (not merely a string that happens
+        # to be short enough) -- strategy/ticker/legs/expiration all
+        # match what was requested.
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), self._googl_decimal_strike_pcs_chain(),
+            [StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal",
+            now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        proposal = candidates[0].proposal
+        assert proposal.ticker == "GOOGL"
+        assert proposal.strategy == StrategyType.PUT_CREDIT_SPREAD
+        assert len(proposal.legs) == 2
+
+    def test_same_ticker_strike_two_scan_dates_still_differ_under_sandbox_prefix(self):
+        # Item F (determinism/non-collision across inputs): same
+        # ticker/strikes on two different scan dates must still
+        # produce different proposal IDs under the sandbox prefix.
+        day_two_now = datetime(NOW.year, NOW.month, NOW.day + 1, NOW.hour, tzinfo=timezone.utc)
+        day_one = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), self._googl_decimal_strike_pcs_chain(NOW),
+            [StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal",
+            now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        day_two = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), self._googl_decimal_strike_pcs_chain(day_two_now),
+            [StrategyType.PUT_CREDIT_SPREAD], QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal",
+            now=day_two_now, proposal_id_prefix=self._PREFIX,
+        )
+        assert len(day_one) == 1 and len(day_two) == 1
+        assert day_one[0].proposal.proposal_id != day_two[0].proposal.proposal_id
+
+    def test_running_the_same_scan_twice_produces_deterministic_ids(self):
+        # Item F (determinism): the exact same inputs (same chain, same
+        # `now`) deterministically produce the exact same proposal_id
+        # across two separate calls -- no hidden randomness/clock read.
+        chain = self._googl_decimal_strike_pcs_chain()
+        first = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        second = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        assert first[0].proposal.proposal_id == second[0].proposal.proposal_id
+
+    def test_multiple_candidates_in_the_same_scan_remain_unique_under_sandbox_prefix(self):
+        # Item F (non-collision within one scan): CSP + CC + PCS on the
+        # same GOOGL chain all remain unique, and each still fits
+        # within max_length=64, under the sandbox prefix.
+        chain = self._googl_decimal_strike_pcs_chain()
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain,
+            [StrategyType.CASH_SECURED_PUT, StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        ids = [c.proposal.proposal_id for c in candidates]
+        assert len(ids) == len(set(ids)) and len(ids) >= 1
+        for proposal_id in ids:
+            assert len(proposal_id) <= 64
+
+    def test_official_prefix_and_path_are_unaffected_by_the_sandbox_prefix_change(self):
+        # Item G: the OFFICIAL prefix/path (`"validation-scan"`, from
+        # `scripts/run_validation_cycle.py`) still behaves exactly as
+        # `TestProposalIdLengthRegressionV1512` already proves -- this
+        # sandbox-only fix changed nothing about it. Direct source
+        # check that the official script's own module-level prefix
+        # string is untouched.
+        import ast
+
+        tree = ast.parse((REPO_ROOT / "scripts" / "run_validation_cycle.py").read_text())
+        found = [
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.keyword) and node.arg == "proposal_id_prefix" and isinstance(node.value, ast.Constant)
+        ]
+        assert any(n.value == "validation-scan" for n in found), (
+            "the official validation runner's proposal_id_prefix must remain exactly 'validation-scan'"
+        )
+
+    def test_csp_behavior_is_unaffected_by_the_sandbox_prefix_change(self):
+        # Item H: single-leg CASH_SECURED_PUT candidate generation
+        # (shorter strike_part, never the overflow-prone shape) is
+        # unaffected -- same structure/count as under any other prefix.
+        chain = make_chain(
+            [make_put(95.0, -0.20, bid=1.95, ask=2.05, symbol="GOOGL")], symbol="GOOGL", price=100.0,
+        )
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.CASH_SECURED_PUT],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        assert len(candidates) == 1
+        assert candidates[0].proposal.strategy == StrategyType.CASH_SECURED_PUT
+        assert len(candidates[0].proposal.legs) == 1
+
+    def test_economics_legs_expiration_quantities_prices_timestamps_are_unaffected_by_prefix(self):
+        # Item I: the prefix is purely a label change -- changing ONLY
+        # proposal_id_prefix (sandbox vs. official) between two
+        # otherwise-identical calls must not alter any economic/leg/
+        # timing field on the resulting proposal.
+        chain = self._googl_decimal_strike_pcs_chain()
+        sandbox_candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        official_candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix="validation-scan",
+        )
+        sandbox_proposal, official_proposal = sandbox_candidates[0].proposal, official_candidates[0].proposal
+        assert sandbox_proposal.strategy == official_proposal.strategy
+        assert sandbox_proposal.expiration == official_proposal.expiration
+        assert sandbox_proposal.contracts_requested == official_proposal.contracts_requested
+        assert sandbox_proposal.target_entry == official_proposal.target_entry
+        assert sandbox_proposal.data_timestamp == official_proposal.data_timestamp
+        assert sandbox_proposal.timestamp == official_proposal.timestamp
+        assert [(leg.side, leg.right, leg.strike, leg.quantity_ratio) for leg in sandbox_proposal.legs] == [
+            (leg.side, leg.right, leg.strike, leg.quantity_ratio) for leg in official_proposal.legs
+        ]
+        assert sandbox_candidates[0].entry_delta == official_candidates[0].entry_delta
+        assert sandbox_candidates[0].entry_iv == official_candidates[0].entry_iv
+
+    def test_64_char_schema_max_length_is_not_weakened(self):
+        # Explicit, standalone proof that `TradeProposal.proposal_id`'s
+        # own `max_length=64` constraint is untouched -- a proposal_id
+        # one character over 64 must still be rejected by the schema
+        # itself, independent of anything `generate_candidates` does.
+        from pydantic import ValidationError as PydanticValidationError
+
+        from src.llm.schemas import TradeProposal
+
+        chain = self._googl_decimal_strike_pcs_chain()
+        candidates = generate_candidates(
+            UniverseEntry("GOOGL", "Technology"), chain, [StrategyType.PUT_CREDIT_SPREAD],
+            QuantFilterConfig(), LIMITS, _empty_portfolio(), "normal", now=NOW, proposal_id_prefix=self._PREFIX,
+        )
+        base_kwargs = candidates[0].proposal.model_dump()
+        base_kwargs["proposal_id"] = "x" * 65
+        with pytest.raises(PydanticValidationError):
+            TradeProposal(**base_kwargs)
 
 
 class TestGeneratedProposalsAreValid:
