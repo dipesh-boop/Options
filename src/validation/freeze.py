@@ -612,9 +612,45 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # drift anywhere outside the new sandbox files and the mechanical
 # `cycle_helpers.py` extraction (itself a pure, regression-tested move
 # of existing logic, not a behavior change).
-FREEZE_NAME = "PAPER_TRADING_V1.5.15"
+#
+# PAPER_TRADING_V1.5.16: a tightly-scoped, sandbox-only corrective
+# release fixing two findings from the sandbox's first real cycle
+# (`sandbox-validation-2026-10-09`), and nothing else. Fix 1:
+# `scripts/run_sandbox_cycle.py`'s `proposal_id_prefix` changes from
+# `"sandbox-validation-scan"` (24 chars) to `"sbx-scan"` (8 chars),
+# removing the same `TradeProposal.proposal_id` `max_length=64`
+# overflow risk for two-leg PUT_CREDIT_SPREAD candidates that
+# PAPER_TRADING_V1.5.12 already fixed on the official
+# `"validation-scan"` path -- the official prefix, path, and every
+# other proposal/cycle/cohort/account/manifest/experiment-version ID
+# are untouched. Fix 2: that same script's `_print_ranked_candidate_
+# audit` console heading no longer describes `scan.scanned` (every
+# Quant-evaluated candidate, Risk-rejected ones included) as "ranked"
+# -- it now reads "candidate evaluation audit -- candidates scanned/
+# evaluated this cycle", so it no longer collides with the persisted
+# funnel's own, materially smaller `candidates_ranked` field
+# (`src.workflows.candidate_funnel`). Label/observability fix only --
+# `scan.scanned`, survivor/Risk filtering, ranking, `scan.best`,
+# candidate persistence, and human-review behavior are byte-for-byte
+# unchanged, and this freeze manifest shows no drift anywhere outside
+# the sandbox-only `run_sandbox_cycle.py` file (not itself part of
+# this manifest's hashed set -- see the PAPER_TRADING_V1.5.15 comment
+# above). The sandbox cohort's `status="created"` after its first
+# cycle is documented as a known LOW-severity reporting/metadata item
+# for possible future work and is deliberately NOT changed here -- no
+# `CohortRecord` semantic change, no `created`->`active` transition.
+# `SANDBOX_SOFTWARE_FREEZE_VERSION` (`src.portfolio.sandbox_identity`)
+# is deliberately left at `"PAPER_TRADING_V1.5.15"`: `Experiment
+# Version.version_id` hashes only three config files, a version-label
+# string, a market-data-provider descriptor, and a risk-data-wiring
+# boolean -- never source code -- so this code-only fix changes
+# nothing the sandbox experiment's own identity architecture requires
+# a new hash for. The October 9 sandbox cycle and its persisted
+# records are untouched; no cohort was reinitialized, reset, or
+# replaced. See STEP_23_16_FREEZE_REPORT.md for the full trace.
+FREEZE_NAME = "PAPER_TRADING_V1.5.16"
 MANIFEST_FILENAME = "VALIDATION_MANIFEST.json"
-MANIFEST_VERSION = "1.5.15"
+MANIFEST_VERSION = "1.5.16"
 
 _CONFIG_DIR = REPO_ROOT / "config"
 _AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

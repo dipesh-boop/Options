@@ -7189,3 +7189,84 @@ durable table -- a deliberate, narrower choice flagged explicitly
 rather than risk a shared-architecture change to the official cycle's
 own persistence shape. A dashboard view for the sandbox was not built
 (CLI-only, per this release's own scope).
+
+## PAPER_TRADING_V1.5.16 (Step 23.16) -- sandbox corrective release
+
+A tightly-scoped, sandbox-only corrective release fixing exactly two
+findings from the read-only architecture audit of the sandbox's first
+real cycle (`sandbox-validation-2026-10-09`), and nothing else -- no
+trading-experiment, candidate-economics, Quant, Risk, sizing,
+eligibility, or market-data behavior changed anywhere.
+
+**Fix 1 (proposal_id overflow risk).** `scripts/run_sandbox_cycle.py`'s
+`proposal_id_prefix` changed from `"sandbox-validation-scan"` (24
+chars) to `"sbx-scan"` (8 chars) -- the same `TradeProposal.proposal_id`
+`max_length=64` overflow class PAPER_TRADING_V1.5.12 already fixed on
+the official `"validation-scan"` path, reintroduced on the sandbox-only
+path by its longer prefix, and most overflow-prone for two-leg
+PUT_CREDIT_SPREAD candidates (longer `strike_part`). One line changed.
+The official prefix/path, `TradeProposal.proposal_id`'s schema
+constraint, `_next_id`'s own uniqueness mechanism, and every other
+candidate/cycle/cohort/account/manifest/experiment-version ID are
+untouched. 11 new regression tests
+(`TestSandboxProposalIdLengthRegressionV1516` in
+`tests/unit/workflows/test_candidate_generation.py`): worst-case GOOGL/
+decimal-strike/large-counter length (61 <= 64, computed exactly);
+successful `TradeProposal` construction; determinism; non-collision
+across scan dates and within one scan; official prefix/path confirmed
+unchanged via direct AST read of `scripts/run_validation_cycle.py`;
+single-leg CSP unaffected; economics/legs/expiration/quantities/
+timestamps identical between sandbox- and official-prefixed calls
+against the same chain; and the schema's own `max_length=64` proven
+NOT weakened.
+
+**Fix 2 (misleading console label).** That same script's
+`_print_ranked_candidate_audit` no longer describes `scan.scanned`
+(every Quant-evaluated candidate, Risk-rejected ones included) as
+"ranked" -- it now prints "candidate evaluation audit -- candidates
+scanned/evaluated this cycle", removing the collision with the
+persisted funnel's own, materially smaller `candidates_ranked` field
+(`src.workflows.candidate_funnel`) that produced the Oct 9 cycle's
+observed 21-vs-10 discrepancy. Every per-candidate diagnostic line
+(Quant result, Risk decision/reason, ranking metric, SELECTED marker)
+is unchanged; `scan.scanned`, survivor/Risk filtering, ranking,
+`scan.best`, candidate persistence, and human-review behavior were not
+touched -- `opportunity_scan.py` and `candidate_funnel.py` were not
+modified. 8 new regression tests
+(`tests/unit/workflows/test_sandbox_console_audit_v1516.py`), built
+against a REAL mixed scan (one Risk-approved, one Risk-rejected
+candidate, never hand-set `risk_decision` fields): a Risk-rejected
+candidate may appear in the printed audit; it is excluded from
+`candidates_ranked`; it can never become `scan.best`; it can never be
+persisted for review (proven by direct source inspection that
+`ReviewedCandidate` is constructed only from `scan.best`); the console
+heading never says "ranked"/"candidates ranked" and does say
+"candidate evaluation audit"/"scanned/evaluated"; and all six named
+funnel fields (`candidates_generated`/`quant_passed`/`risk_passed`/
+`candidates_ranked`/`candidates_selected`/
+`candidates_persisted_for_review`) keep their pre-existing meaning.
+
+**Deliberately NOT fixed.** The sandbox cohort's `status="created"`
+after a successful cycle (write-once-at-init, read-only-for-display,
+shared identically with the official cohort's own `CohortRecord`) is
+documented as a known LOW-severity reporting/metadata item for
+possible future work -- no `CohortRecord` semantic change, no
+`created`->`active` transition logic added.
+
+**Identity.** `SANDBOX_SOFTWARE_FREEZE_VERSION` is deliberately left
+at `"PAPER_TRADING_V1.5.15"`: `compute_experiment_version_id` hashes
+only three config files, a version-label string, a market-data-
+provider descriptor, and a boolean -- never source code -- so this
+code-only release requires no new experiment-version hash. No sandbox
+cohort was reinitialized, reset, or replaced; the October 9 cycle and
+its persisted records are untouched.
+
+Full suite: 3989 passed (3970 + 19 new), 6 skipped, 9 failed -- the
+identical known date-rot failures, same node IDs, zero new failures.
+`make verify-freeze` clean against the regenerated
+`PAPER_TRADING_V1.5.16` manifest -- diff confined to version metadata
+(`manifest_version`/`freeze_name`/`freeze_timestamp`/`git_commit`/
+`repository_state`/`freeze_version`/`manifest_hash`); every one of the
+~45 hashed module/config/prompt/safety fields is byte-identical to
+PAPER_TRADING_V1.5.15's manifest. See `STEP_23_16_FREEZE_REPORT.md`
+for the full trace.
